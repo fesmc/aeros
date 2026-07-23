@@ -1,0 +1,48 @@
+# b1 multi-resolution error diagnosis -- summary
+stage = "b1"
+trunc_hi = 85
+trunc_lo = 31
+nlev = 8
+spinup_days = 200
+mean_days = 360
+sigma_level = 0.4375
+approx_pressure_hPa = 437.5
+nsteps_hi = 34560
+nsteps_lo = 12960
+common_grid = "FullGaussianGrid nlat_half=24 (96x48)"
+
+[geopotential_height_stationary_wave]  # metres
+rms_Zstar_hi = 441.898
+rms_Zstar_lo = 402.97
+rms_dZstar   = 121.085
+ratio_dZstar_over_Zstar_hi = 0.274
+rms_dZstar_NH = 134.168
+ratio_dZstar_over_Zstar_hi_NH = 0.2655
+rms_dZ_fullfield = 127.41
+
+[temperature_stationary_wave]  # kelvin
+rms_Tstar_hi = 2.0652
+rms_Tstar_lo = 1.8915
+rms_dTstar   = 0.9352
+ratio_dTstar_over_Tstar_hi = 0.4529
+rms_dT_fullfield = 1.9529
+
+[zonal_wind_stationary_wave]  # m/s
+rms_Ustar_hi = 2.7479
+rms_Ustar_lo = 2.933
+rms_dUstar   = 2.1701
+ratio_dUstar_over_Ustar_hi = 0.7897
+rms_dU_fullfield = 3.4511
+
+[dZstar_max]  # single largest |resolution error| in Z*
+lon = 86.25
+lat = 31.54
+value_m = 1185.86
+
+[[dZstar_top_maxima]]  # (lon, lat, value_m), de-duplicated features
+point = [86.2, 31.5, 1185.86]
+point = [292.5, -20.4, 881.69]
+point = [322.5, 72.4, 743.42]
+point = [26.2, -68.7, -515.81]
+point = [183.8, -79.8, -508.25]
+point = [258.8, 20.4, 486.07]

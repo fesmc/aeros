@@ -1,0 +1,10 @@
+&bench
+    lmax  = 31
+    nlat  = 48
+    nphi  = 96
+    nlev  = 16
+    dt    = 1800.0
+    nstep = 100
+    nwarm = 10
+    label = "T31L16"
+/

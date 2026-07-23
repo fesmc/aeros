@@ -1,0 +1,8 @@
+# runme project config for the aeros MWM harness (throwaway).
+hpc = "awi_albedo"
+account = "envi.p_forclima"
+jobname = "aeros_mwm"
+omp = 0
+mem = -1
+email = ""
+mail_type = ["FAIL"]

@@ -1,0 +1,18 @@
+### OMP Specific settings ###
+
+#SBATCH --nodes=1
+#SBATCH --tasks-per-node=1
+#SBATCH --cpus-per-task=<OMP>
+#SBATCH --no-requeue
+
+export OMP_PROC_BIND=true           # pin threads to cores (clean scaling measurement)
+export OMP_PLACES=cores
+export OMP_NUM_THREADS=<OMP>
+export OMP_MAX_ACTIVE_LEVELS=1
+export OMP_STACKSIZE=512M
+
+# srun also needs to know cpus-per-task
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export SRUN_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK
+
+### DONE OMP Specific settings ###

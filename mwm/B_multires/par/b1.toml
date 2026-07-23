@@ -1,0 +1,15 @@
+# b1 multi-resolution error diagnosis -- PRODUCTION config.
+# Run on a compute node via runme (exe alias "speedy"). NOT on the login node.
+stage = "b1"
+
+trunc_hi = 85        # high-resolution reference (T85; L&L build LGM ice at this res)
+trunc_lo = 31        # cheap transient truncation (T31; does NOT build LGM ice sheets)
+nlev     = 8         # identical vertical config at both resolutions
+
+# ~500 hPa: the sigma level nearest this value is used (nlev=8 -> sigma=0.438, ~440 hPa)
+target_sigma = 0.5
+
+spinup_days = 200    # reach statistical equilibrium of the stationary-wave field
+mean_days   = 360    # accumulate a full-year time mean (removes seasonal aliasing)
+
+output_dir = "output"
