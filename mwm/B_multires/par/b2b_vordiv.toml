@@ -1,0 +1,22 @@
+# b2 APPROACH B -- SELECTED-TERMS variant: correct ONLY vorticity + divergence.
+# §3.7 "correct selected terms, not everything". Approach A degraded T*/U* while
+# helping Z*; restricting the correction to the dynamical (stationary-wave) part
+# tests whether that degradation is avoided. temp/humid/pres evolve freely both in
+# the nudged diagnosis and in the free T31+<N> run. Compute node only.
+stage = "b2b"
+
+trunc_hi = 85
+trunc_lo = 31
+nlev     = 8
+
+target_sigma = 0.5
+
+spinup_days = 200
+mean_days   = 360
+
+nudge_tau_hours = 6.0
+
+# correct ONLY vorticity + divergence (the stationary-wave / dynamical part)
+correct_fields = ["vor", "div"]
+
+output_dir = "output_b2b_vordiv"

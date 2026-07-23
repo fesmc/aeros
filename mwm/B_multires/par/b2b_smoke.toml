@@ -1,0 +1,23 @@
+# b2 approach B smoke test -- tiny + short, for login-node pipeline validation ONLY.
+# Not scientifically meaningful; validates the whole b2b pipeline end-to-end:
+# T85-analog run, NUDGED diagnosis of <N>, nudged-mean-vs-X85 check, injection
+# verification, free T31+<N> run, three-way diagnostics (vs approach A), NetCDF +
+# summary + PNGs. Key validation: the nudging VISIBLY constrains the state
+# (nudged_mean_match rel_rms for corrected fields should be small).
+stage = "b2b"
+
+trunc_hi = 42
+trunc_lo = 21
+nlev     = 6
+
+target_sigma = 0.5
+
+spinup_days = 2
+mean_days   = 3
+
+# short tau so the constraint is visible over the tiny 2-day spinup
+nudge_tau_hours = 6.0
+
+correct_fields = ["vor", "div", "temp", "humid", "pres"]
+
+output_dir = "output_b2b_smoke"

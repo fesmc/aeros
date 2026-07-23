@@ -1,0 +1,27 @@
+# b2 APPROACH B -- nudging-derived constant forcing <N> -- PRODUCTION config.
+# Correct ALL prognostic fields. Run on a compute node via runme (run_speedy_b2b.sh),
+# NOT on the login node (production T85 is the cost driver). Four integrations:
+# T85 reference, T31 nudged diagnosis (for <N>), bare T31, and free T31+<N>.
+stage = "b2b"
+
+trunc_hi = 85        # high-resolution reference (T85), coarse-grained to T31 = target X85
+trunc_lo = 31        # cheap transient truncation; gets the <N> correction
+nlev     = 8         # identical vertical config at both resolutions (matches b2)
+
+# ~500 hPa: the sigma level nearest this value is used (nlev=8 -> sigma=0.4375, ~438 hPa)
+target_sigma = 0.5
+
+spinup_days = 200    # matches b2
+mean_days   = 360    # full-year time mean (matches b2)
+
+# tau: nudging timescale [hours]. 6 h is the standard CAPT choice -- strong enough to
+# hold the state near X85 (T31 dt ~ 40 min, so tau ~ 9 steps) while still averaging
+# over the transient eddy field so <N> captures transient rectification. Too small
+# over-constrains (<N> absorbs real dynamics); too large fails to hold the state and
+# <N> degenerates toward approach A's single-eval forcing. Swept via this key.
+nudge_tau_hours = 6.0
+
+# correct ALL prognostic fields (the full-field analogue of approach A)
+correct_fields = ["vor", "div", "temp", "humid", "pres"]
+
+output_dir = "output_b2b"
