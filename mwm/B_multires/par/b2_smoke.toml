@@ -1,0 +1,16 @@
+# b2 smoke test -- tiny + short, for login-node pipeline validation ONLY.
+# Not scientifically meaningful; validates the whole b2 pipeline end-to-end:
+# T85-analog run, ΔF diagnosis, forcing-injection verification, T31+ΔF run,
+# three-way diagnostics, NetCDF + summary + PNGs.
+stage = "b2"
+
+trunc_hi = 42
+trunc_lo = 21
+nlev     = 6
+
+target_sigma = 0.5
+
+spinup_days = 2
+mean_days   = 3
+
+output_dir = "output_b2_smoke"

@@ -1,0 +1,17 @@
+# b2 multi-resolution error CORRECTION test -- PRODUCTION config.
+# Run on a compute node via runme (run_speedy_b2.sh). NOT on the login node
+# (production T85 is the cost driver). Three integrations: T85 reference, bare
+# T31, and T31+ΔF, each spinup_days + mean_days, plus the ΔF diagnosis.
+stage = "b2"
+
+trunc_hi = 85        # high-resolution reference (T85), coarse-grained to T31 = target X85
+trunc_lo = 31        # cheap transient truncation; gets the ΔF correction
+nlev     = 8         # identical vertical config at both resolutions (matches b1)
+
+# ~500 hPa: the sigma level nearest this value is used (nlev=8 -> sigma=0.4375, ~440 hPa)
+target_sigma = 0.5
+
+spinup_days = 200    # reach statistical equilibrium of the stationary-wave field (matches b1)
+mean_days   = 360    # accumulate a full-year time mean (removes seasonal aliasing, matches b1)
+
+output_dir = "output_b2"

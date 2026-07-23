@@ -149,3 +149,131 @@ summary + 3 PNGs written. RMS Z\* ≈ 427 m (hi), ΔZ\* ≈ 118 m, ratio ≈ 0.2
 Even un-equilibrated, the ΔZ\* maxima already concentrate over the expected
 orography — Tibet (~84°E, 41°N), the Rockies (~247°E, 41°N) and Greenland
 (~321°E, 69°N) — the design-relevant signature.
+
+---
+
+# Stage b2 — multi-resolution error CORRECTION test
+
+b1 established that a well-defined resolution error ΔF *exists* (ΔZ\* ≈ 27% of the
+T85 stationary-wave signal, coherent over orography). **b2 tests the actual §3.7
+assumption: does injecting ΔF back into T31 as a constant additive forcing make
+T31 reproduce T85's stationary waves?**
+
+b2 is built as NEW files; b1 (`b1_probe.jl`, `run_speedy.sh`, `plot_b1.jl`,
+`par/b1*.toml`) is left untouched.
+
+## The §3.7 formulation implemented (approach A — faithful first cut)
+
+§3.7 is explicit: *"diagnose the model-error operator, do not nudge toward a
+state."* So the correction is a **constant additive forcing on the prognostic
+tendencies**, not a relaxation toward a target state.
+
+1. **Run T85** (identical prescribed BCs as b1: `SeasonalOceanClimatology` +
+   `PrescribedSeaIce`, default `EarthOrography`/`EarthLandSeaMask`, same `nlev`),
+   spin up, then accumulate the **time-mean of the full prognostic spectral
+   state** (vorticity, divergence, temperature, humidity, log-surface-pressure —
+   all levels, spectral coefficients). Coarse-grain (spectral-truncate) that mean
+   to T31 → **X85** (the target, expressed as a T31-resolution spectral state).
+2. **Diagnose ΔF = −RHS_T31(X85):** set a T31 model to X85 and evaluate the
+   **dynamical-core tendency once** (`dynamics_tendencies!`). X85 is not T31's own
+   equilibrium, so this tendency is nonzero; the constant forcing that makes X85 a
+   fixed point of the T31 core is its negative.
+3. **Inject ΔF** into a T31 run via a custom `AbstractForcing`
+   (`ConstantTendencyForcing`, see `b_common.jl`), which adds the precomputed
+   constant ΔF onto the tendencies every timestep. Run **T31+ΔF** with the same
+   spinup/mean protocol as bare T31.
+4. **Test reproduction.** Compute the stationary waves Z\*(~500 hPa), T\*, U\* for
+   **X85 target**, **bare T31**, **T31+ΔF** (all three from their mean spectral
+   states, diagnosed identically), and report the **fractional RMS error
+   reduction** `(RMS(bare−target) − RMS(corr−target)) / RMS(bare−target)`.
+5. **Conservation check** (§3.7 risk 2): area-weighted global mean of each ΔF
+   field (should be ~zero-mean).
+
+### SpeedyWeather v0.21.1 API hooks used
+
+- **Reading the tendency at a prescribed state**: `set!` the prognostic spectral
+  state on both leapfrog steps, `reset_tendencies!`, `transform!(vars, lf, model)`
+  (spectral→grid diagnostics, incl. geopotential inside `dynamics_tendencies!`),
+  then `dynamics_tendencies!(vars, lf, model)` and read
+  `vars.tendencies.{vorticity,divergence,temperature,humidity,pressure}`.
+- **Injecting constant forcing**: a custom `<: SpeedyWeather.AbstractForcing` with
+  a `forcing!(vars, forcing, lf, model)` method, passed as `forcing=` to
+  `PrimitiveWetModel`. **Injection point matters** (verified against the source):
+  the model builds the spectral vor/div/pres tendencies by *accumulating*
+  (`add=true`), so those ΔF are added in **spectral** space; but the temperature
+  and humidity spectral tendencies are *overwritten* by a grid→spectral transform
+  of the grid tendency (`temperature_tendency!`, `humidity_tendency!`), so those
+  ΔF must be injected into the **grid-space** tendency
+  (`vars.tendencies.grid.{temperature,humidity}`), the same path `HeldSuarez`
+  uses. `ConstantTendencyForcing` stores `dtemp_grid/dhumid_grid =
+  transform(−RHS)` for exactly this reason.
+- **Scaling**: SpeedyWeather radius-scales vorticity/divergence during a run
+  (`scale = radius`); the mean state is accumulated, X85 set, and ΔF diagnosed all
+  in that same scaled representation (radius is identical at both truncations), so
+  the scaling cancels and ΔF is injected in the units the leapfrog integrates.
+
+### Injection-applied verification (guards against a silent null result)
+
+Before trusting the climate result, b2 confirms the forcing is actually applied:
+it evaluates the **forced** dynamical-core tendency at X85 and checks it is ≈ 0
+(X85 becomes a fixed point of the forced core). Smoke-test residual fractions
+`max|forced| / max|baseline|`: **vor 0.0, div 5e-4, temp ~2e-6, humid ~2e-7,
+pres 0.0** — i.e. ΔF cancels −RHS to Float32 round-off (the div residual is
+round-off through the `∇²` of the large geopotential in `bernoulli_potential!`).
+A forcing that silently was not applied would leave `residual_frac ≈ 1`.
+
+## Files (b2)
+
+- `b_common.jl`     — shared machinery: `SpectralMeanAccumulator` (full-state
+  time-mean callback), `ConstantTendencyForcing` (+ `forcing!`), `set_state!` /
+  `eval_dynamics!`, coarse-graining, and diagnostic helpers. `include`d by b2;
+  does **not** touch b1.
+- `b2_probe.jl`     — b2 driver (reads config `ARGS[1]`).
+- `plot_b2.jl`      — CairoMakie maps (Z\* target/bare/corr triptych; Z\*, T\*, U\*
+  residual maps), standalone → `output_b2/`.
+- `run_speedy_b2.sh`— runme wrapper (resolves config to ABSOLUTE **before** `cd`,
+  absolute `--project`, `JULIA_NUM_THREADS` from SLURM). Analogous to
+  `run_speedy.sh`. (To wire into runme, add a `speedy_b2` exe alias pointing here;
+  `.runme/` was intentionally left untouched.)
+- `par/b2.toml`     — production (T85/T31, nlev=8, 200+360 days).
+- `par/b2_smoke.toml` — smoke (T42/T21, nlev=6, 2+3 days) → `output_b2_smoke/`.
+- `output_b2/`      — production outputs (`b2_fields.nc`, `b2_summary.toml`, PNGs).
+
+## Running
+
+```bash
+# smoke (login node, tiny — validates the whole pipeline incl. injection check):
+julia --project=. b2_probe.jl par/b2_smoke.toml
+
+# production (compute node — do NOT run T85 on the login node): three integrations
+# (T85 reference, bare T31, T31+ΔF) + ΔF diagnosis, via run_speedy_b2.sh.
+```
+
+## Caveats (documented honestly in `b2_summary.toml`)
+
+- **Single-tendency-at-mean-state neglects transient rectification.** The
+  instantaneous RHS at the time-mean state ≠ the time-mean RHS, because of the
+  nonlinear eddy terms. If T31+ΔF does not fully reproduce the target, this is the
+  leading candidate — and a partial result is itself informative: it says the
+  constant-forcing-from-a-single-eval approximation is insufficient and the
+  iterated / mean-tendency version is the next step.
+- **ΔF is the dynamical-core tendency error** (`dynamics_tendencies!`). Physics
+  parameterizations respond freely each step and are not part of ΔF, so any
+  residual physics tendency at X85 also limits reproduction. This is aligned with
+  §3.7's "correct selected terms, not everything," but is a deliberate scope
+  choice to record.
+- **Full-field correction** (all of vor/div/T/humid/lnps), not §3.7's later
+  "selected terms" refinement.
+- Same b1 confounds: resolution-dependent hyperdiffusion + timestep, interactive
+  land; ΔF conflates genuine dynamical resolution error with resolution numerics.
+- **SpeedyWeather ≠ aeros** → suggestive, not conclusive.
+
+## Smoke-test result (T42/T21, NOT scientific)
+
+Pipeline validated end-to-end: T85-analog run, ΔF diagnosis, **injection verified
+applied** (see above), bare-T31 and T31+ΔF runs, three-way diagnostics, NetCDF +
+`b2_summary.toml` + PNGs all written. Conservation of ΔF is ~zero-mean
+(`|mean|/RMS`: temp 0.006, humid 0.013, vor/div/pres 0). The error-**reduction**
+numbers at smoke scale are negative (correction "worsens" the field) purely
+because a 2-day spinup / 3-day mean at T42/T21 is nowhere near equilibrium — not a
+scientific result. The production config (200+360 days, T85/T31) is the real test.

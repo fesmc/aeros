@@ -6,7 +6,8 @@
     "exe_aliases" :
         {   "bench"         : "A_scaling/bin/aeros_bench.x",
             "bench_batched" : "A_scaling/bin/aeros_bench_batched.x",
-            "speedy"        : "B_multires/run_speedy.sh"
+            "speedy"        : "B_multires/run_speedy.sh",
+            "speedy_b2"     : "B_multires/run_speedy_b2.sh"
         },
 
     "grp_aliases" : {},
