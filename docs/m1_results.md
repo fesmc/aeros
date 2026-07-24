@@ -253,8 +253,11 @@ aeros' real core out to 10 threads, though N_eff ≈ 3–4.3 still falls far sho
 of the ~24 §3.6 wants.
 
 `docs/M1_scope.md` also lists a **pluggable tendency-correction framework** as
-an M1 deliverable (its "definition of done"). **That was not built here** — M1.1
-through M1.5 built and validated the core. See the handoff notes.
+an M1 deliverable (its "definition of done"). It was not built here — M1.1
+through M1.5 built and validated the core — and has since been built at M2:
+`src/dynamics/aeros_correction.f90`, applied at the spectral seam, carrying a
+no-op term validated to change nothing bit for bit. See
+[`m2_results.md`](m2_results.md) §7.
 
 ### 6.1 Carried forward from M0a
 

@@ -151,6 +151,9 @@ module aeros_timestep
     use aeros_semiimp,  only : aeros_semiimp_class, aeros_semiimp_init, &
                                 aeros_semiimp_end, aeros_semiimp_set_step, &
                                 aeros_semiimp_step, aeros_semiimp_print
+    use aeros_correction, only : aeros_correction_class, aeros_correction_init, &
+                                aeros_correction_load, aeros_correction_end, &
+                                aeros_correction_apply, aeros_correction_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
 
@@ -182,6 +185,13 @@ module aeros_timestep
         ! Idealized forcing (M1.5). At M2 this becomes a physics driver with
         ! several components; the seam it is applied at does not change.
         type(aeros_hs_class)      :: hs
+
+        ! The additive tendency correction (design.md 3.7, 3.8). A DIFFERENT
+        ! seam from `hs` above -- spectral, not grid -- and the reason is in
+        ! aeros_correction's header. Disabled unless a namelist says otherwise,
+        ! so every test and every driver that does not ask for it gets the
+        ! uncorrected model bit for bit.
+        type(aeros_correction_class) :: cor
 
         ! [ l(l+1) / lmax(lmax+1) ]^(ndiff/2), precomputed per degree. The
         ! step-dependent part is one multiply, so this never needs rebuilding.
@@ -230,8 +240,15 @@ module aeros_timestep
 
 contains
 
-    subroutine aeros_timestep_init(ts, par, pool, grd, vg)
+    subroutine aeros_timestep_init(ts, par, pool, grd, vg, filename)
         ! Allocate the time levels and the scratch, and build the solve.
+        !
+        ! `filename` is optional and only the correction layer needs it: its
+        ! configuration is a namelist group of its own rather than a handful of
+        ! scalars in aeros_param_class, because a term carries per-field and
+        ! per-scale selectors and there may be several. Omitting it leaves the
+        ! correction empty and disabled, which is what the acceptance tests
+        ! want -- they measure the bare integrator.
 
         implicit none
 
@@ -240,6 +257,7 @@ contains
         type(aeros_sht_pool_class), intent(in)    :: pool
         type(aeros_grid_class),     intent(in)    :: grd
         type(aeros_vgrid_class),    intent(in)    :: vg
+        character(len=*), intent(in), optional    :: filename
 
         integer  :: nlm, lmax, l
         real(wp) :: lref
@@ -298,6 +316,12 @@ contains
 
         call aeros_hs_init(ts%hs, grd, par%held_suarez)
 
+        if (present(filename)) then
+            call aeros_correction_load(ts%cor, filename, pool%sht(1), vg%nlev)
+        else
+            call aeros_correction_init(ts%cor, pool%sht(1), vg%nlev)
+        end if
+
         allocate(ts%dratio(0:lmax))
         lref = real(lmax*(lmax+1), wp)
         do l = 0, lmax
@@ -348,6 +372,7 @@ contains
         call aeros_work_end(ts%wrk)
         call aeros_semiimp_end(ts%si)
         call aeros_hs_end(ts%hs)
+        call aeros_correction_end(ts%cor)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
         if (allocated(ts%ps_fix)) deallocate(ts%ps_fix)
@@ -406,6 +431,12 @@ contains
         if (ts%hs%enabled) call aeros_hs_apply(ts%hs, vg, ts%wrk)
 
         call aeros_tendency_spectral(pool, vg, ts%wrk, ts%tnd)
+
+        ! The additive correction, on the assembled spectral tendency. Not at
+        ! the grid seam with the physics above: see aeros_correction's header.
+        ! Returns immediately when disabled, so the `DeltaF = 0` twin is
+        ! bit-exact rather than approximately equal.
+        call aeros_correction_apply(ts%cor, ts%tnd)
 
         ! === 2. Advance ======================================================
         !
@@ -735,6 +766,7 @@ contains
 
         call aeros_semiimp_print(ts%si, iou)
         call aeros_hs_print(ts%hs, iou)
+        call aeros_correction_report(ts%cor, iou)
 
         return
 

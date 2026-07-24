@@ -187,3 +187,69 @@ So the cumulative figure is worth watching (a fixer whose workload grows is
 covering for something) and worthless as a drift measurement. Measuring the
 drift needs an unfixed twin run — the same discipline design.md §3.8 already
 requires of the correction terms, arrived at here for an unrelated reason.
+
+## 7. The tendency-correction framework
+
+`docs/M1_scope.md` lists a "first-class, pluggable correction framework" in its
+definition of done, and `m1_results.md` §6.0 recorded that it had not been
+built. It is now (`src/dynamics/aeros_correction.f90`), carrying a validated
+no-op term.
+
+**The seam is spectral, not the grid seam the physics uses.** That is a
+deliberate split rather than a convenience. Physics must be applied on the grid
+because it is nonlinear in the state — a horizontally varying drag does not
+commute with the curl, so `−k_v·v` is not `−k_v·ζ` and `−k_v·D`. A correction
+is a different object: additive and linear, so it commutes with everything, and
+applying it spectrally is free of that constraint. What that buys:
+
+1. **The scale selector costs nothing.** §3.7 wants the correction applied only
+   at large scales, and `B2B_OUTCOME.md` lists spectral filtering as the first
+   mitigation for the instability its whole-field version hit. Spectrally that
+   is a mask on total wavenumber; in grid space it would be a transform
+   round-trip per field per step.
+2. Correction and physics stay independently switchable — different claims
+   about the model, so they should not share a seam.
+3. It matches how `ΔF` is diagnosed: a coarse-grained difference of two models'
+   tendencies (§3.7 step 4).
+
+The cost, stated plainly: a correction that genuinely had to be nonlinear in
+grid space could not use this path. Neither §3.7 nor §3.8 describes one.
+
+**Units.** Correction terms are stored in the same units as the tendency they
+are added to, with no scaling factor: `vor`, `div` [s⁻²], `temp` [K s⁻¹],
+`lnps` [s⁻¹]. This is aeros' analogue of the convention `mwm/B_multires` had to
+recover from SpeedyWeather's source, where spectral vor/div needed ×R², pres
+×R¹, and grid temp/humid physical units — and getting it wrong produced a
+silently wrong-magnitude correction. aeros carries unscaled physical tendencies
+throughout, so the convention is "no convention", which is worth writing down
+precisely because the last model needed a page for its own.
+
+**What the tests establish** (`tests/test_correction.f90`, ten checks):
+
+- the `ΔF = 0` twin is **bit-exact** over a 20-step integration with a term
+  that is enabled *and filled* — so the switch is consulted before the addition
+  and not merely per-term;
+- a registered but unfilled term is **inert to the last bit** over the same
+  integration, which is what separates "the plumbing is in" from "a correction
+  is being applied";
+- a filled term adds exactly what it holds, asserted as `result == ref + corr`
+  rather than `result − ref − corr == 0` (the latter is a claim about
+  floating-point reversibility, not about the code, and fails at ~10⁻²¹ purely
+  from the magnitude ratio);
+- the scale selector cuts exactly at `lcut`, checked in **both** directions —
+  168 coefficients corrected and 1856 untouched at T21 with `lcut = 5` — since
+  a selector that silently passed everything would look like a working
+  correction;
+- per-field selection leaves the unselected fields exactly as the dynamics left
+  them.
+
+**What is deliberately not here.** Diagnosing `ΔF` is M2b — it needs two
+truncations under identical boundary conditions and a coarse-graining operator,
+none of which exists yet. And full flux-form conservation verification (§3.7
+risk 2, "verify to machine precision") is not built against a term that is
+identically zero: `aeros_correction_report` measures the channel a correction
+would inject mass through — the (0,0) coefficient of the `lnps` correction, the
+only mode that moves the global mean of `ln p_s` — but a complete statement
+needs the grid-space integral `∫ p_s ∂(ln p_s)/∂t dA`, because mass is a
+nonlinear functional of the prognostic. That is the same nonlinearity §6 above
+is about, and it belongs with the first real `ΔF`.

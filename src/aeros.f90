@@ -98,7 +98,7 @@ contains
 
         call aeros_state_alloc(ams%now, ams%grd, ams%pool%sht(1)%nlm, ams%par%nlev)
 
-        call aeros_timestep_init(ams%ts, ams%par, ams%pool, ams%grd, ams%vgrid)
+        call aeros_timestep_init(ams%ts, ams%par, ams%pool, ams%grd, ams%vgrid, filename)
 
         ! Initial condition. A resting isothermal atmosphere over a flat
         ! surface -- the only state the dry core can be started from at M1

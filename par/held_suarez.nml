@@ -125,3 +125,39 @@
     ! reference is at or above the column temperature.
     t_ref     = 300.0
 /
+&aeros_correction
+    ! The additive tendency correction (docs/design.md 3.7 and 3.8), applied
+    ! spectrally on the assembled tendency -- see src/dynamics/aeros_correction.f90
+    ! for why there rather than at the grid seam with the physics.
+    !
+    ! MASTER SWITCH. .FALSE. is section 3.8 mitigation 3's `DeltaF = 0` twin
+    ! and reproduces the uncorrected model bit for bit. Every production run
+    ! should have one; if conclusions differ qualitatively between the twin and
+    ! the corrected run, say so.
+    correction = .FALSE.
+
+    ! How many of the arrays below are read.
+    nterm = 1
+
+    ! One term per column. At M2 the only term is a no-op: registered, wired
+    ! in, exercised by tests/test_correction.f90, and identically zero. There
+    ! is nothing to put in it until M2b diagnoses a real DeltaF from a T85/T31
+    ! pair under identical boundary conditions.
+    term_name    = "noop", "", "", "", "", "", "", ""
+    term_enabled = .TRUE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE.
+
+    ! Which prognostic fields each term acts on. Section 3.7 is explicit that
+    ! a blanket correction on everything "is far more likely to destabilise and
+    ! much harder to diagnose", and mwm/B_multires found exactly that.
+    term_on_vor  = .TRUE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE.
+    term_on_div  = .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE.
+    term_on_temp = .TRUE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE.
+    term_on_lnps = .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE.
+
+    ! Spectral-scale selector: apply only where total wavenumber l <= this.
+    ! -1 applies at every resolved scale. The stationary-wave error section 3.7
+    ! targets lives at large scales, and restricting the correction to them is
+    ! the first mitigation mwm/B_multires/B2B_OUTCOME.md lists for the
+    ! instability its whole-field version hit.
+    term_lcut    = -1, -1, -1, -1, -1, -1, -1, -1
+/
