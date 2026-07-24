@@ -137,6 +137,7 @@ module aeros_spectral
     public :: aeros_sht_synthesis
     public :: aeros_sht_analysis_vec
     public :: aeros_sht_synthesis_vec
+    public :: aeros_sht_gradient
     public :: aeros_sht_laplacian
     public :: aeros_sht_surface_integral
     public :: aeros_sht_lm
@@ -555,6 +556,32 @@ contains
         return
 
     end subroutine aeros_sht_synthesis_vec
+
+    subroutine aeros_sht_gradient(sht, coeffs, gth, gph)
+        ! Surface gradient of a scalar, on the UNIT sphere:
+        !
+        !     gth = dF/dtheta,   gph = (1/sin theta) dF/dphi
+        !
+        ! Raw, in SHTns' colatitude convention and without the 1/a. The factor
+        ! of the Earth's radius and the conversion to east/north components are
+        ! dynamics, not kernel, and live in aeros_vordiv (same reasoning as the
+        ! vorticity/divergence mapping).
+        !
+        ! This is SHsph_to_spat -- a spheroidal synthesis with no toroidal
+        ! part -- and costs the same as one vector synthesis.
+
+        implicit none
+
+        type(aeros_sht_class), intent(in) :: sht
+        complex(wp_sh), intent(in), contiguous :: coeffs(:)   ! (nlm)
+        real(wp), intent(out), contiguous :: gth(:,:)         ! (nlon,nlat)
+        real(wp), intent(out), contiguous :: gph(:,:)
+
+        call SHsph_to_spat(sht%cfg, coeffs, gth, gph)
+
+        return
+
+    end subroutine aeros_sht_gradient
 
     ! === Spectral operators ==================================================
 

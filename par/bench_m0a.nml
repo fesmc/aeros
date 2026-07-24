@@ -27,12 +27,18 @@
     ! HPC. Extend this list to 16, 32, 64 there.
     threads = 1, 2, 4, 8, 10
 
-    ! Scalar-equivalent transforms per level per timestep. THE assumption in
-    ! this benchmark -- the headline cost scales linearly in it. Accounting:
-    !   synthesis  (u,v) [vector = 2] + T + q                  = 4
-    !   analysis   (vor,div) tendency [vector = 2] + T' + q'   = 4
-    ! Single-level work (ln ps and its gradient) is neglected as O(1/nlev).
-    ntr_per_level = 8
+    ! Scalar-equivalent transforms per level per timestep. The headline cost
+    ! scales linearly in this.
+    !
+    ! MEASURED at M1.3, from what src/dynamics/aeros_tendency.f90 actually does
+    ! for the DRY core:
+    !   synthesis  (u,v) [vector = 2] + zeta + D + T + grad(T) [vector = 2] = 7
+    !   analysis   momentum RHS [vector = 2] + (Phi+K) + dT/dt              = 4
+    ! Single-level work (ln p_s and its gradient) is neglected as O(1/nlev).
+    !
+    ! The original estimate here was 8; the dry core needs 11. Moisture (M2)
+    ! adds a q synthesis and a q-tendency analysis, so expect 13 there.
+    ntr_per_level = 11
 
     ! Dynamics timestep [s]. ~30 min at T42 (docs/design.md section 4).
     ! Held fixed across truncations here so the numbers isolate the cost of

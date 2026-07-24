@@ -67,7 +67,7 @@ module aeros_vordiv
 
     use aeros_defs,     only : dp, wp, wp_sh, r_earth, io_unit_err
     use aeros_spectral, only : aeros_sht_class, aeros_sht_analysis_vec, &
-                                aeros_sht_synthesis_vec
+                                aeros_sht_synthesis_vec, aeros_sht_gradient
 
     implicit none
 
@@ -75,6 +75,7 @@ module aeros_vordiv
 
     public :: aeros_uv_from_vordiv
     public :: aeros_vordiv_from_uv
+    public :: aeros_gradient
 
 contains
 
@@ -165,5 +166,42 @@ contains
         return
 
     end subroutine aeros_vordiv_from_uv
+
+    subroutine aeros_gradient(sht, f, dfdx, dfdy)
+        ! Physical horizontal gradient of a spectral scalar, in EAST/NORTH
+        ! components -- the same orientation as (u,v).
+        !
+        !     dfdx = (1/(a sin theta)) dF/dphi        [eastward]
+        !     dfdy = -(1/a) dF/dtheta                 [northward]
+        !
+        ! The minus sign is the colatitude-to-latitude flip, the same one that
+        ! makes v = -V_theta above. Kept here rather than in aeros_spectral for
+        ! the same reason: the radius and the orientation are dynamics.
+
+        implicit none
+
+        type(aeros_sht_class), intent(in) :: sht
+        complex(wp_sh), intent(in), contiguous :: f(:)     ! (nlm)
+        real(wp), intent(out), contiguous :: dfdx(:,:)     ! (nlon,nlat)
+        real(wp), intent(out), contiguous :: dfdy(:,:)
+
+        real(wp) :: gth(sht%nlon, sht%nlat)
+        real(wp) :: rinv
+        integer  :: i, j
+
+        call aeros_sht_gradient(sht, f, gth, dfdx)
+
+        rinv = 1.0_wp/real(r_earth, wp)
+
+        do j = 1, sht%nlat
+            do i = 1, sht%nlon
+                dfdx(i,j) =  dfdx(i,j)*rinv
+                dfdy(i,j) = -gth(i,j)*rinv
+            end do
+        end do
+
+        return
+
+    end subroutine aeros_gradient
 
 end module aeros_vordiv

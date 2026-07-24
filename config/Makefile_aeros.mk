@@ -58,6 +58,14 @@ $(objdir)/aeros_vordiv.o: $(dyndir)/aeros_vordiv.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M1.3: primitive-equation right-hand sides by the transform method. Sits on
+# everything above it -- the vertical coordinate, the vor/div mapping and the
+# transform pool -- so it is archived last among the dynamics.
+$(objdir)/aeros_tendency.o: $(dyndir)/aeros_tendency.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
+							$(objdir)/aeros_vertical.o $(objdir)/aeros_vordiv.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 ## aeros physics ##############################
 #
 # Column physics: radiation, condensation, surface tiles (sections 5, 6).
@@ -90,7 +98,8 @@ aeros_base =     $(objdir)/aeros_defs.o \
                  $(objdir)/aeros_state.o
 
 aeros_dynamics = $(objdir)/aeros_vertical.o \
-                 $(objdir)/aeros_vordiv.o
+                 $(objdir)/aeros_vordiv.o \
+                 $(objdir)/aeros_tendency.o
 
 # M2
 aeros_physics =

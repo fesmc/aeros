@@ -47,14 +47,14 @@ primarily to escape it.
 
 Against the same 276 core-s/yr budget, using measured numbers:
 
-| config | §3.6 said | measured (dp) |
-|---|---|---|
-| T31L16 | 21% | **7.5%** |
-| T42L19/L20 | 82% ⚠ | **14%** |
-| T85L19/L20 | 1300% ✗ | **89%** |
+| config | §3.6 said | measured, 8 transforms/level | corrected, 11 (§4.2) |
+|---|---|---|---|
+| T31L16 | 21% | 7.5% | **10%** |
+| T42L19/L20 | 82% ⚠ | 14% | **19%** |
+| T85L19/L20 | 1300% ✗ | 89% | **123%** |
 
 **On this evidence the cost argument for T31 over T42 disappears.** T42 costs
-~14% of the coupled budget, leaving ~86% for ocean, ice, land and physics
+~19% of the coupled budget, leaving ~81% for ocean, ice, land and physics
 where §3.6 expected ~18%.
 
 Two things follow, and they should not be conflated:
@@ -106,9 +106,20 @@ may well cross over.
 1. **Dynamics only.** No radiation, condensation, surface tiles, ocean, ice or
    land. §3.6 budgets ~1% for physics and ~4% for the polar nests, so there is
    ample headroom, but those shares are themselves estimates.
-2. **`ntr_per_level = 8` is an assumption**, and every cost above scales
-   linearly in it. The accounting is in `par/bench_m0a.nml`. If a real M1 core
-   needs 12, add 50%.
+2. **`ntr_per_level = 8` was an assumption, and M1.3 has now measured it: the
+   real count is 11.** The tendency evaluation synthesizes (u,v) [2
+   scalar-equivalents], ζ [1], D [1], T [1] and ∇T [2], and analyses A [2],
+   Φ+K [1] and dT/dt [1]. Cost scales linearly in this, so **every core-s/yr
+   figure above should be multiplied by 11/8 (+37%)** and every SYPD figure
+   divided by it.
+
+   Redoing §2 with the measured count: T31L16 goes 7.5% → **10%** of the
+   coupled budget and T42L20 goes 14% → **19%**. The conclusion is unchanged —
+   §3.6 expected 82% for T42 — but the margin is smaller than first reported.
+
+   SHTns' combined `SHqst_to_spat` could deliver ζ alongside (u,v) in one call
+   and is documented as "significantly faster" than separate transforms, which
+   would bring the count to 10. Worth measuring once the core runs.
 3. **`dt = 1800 s` is held fixed across truncations**, which flatters T85: a
    T85 run needs roughly half the timestep of T42 on CFL grounds. Adjusting
    `dt ∝ 1/T` gives T85L20 ≈ **490** core-s/yr rather than 246, i.e. ~178% of

@@ -144,13 +144,18 @@ vordiv : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_vordiv.x is ready."
 
+tendency : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_tendency.x $(testdir)/test_tendency.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_tendency.x is ready."
+
 grid : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_grid.x $(testdir)/test_grid.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_grid.x is ready."
 
 # All acceptance tests
-tests : defs grid spectral vertical vordiv
+tests : defs grid spectral vertical vordiv tendency
 
 # Driver executables
 drivers : run bench
