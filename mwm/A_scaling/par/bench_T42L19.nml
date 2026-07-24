@@ -1,0 +1,10 @@
+&bench
+    lmax  = 42
+    nlat  = 64
+    nphi  = 128
+    nlev  = 19
+    dt    = 1800.0
+    nstep = 100
+    nwarm = 10
+    label = "T42L19"
+/

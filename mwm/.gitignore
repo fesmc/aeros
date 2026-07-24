@@ -1,0 +1,12 @@
+logs/
+bin/
+*.o
+*.mod
+runs/
+B_multires/output/
+B_multires/output_smoke/
+B_multires/output_b2/
+B_multires/output_b2_smoke/
+B_multires/output_b2b*/
+B_multires/Manifest.toml
+.runme/config.toml

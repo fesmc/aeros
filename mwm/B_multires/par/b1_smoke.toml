@@ -1,0 +1,14 @@
+# b1 smoke test -- tiny + short, for login-node pipeline validation ONLY.
+# Not scientifically meaningful; just checks the whole pipeline runs end-to-end.
+stage = "b1"
+
+trunc_hi = 42
+trunc_lo = 21
+nlev     = 8
+
+target_sigma = 0.5
+
+spinup_days = 5
+mean_days   = 10
+
+output_dir = "output_smoke"

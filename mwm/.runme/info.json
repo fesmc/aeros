@@ -1,0 +1,26 @@
+{
+    "exe_default" : "bench",
+
+    "par_path_as_argument" : true,
+
+    "exe_aliases" :
+        {   "bench"         : "A_scaling/bin/aeros_bench.x",
+            "bench_batched" : "A_scaling/bin/aeros_bench_batched.x",
+            "speedy"        : "B_multires/run_speedy.sh",
+            "speedy_b2"     : "B_multires/run_speedy_b2.sh",
+            "speedy_b2b"    : "B_multires/run_speedy_b2b.sh"
+        },
+
+    "grp_aliases" : {},
+
+    "par_paths" : {},
+
+    "files" : [],
+
+    "dir-special" :
+    {
+        "None" : "target_dir_name"
+    },
+
+    "links" : []
+}

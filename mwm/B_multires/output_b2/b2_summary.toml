@@ -1,0 +1,109 @@
+# b2 multi-resolution error CORRECTION test -- summary
+stage = "b2"
+trunc_hi = 85
+trunc_lo = 31
+nlev = 8
+spinup_days = 200
+mean_days = 360
+sigma_level = 0.4375
+approx_pressure_hPa = 437.5
+nsteps_hi = 34560
+nsteps_bare = 12960
+nsteps_corr = 12960
+common_grid = "FullGaussianGrid nlat_half=24 (96x48)"
+radius_m = 6.371e6
+
+# ------------------------------------------------------------------
+# HEADLINE: does ΔF move T31 toward T85? (fractional RMS error reduction)
+# frac_reduction = (RMS(bare-target) - RMS(corr-target)) / RMS(bare-target)
+# 1.0 = perfect reproduction, 0.0 = no effect, <0 = made worse
+# ------------------------------------------------------------------
+[error_reduction.Zstar]  # ~438.0hPa geop. height, metres
+rms_bare_minus_target = 27.834
+rms_corr_minus_target = 22.413
+frac_reduction        = 0.1948
+frac_reduction_NH     = 0.1438
+
+[error_reduction.Tstar]  # kelvin
+rms_bare_minus_target = 0.9352
+rms_corr_minus_target = 1.2373
+frac_reduction        = -0.323
+
+[error_reduction.Ustar]  # m/s
+rms_bare_minus_target = 2.1676
+rms_corr_minus_target = 2.3788
+frac_reduction        = -0.0974
+
+# ------------------------------------------------------------------
+# INJECTION VERIFICATION: forced dynamical-core tendency at X85 should
+# be ~0 (residual_frac = max|forced| / max|baseline|). vor/div/pres are
+# injected in spectral space; temp/humid in grid space (see b_common.jl).
+# ------------------------------------------------------------------
+[injection_check.vor]
+max_baseline  = 2348.206
+max_forced    = 0.0
+residual_frac = 0.0
+[injection_check.div]
+max_baseline  = 322185.34
+max_forced    = 599.31744
+residual_frac = 0.0019
+[injection_check.temp]
+max_baseline  = 77.65461
+max_forced    = 0.00018563119
+residual_frac = 0.0
+[injection_check.humid]
+max_baseline  = 0.01423856
+max_forced    = 4.1650012e-9
+residual_frac = 0.0
+[injection_check.pres]
+max_baseline  = 0.9202207
+max_forced    = 0.0
+residual_frac = 0.0
+
+# ------------------------------------------------------------------
+# CONSERVATION of ΔF (§3.7 risk 2): global area-weighted mean vs RMS,
+# physical per-second units (scaled tendency / radius). A pure
+# stationary-wave correction should be ~zero global mean.
+# ratio = |global_mean| / RMS (dimensionless, scale-invariant).
+# ------------------------------------------------------------------
+[conservation.vor]
+global_mean_phys_per_s = -0.0
+rms_phys_per_s         = 0.0004530954581161149
+ratio_mean_over_rms    = 0.0
+[conservation.div]
+global_mean_phys_per_s = -0.0
+rms_phys_per_s         = 0.1381600825333062
+ratio_mean_over_rms    = 0.0
+[conservation.temp]
+global_mean_phys_per_s = -8.147982072089236e-8
+rms_phys_per_s         = 2.3224455626697693e-5
+ratio_mean_over_rms    = 0.0035
+[conservation.humid]
+global_mean_phys_per_s = -1.4535362453345667e-11
+rms_phys_per_s         = 2.1809993862147853e-9
+ratio_mean_over_rms    = 0.0067
+[conservation.pres]
+global_mean_phys_per_s = -0.0
+rms_phys_per_s         = 2.5584603373639654e-7
+ratio_mean_over_rms    = 0.0
+
+[[residual_Zstar_corr_top_maxima]]  # (lon,lat,value_m) where corrected error remains
+point = [243.8, -72.4, -104.04]
+point = [258.8, -72.4, -98.7]
+point = [228.8, -72.4, -93.4]
+point = [120.0, -68.7, 92.51]
+point = [93.8, -72.4, 90.59]
+point = [273.8, -72.4, -88.72]
+
+# CAVEATS (see README Stage b2):
+# - single-tendency-at-mean-state neglects transient rectification
+#   (instantaneous RHS at time-mean state != time-mean RHS); leading
+#   candidate if reproduction is partial. The iterated / mean-tendency
+#   version would be the next step.
+# - full-field correction (not §3.7's 'selected terms' refinement).
+# - resolution-dependent hyperdiffusion + timestep, interactive land
+#   (same b1 confounds); ΔF conflates dynamics with resolution numerics.
+# - SpeedyWeather != aeros -> suggestive, not conclusive.
+# - ΔF here is the DYNAMICAL-CORE tendency error (dynamics_tendencies!);
+#   physics parameterizations respond freely each step and are not part
+#   of ΔF, so any residual physics tendency at X85 also limits reproduction.
