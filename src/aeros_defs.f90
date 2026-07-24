@@ -91,6 +91,14 @@ module aeros_defs
     real(dp), parameter, public :: cp_v    = 1846.1_dp       ! specific heat at const. pressure, vapour [J kg-1 K-1]
     real(dp), parameter, public :: kappa   = R_d/cp_d        ! R_d/cp_d [-] (~0.2857)
 
+    ! The year aeros converts between the host driver's [yr] and the dynamics'
+    ! [s]. JULIAN (365.25 d), not 360 d and not 365 d, because the insolation
+    ! aeros will be forced with (`insol`, Laskar 2004, docs/design.md section 8)
+    ! is tabulated on the Julian year, and a 0.07% mismatch between the
+    ! calendar the orbit is computed on and the calendar the model integrates
+    ! on is a precession error of ~70 yr over an orbital cycle.
+    real(dp), parameter, public :: year_seconds = 365.25_dp*86400.0_dp
+
     real(dp), parameter, public :: T0      = 273.15_dp       ! freezing point [K]
     real(dp), parameter, public :: p0      = 1.0e5_dp        ! reference pressure [Pa]
 

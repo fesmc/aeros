@@ -39,7 +39,7 @@ module aeros_budget
     ! physical state on the grid the physics will run on.
 
     use aeros_defs,     only : dp, wp, io_unit_err, grav, cp_d, omega, r_earth, &
-                                aeros_grid_class, aeros_state_class
+                                year_seconds, aeros_grid_class, aeros_state_class
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure
 
     implicit none
@@ -168,8 +168,8 @@ contains
             error stop 1
         end if
 
-        ! Drift per YEAR, using the Julian year aeros_timestep converts with.
-        yr = 365.25_dp*86400.0_dp
+        ! Drift per YEAR, on the same calendar the facade converts with.
+        yr = year_seconds
 
         write(iou,*) ""
         write(iou,"(a,a)") " == conservation: ", trim(label)

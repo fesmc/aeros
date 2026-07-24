@@ -1,7 +1,15 @@
 &ctrl
+    ! Times in YEARS. aeros_update converts to the dynamics timestep itself and
+    ! derives the step count from the absolute elapsed time, so an output
+    ! interval that is not a whole number of steps is fine and does not drift.
+    !
+    ! 0.1 yr at dt = 1800 s is ~1750 steps -- a smoke test rather than a
+    ! simulation. There is no forcing until M1.5, so a run from the shipped
+    ! initial condition (a resting isothermal atmosphere) should stay exactly
+    ! where it started; that IS the check this default performs.
     time_init  = 0.0
-    time_end   = 10.0
-    dt_out     = 1.0
+    time_end   = 0.1
+    dt_out     = 0.02
     file_out   = "aeros.nc"
 /
 

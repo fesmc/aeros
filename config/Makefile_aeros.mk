@@ -109,7 +109,7 @@ $(objdir)/aeros_io.o: $(srcdir)/aeros_io.f90 \
 $(objdir)/aeros.o: $(srcdir)/aeros.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
 							$(objdir)/aeros_grid.o $(objdir)/aeros_state.o \
-							$(objdir)/aeros_vertical.o
+							$(objdir)/aeros_vertical.o $(objdir)/aeros_timestep.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ###############################################

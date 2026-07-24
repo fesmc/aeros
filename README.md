@@ -6,13 +6,21 @@ A fast global atmospheric model for coupled climate–ice-sheet simulation on
 Spectral primitive-equation core (T31–T42, L16–20) built as the static library
 `libaeros.a`, OpenMP-only, intended to couple to CLIMBER-X's ocean and to Yelmo.
 
-Status: **scaffold (M0)**. The build, the SHTns wrapper, the Gaussian grid and
-the public interface are in place; the dynamical core is not.
+Status: **dry dynamical core integrates (M1.4)**. Hybrid σ–p coordinate,
+(ζ,D)↔(u,v), primitive-equation tendencies by the transform method, and a
+semi-implicit leapfrog with a RAW time filter and ∇⁶ diffusion. `aeros_update`
+advances the model. What is missing is forcing: Held–Suarez is M1.5, moisture
+and radiation M2, so a run from the shipped initial condition correctly does
+nothing at all.
 
 ## Docs
 
 - [docs/design.md](docs/design.md) — the design plan: what aeros is for, what
   is settled, what is still open, and the milestone sequence.
+- [docs/m0a_results.md](docs/m0a_results.md) — the measured cost of the
+  dynamical core, and why aeros is double precision.
+- [docs/m1_results.md](docs/m1_results.md) — what the core does once it runs:
+  stability, conservation and the numbers M1.5 will need.
 
 ## Install
 
