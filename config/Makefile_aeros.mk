@@ -20,10 +20,10 @@
 
 ## aeros base #################################
 
-# aeros_defs is the ONLY preprocessed source. The .F90 extension makes both
-# gfortran and ifort preprocess it without a -cpp/-fpp flag; the Makefile
-# passes -DAEROS_DP when precision=dp.
-$(objdir)/aeros_defs.o: $(srcdir)/aeros_defs.F90
+# No source in src/ is preprocessed: there is no build-time precision switch
+# (see config/Makefile). Only drivers/bench_m0a.F90 is .F90, to compile in the
+# machine and compiler names.
+$(objdir)/aeros_defs.o: $(srcdir)/aeros_defs.f90
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 # The SHTns wrapper. `include 'shtns.f03'` resolves through $(INC_SHTNS),

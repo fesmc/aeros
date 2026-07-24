@@ -22,8 +22,8 @@ module aeros_spectral
     !   layout         SHT_PHI_CONTIGUOUS: spatial fields are (nlon, nlat),
     !                  longitude contiguous, latitude running north to south.
     !   truncation     triangular, lmax = mmax = trunc, mres = 1.
-    !   spectral kind  always double (wp_sh), in both sp and dp builds --
-    !                  SHTns has no single-precision CPU path.
+    !   precision      double on both the grid and the spectral side, so
+    !                  arrays cross the C boundary with no copy (aeros_defs).
     !
     ! NOT YET HERE, deliberately: the vorticity/divergence <-> (u,v) mapping.
     ! The raw spheroidal/toroidal transforms below are its building blocks, but
@@ -113,41 +113,18 @@ module aeros_spectral
         type(aeros_sht_class), allocatable :: sht(:)
     end type aeros_sht_pool_class
 
-    ! Transforms are generic over the grid-side kind so that both an sp and a
-    ! dp build call the same name. The sp specifics convert through a
-    ! double-precision automatic array; the dp specifics pass straight through
-    ! with no copy. Automatic (not module) buffers, so the routines stay
-    ! callable from inside a parallel region.
+    ! Transforms are double precision on BOTH sides, with no generics and no
+    ! conversion. aeros_defs fixes wp = dp precisely so that a grid field can
+    ! be handed to SHTns without a copy; see docs/m0a_results.md section 5 for
+    ! the measurement behind that (an sp core was ~17% SLOWER, because the
+    ! convert-up/convert-down at each transform costs more than sp saves).
     !
-    ! CONTRACT, uniform across both kinds: analysis MAY DESTROY its input
-    ! field, hence intent(inout). SHTns does this for real in the dp path; the
-    ! sp path does not, but relying on that would make the same call behave
-    ! differently in the two builds.
-
-    interface aeros_sht_analysis
-        module procedure aeros_sht_analysis_sp
-        module procedure aeros_sht_analysis_dp
-    end interface aeros_sht_analysis
-
-    interface aeros_sht_synthesis
-        module procedure aeros_sht_synthesis_sp
-        module procedure aeros_sht_synthesis_dp
-    end interface aeros_sht_synthesis
-
-    interface aeros_sht_analysis_vec
-        module procedure aeros_sht_analysis_vec_sp
-        module procedure aeros_sht_analysis_vec_dp
-    end interface aeros_sht_analysis_vec
-
-    interface aeros_sht_synthesis_vec
-        module procedure aeros_sht_synthesis_vec_sp
-        module procedure aeros_sht_synthesis_vec_dp
-    end interface aeros_sht_synthesis_vec
-
-    interface aeros_sht_surface_integral
-        module procedure aeros_sht_surface_integral_sp
-        module procedure aeros_sht_surface_integral_dp
-    end interface aeros_sht_surface_integral
+    ! If a caller ever holds single-precision data -- the coupling boundary at
+    ! M4, wp_ext in aeros_defs -- it converts there, in one identified place,
+    ! not here in the kernel.
+    !
+    ! CONTRACT: analysis MAY DESTROY its input field, hence intent(inout).
+    ! SHTns really does overwrite it.
 
     public :: aeros_sht_class
     public :: aeros_sht_init
@@ -506,7 +483,7 @@ contains
 
     ! === Scalar transforms ===================================================
 
-    subroutine aeros_sht_analysis_dp(sht, field, coeffs)
+    subroutine aeros_sht_analysis(sht, field, coeffs)
         ! Spatial field (nlon,nlat) -> spectral coefficients (nlm).
         ! NB: SHTns overwrites `field`.
 
@@ -520,27 +497,9 @@ contains
 
         return
 
-    end subroutine aeros_sht_analysis_dp
+    end subroutine aeros_sht_analysis
 
-    subroutine aeros_sht_analysis_sp(sht, field, coeffs)
-        ! Single-precision grid side: convert up, transform, discard.
-
-        implicit none
-
-        type(aeros_sht_class), intent(in) :: sht
-        real(sp), intent(inout), contiguous :: field(:,:)
-        complex(wp_sh), intent(out), contiguous :: coeffs(:)
-
-        real(dp) :: buf(sht%nlon, sht%nlat)
-
-        buf = real(field, dp)
-        call spat_to_SH(sht%cfg, buf, coeffs)
-
-        return
-
-    end subroutine aeros_sht_analysis_sp
-
-    subroutine aeros_sht_synthesis_dp(sht, coeffs, field)
+    subroutine aeros_sht_synthesis(sht, coeffs, field)
         ! Spectral coefficients (nlm) -> spatial field (nlon,nlat).
 
         implicit none
@@ -553,24 +512,7 @@ contains
 
         return
 
-    end subroutine aeros_sht_synthesis_dp
-
-    subroutine aeros_sht_synthesis_sp(sht, coeffs, field)
-
-        implicit none
-
-        type(aeros_sht_class), intent(in) :: sht
-        complex(wp_sh), intent(in), contiguous :: coeffs(:)
-        real(sp), intent(out), contiguous :: field(:,:)
-
-        real(dp) :: buf(sht%nlon, sht%nlat)
-
-        call SH_to_spat(sht%cfg, coeffs, buf)
-        field = real(buf, sp)
-
-        return
-
-    end subroutine aeros_sht_synthesis_sp
+    end subroutine aeros_sht_synthesis
 
     ! === Vector transforms ===================================================
     !
@@ -584,7 +526,7 @@ contains
     ! relating S and T to divergence and vorticity is the dynamical core's job
     ! (M1) -- see the module header.
 
-    subroutine aeros_sht_analysis_vec_dp(sht, vth, vph, slm, tlm)
+    subroutine aeros_sht_analysis_vec(sht, vth, vph, slm, tlm)
         ! (v_theta, v_phi) -> spheroidal + toroidal coefficients.
         ! NB: SHTns overwrites both input fields.
 
@@ -598,28 +540,9 @@ contains
 
         return
 
-    end subroutine aeros_sht_analysis_vec_dp
+    end subroutine aeros_sht_analysis_vec
 
-    subroutine aeros_sht_analysis_vec_sp(sht, vth, vph, slm, tlm)
-
-        implicit none
-
-        type(aeros_sht_class), intent(in) :: sht
-        real(sp), intent(inout), contiguous :: vth(:,:), vph(:,:)
-        complex(wp_sh), intent(out), contiguous :: slm(:), tlm(:)
-
-        real(dp) :: bth(sht%nlon, sht%nlat)
-        real(dp) :: bph(sht%nlon, sht%nlat)
-
-        bth = real(vth, dp)
-        bph = real(vph, dp)
-        call spat_to_SHsphtor(sht%cfg, bth, bph, slm, tlm)
-
-        return
-
-    end subroutine aeros_sht_analysis_vec_sp
-
-    subroutine aeros_sht_synthesis_vec_dp(sht, slm, tlm, vth, vph)
+    subroutine aeros_sht_synthesis_vec(sht, slm, tlm, vth, vph)
         ! Spheroidal + toroidal coefficients -> (v_theta, v_phi).
 
         implicit none
@@ -632,26 +555,7 @@ contains
 
         return
 
-    end subroutine aeros_sht_synthesis_vec_dp
-
-    subroutine aeros_sht_synthesis_vec_sp(sht, slm, tlm, vth, vph)
-
-        implicit none
-
-        type(aeros_sht_class), intent(in) :: sht
-        complex(wp_sh), intent(in), contiguous :: slm(:), tlm(:)
-        real(sp), intent(out), contiguous :: vth(:,:), vph(:,:)
-
-        real(dp) :: bth(sht%nlon, sht%nlat)
-        real(dp) :: bph(sht%nlon, sht%nlat)
-
-        call SHsphtor_to_spat(sht%cfg, slm, tlm, bth, bph)
-        vth = real(bth, sp)
-        vph = real(bph, sp)
-
-        return
-
-    end subroutine aeros_sht_synthesis_vec_sp
+    end subroutine aeros_sht_synthesis_vec
 
     ! === Spectral operators ==================================================
 
@@ -699,7 +603,7 @@ contains
 
     end subroutine aeros_sht_laplacian
 
-    real(dp) function aeros_sht_surface_integral_dp(sht, field) result(total)
+    real(dp) function aeros_sht_surface_integral(sht, field) result(total)
         ! Global integral of a spatial field over the sphere, by Gauss-Legendre
         ! quadrature in latitude and the uniform rule in longitude. Returns
         ! 4*pi*a^2 for field = 1.
@@ -733,33 +637,6 @@ contains
 
         return
 
-    end function aeros_sht_surface_integral_dp
-
-    real(dp) function aeros_sht_surface_integral_sp(sht, field) result(total)
-
-        implicit none
-
-        type(aeros_sht_class), intent(in) :: sht
-        real(sp), intent(in) :: field(:,:)
-
-        real(dp) :: dlon, row
-        integer  :: i, j
-
-        dlon  = 2.0_dp*pi/real(sht%nlon, dp)
-        total = 0.0_dp
-
-        do j = 1, sht%nlat
-            row = 0.0_dp
-            do i = 1, sht%nlon
-                row = row + real(field(i,j), dp)
-            end do
-            total = total + sht%gauss_w(j)*row*dlon
-        end do
-
-        total = total*r_earth*r_earth
-
-        return
-
-    end function aeros_sht_surface_integral_sp
+    end function aeros_sht_surface_integral
 
 end module aeros_spectral

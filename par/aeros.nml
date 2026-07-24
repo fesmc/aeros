@@ -6,14 +6,25 @@
 /
 
 &aeros
-    ! Triangular truncation T. The central open question of the design
-    ! (docs/design.md section 10.3): T31 with the multi-resolution correction,
-    ! or bare T42. It is a namelist parameter for exactly that reason -- M0a
-    ! sweeps it, and nothing in the code may assume a value.
+    ! Triangular truncation T.
     !   T21 ->  64x32   (ruled out for production: fails both NH ice sheets)
     !   T31 ->  96x48
     !   T42 -> 128x64
     !   T85 -> 256x128  (the reference truncation for the section 3.7 correction)
+    !
+    ! DEVELOPMENT DEFAULT: T31, for speed. This is NOT the production choice.
+    !
+    ! docs/design.md section 10.3 frames T31-plus-correction vs bare T42 as the
+    ! central open question and expects the cost measurement to settle it. M0a
+    ! has now removed the COST half of that argument -- T42 measures at ~14% of
+    ! the coupled budget, not 82% (docs/m0a_results.md section 2) -- so T42 is
+    ! affordable. What remains is the accuracy half, which no benchmark can
+    ! answer: whether T42 alone builds the Eurasian ice sheet.
+    !
+    ! Decision (AR, 2026-07-24): stay at T31 for day-to-day work, test at T42
+    ! periodically, and settle the production truncation with the full model
+    ! rather than with the dynamical core. Nothing in the code may assume a
+    ! value; changing this line is the only thing required to switch.
     trunc    = 31
 
     ! Gaussian grid. -1 selects the smallest quadratically-unaliased grid for

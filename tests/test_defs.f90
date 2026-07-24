@@ -2,11 +2,11 @@ program test_defs
     ! Acceptance test for aeros_defs: precision policy, constants, and the
     ! namelist round trip.
     !
-    ! The precision checks are not decoration. docs/design.md section 4 calls
-    ! for a single-precision core, while SHTns' interface is double; the whole
-    ! design rests on those two facts being reconciled deliberately rather than
-    ! by accident. If wp_sh ever stops being C double, the transforms break
-    ! silently, so it is asserted here as well as at compile time.
+    ! The precision checks are not decoration. If wp_sh ever stops being C
+    ! double the transforms break silently, so it is asserted at run time as
+    ! well as at compile time. And if wp ever stops being dp, every transform
+    ! silently acquires a copy-convert -- the ~17% penalty docs/m0a_results.md
+    ! section 5 measured -- without anything failing to build.
     !
     ! Exits non-zero on failure.
 
@@ -22,12 +22,14 @@ program test_defs
     nfail = 0
 
     ! === Precision policy ====================================================
-    call check(wp == sp .or. wp == dp, "wp is sp or dp", nfail)
-    call check(wp_sh == dp,            "wp_sh is dp",    nfail)
-    call check(wp_sh == c_double,      "wp_sh is C double (SHTns interface)", nfail)
+    call check(wp == dp,          "wp is dp (double throughout, m0a_results section 5)", nfail)
+    call check(wp_sh == c_double, "wp_sh is C double (SHTns interface)", nfail)
+    call check(wp == wp_sh,       "grid and spectral kinds match: transforms copy nothing", nfail)
+    call check(wp_ext == sp,      "wp_ext is sp (coupling boundary kind)", nfail)
 
-    write(*,"(a40,i4,a)") "   wp    ", storage_size(1.0_wp)/8,    " bytes"
-    write(*,"(a40,i4,a)") "   wp_sh ", storage_size(1.0_wp_sh)/8, " bytes"
+    write(*,"(a40,i4,a)") "   wp     ", storage_size(1.0_wp)/8,     " bytes"
+    write(*,"(a40,i4,a)") "   wp_sh  ", storage_size(1.0_wp_sh)/8,  " bytes"
+    write(*,"(a40,i4,a)") "   wp_ext ", storage_size(1.0_wp_ext)/8, " bytes"
 
     ! === Constants ===========================================================
     ! Sanity, not accuracy: these catch a mistyped exponent, which is the error

@@ -28,7 +28,7 @@ program bench_sht
     ! Reports time per scalar transform (one synthesis + one analysis counts as
     ! two), so the truncations are directly comparable.
 
-    use omp_lib
+    !$ use omp_lib
     use aeros_defs,     only : dp, wp, wp_sh
     use aeros_spectral
 
@@ -41,7 +41,8 @@ program bench_sht
     integer :: threads(5)
     integer :: it, ith, nt, maxth
 
-    maxth = omp_get_max_threads()
+    maxth = 1
+    !$ maxth = omp_get_max_threads()
     threads = [1, 2, 4, 8, maxth]
 
     write(*,*) ""
@@ -120,14 +121,14 @@ contains
             call aeros_sht_synthesis(sht, coeffs(:,k), field(:,:,k))
         end do
 
-        t0 = omp_get_wtime()
+        t0 = wall_time()
         do r = 1, nrep
             do k = 1, nlev
                 call aeros_sht_synthesis(sht, coeffs(:,k), field(:,:,k))
                 call aeros_sht_analysis(sht, field(:,:,k), coeffs(:,k))
             end do
         end do
-        t1 = omp_get_wtime()
+        t1 = wall_time()
 
         tper = (t1 - t0)/real(2*nrep*nlev, dp)
 
@@ -140,51 +141,46 @@ contains
 
     real(dp) function time_mode_b(trunc, nt) result(tper)
         ! SHTns single-threaded; aeros threads the level loop, one config per
-        ! thread. Configs are created serially -- SHTns config creation is not
-        ! thread-safe (it plans FFTs).
+        ! thread. Uses the library's own pool (aeros_sht_pool_class), so this
+        ! measures shipping code rather than a benchmark-local imitation of it.
 
         implicit none
 
         integer, intent(in) :: trunc, nt
 
-        type(aeros_sht_class), allocatable :: sht(:)
+        type(aeros_sht_pool_class) :: pool
+        type(aeros_sht_class), pointer :: s
         real(wp),       allocatable :: field(:,:,:)
         complex(wp_sh), allocatable :: coeffs(:,:)
         real(dp) :: t0, t1
-        integer  :: k, r, i, tid
+        integer  :: k, r
 
-        allocate(sht(nt))
-        do i = 1, nt
-            call aeros_sht_init(sht(i), trunc, nthreads=1, quick=.TRUE.)
-        end do
+        call aeros_sht_pool_init(pool, trunc, nthreads=nt, quick=.TRUE.)
 
-        allocate(field(sht(1)%nlon,sht(1)%nlat,nlev))
-        allocate(coeffs(sht(1)%nlm,nlev))
-        call seed(field, coeffs, sht(1), nlev)
+        allocate(field(pool%sht(1)%nlon,pool%sht(1)%nlat,nlev))
+        allocate(coeffs(pool%sht(1)%nlm,nlev))
+        call seed(field, coeffs, pool%sht(1), nlev)
 
         do k = 1, nlev
-            call aeros_sht_synthesis(sht(1), coeffs(:,k), field(:,:,k))
+            call aeros_sht_synthesis(pool%sht(1), coeffs(:,k), field(:,:,k))
         end do
 
-        t0 = omp_get_wtime()
+        t0 = wall_time()
         do r = 1, nrep
-            !$omp parallel do num_threads(nt) private(k,tid) schedule(static)
+            !$omp parallel do num_threads(nt) private(k,s) schedule(static)
             do k = 1, nlev
-                tid = omp_get_thread_num() + 1
-                call aeros_sht_synthesis(sht(tid), coeffs(:,k), field(:,:,k))
-                call aeros_sht_analysis(sht(tid), field(:,:,k), coeffs(:,k))
+                s => aeros_sht_pool_get(pool)
+                call aeros_sht_synthesis(s, coeffs(:,k), field(:,:,k))
+                call aeros_sht_analysis(s, field(:,:,k), coeffs(:,k))
             end do
             !$omp end parallel do
         end do
-        t1 = omp_get_wtime()
+        t1 = wall_time()
 
         tper = (t1 - t0)/real(2*nrep*nlev, dp)
 
         deallocate(field, coeffs)
-        do i = 1, nt
-            call aeros_sht_end(sht(i))
-        end do
-        deallocate(sht)
+        call aeros_sht_pool_end(pool)
 
         return
 
@@ -214,5 +210,20 @@ contains
         return
 
     end subroutine seed
+
+    real(dp) function wall_time() result(t)
+        ! system_clock, not omp_get_wtime, so this still builds under openmp=0
+        ! (where the sweep collapses to the 1-thread row).
+
+        implicit none
+
+        integer(kind=8) :: count, count_rate
+
+        call system_clock(count, count_rate)
+        t = real(count, dp)/real(count_rate, dp)
+
+        return
+
+    end function wall_time
 
 end program bench_sht

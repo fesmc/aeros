@@ -147,9 +147,16 @@ sp's advantage is real but lives in the *column physics* — radiation,
 condensation, snowpack — which never touch SHTns and which §3.6 puts at ~1–5%
 of budget. So sp optimizes a twentieth of the work while taxing the rest.
 
-**Recommendation: flip the default to `precision=dp`**, and re-measure at M2
-when physics exists. Note this also removes the sp/dp conversion path from the
-hot loop entirely, which simplifies `aeros_spectral`.
+**Recommendation: work in dp internally**, and re-measure at M2 when physics
+exists.
+
+**Adopted (AR, 2026-07-24).** `wp = dp`, fixed in `aeros_defs`; the
+`precision=` make switch and the sp specifics in `aeros_spectral` are gone, so
+the conversion path has left the hot loop entirely. Single precision remains as
+`wp_ext` — the coupling-boundary kind, matching yelmo and fesm-utils — with the
+conversion to happen at the facade when coupling arrives at M4. A physics module
+that wants sp locally may still declare it locally; that is a separate decision,
+to be made with a measurement at M2.
 
 ## 6. Incidental findings
 

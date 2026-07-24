@@ -40,12 +40,13 @@ builds `libaeros.a` (OpenMP by default; `make openmp=0` for serial). `make run`
 builds the standalone driver, `make tests` the acceptance tests, `make all`
 both.
 
-`make precision=dp` builds a double-precision variant into its own
-`libaeros/{include,bin}-dp/`, so it coexists with the default single-precision
-build. Both are real configurations, not a production setting plus a debug
-toggle — SHTns' interface is double, so `sp` trades a copy-convert at every
-transform against half the memory traffic everywhere else. Which wins is what
-M0a measures.
+aeros is **double precision throughout**, with no build-time switch. That
+reverses the design plan's "Float32 throughout the core", and it was settled by
+measurement: SHTns has no single-precision CPU path, so a single-precision core
+converts up and back at every transform, and transforms are 86–97% of a
+dynamics timestep. Measured, `sp` was ~17% *slower*. See
+[docs/m0a_results.md](docs/m0a_results.md) §5. Single precision survives as
+`wp_ext`, the kind used at the coupling boundary.
 
 ## Run
 

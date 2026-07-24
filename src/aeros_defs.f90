@@ -15,31 +15,42 @@ module aeros_defs
 
     ! === Precision ===========================================================
     !
-    ! wp is selectable at COMPILE TIME: `make ... precision=dp` defines
-    ! AEROS_DP. See config/Makefile for why both settings are real
-    ! configurations rather than a production setting plus a validation toggle.
+    ! DOUBLE PRECISION THROUGHOUT, internally. This reverses docs/design.md
+    ! section 4's "Float32 throughout the core", and it was decided by
+    ! measurement, not preference -- see docs/m0a_results.md section 5.
     !
-    ! The short version: SHTns' interface is double precision, so an sp build
-    ! pays a copy-convert on every spectral transform that a dp build does not.
-    ! Against that, sp halves the memory traffic through the physics and the
-    ! semi-implicit solve. M0a measures which wins; until then neither is
-    ! privileged, and no code outside this module may assume `wp == sp`.
-#ifdef AEROS_DP
+    ! The short version: SHTns has no single-precision CPU path, so a
+    ! single-precision core has to convert up and back at every spectral
+    ! transform. Transforms are 86-97% of a dynamics timestep, so that copy
+    ! costs more than single precision saves on the rest. Measured, dp is ~17%
+    ! FASTER than sp at every production configuration (T42 and T85, L8-L20).
+    !
+    ! Single precision's genuine advantage is in the column physics --
+    ! radiation, condensation, snowpack -- which never touch SHTns and which
+    ! section 3.6 puts at ~1-5% of the budget. A physics module that wants sp
+    ! locally may declare it locally; that is a different decision from the
+    ! working precision of the model, and it should be revisited with a
+    ! measurement at M2, when there is physics to measure.
     integer, parameter, public :: wp = dp
-#else
-    integer, parameter, public :: wp = sp
-#endif
 
-    ! Spectral coefficients are ALWAYS double precision, in both builds.
+    ! The kind used at the COUPLING BOUNDARY, where aeros exchanges fields with
+    ! external models. sp, because that is yelmo's and fesm-utils' interface
+    ! kind (and chion's `wp_chion`), so a coupled driver need not convert.
     !
-    ! Two reasons, and the first alone is decisive: SHTns takes and returns
-    ! complex(c_double), with no single-precision CPU path (SHT_FP32 is
-    ! GPU-only), so a single-precision spectral array could not be passed
-    ! across the interface at all. Second, spectral coefficients are the
-    ! accumulators of the semi-implicit solve -- summed over every timestep of
-    ! a 10^5 yr integration -- which is exactly where sp round-off compounds.
+    ! Nothing inside aeros uses this. It exists so that the conversion happens
+    ! in one identified place -- the facade, when coupling arrives at M4 --
+    ! rather than leaking a second kind through the model. Declaring it now
+    ! also means the boundary is documented before there is a boundary.
+    integer, parameter, public :: wp_ext = sp
+
+    ! Spectral coefficients. Currently the same kind as wp, but NOT the same
+    ! decision, and deliberately kept as a separate name.
     !
-    ! The cost is negligible: at T42L19 the full spectral state is under 1 MB.
+    ! wp is ours to choose. wp_sh is imposed from outside: SHTns takes and
+    ! returns complex(c_double), with no single-precision CPU path (SHT_FP32 is
+    ! GPU-only), so this kind cannot change even if wp does. Should the physics
+    ! argument ever move wp back to sp, wp_sh must stay dp -- which is exactly
+    ! why the distinction is worth the extra name.
     integer, parameter, public :: wp_sh = dp
 
     public :: sp, dp
@@ -97,10 +108,11 @@ module aeros_defs
 
         ! -- Spectral truncation and grid.
         !
-        ! `trunc` is the triangular truncation T: lmax = mmax = trunc. Per
-        ! docs/design.md section 10.3 this is THE open question of the design
-        ! (T31 + resolution correction vs bare T42), which is why it is a
-        ! namelist parameter from day one and never a compile-time constant.
+        ! `trunc` is the triangular truncation T: lmax = mmax = trunc. It is a
+        ! namelist parameter, never a compile-time constant, because the
+        ! production truncation is still open: M0a settled the cost half of
+        ! docs/design.md section 10.3 (T42 is affordable) but not the accuracy
+        ! half. See par/aeros.nml for the current development default.
         !
         ! nlon/nlat default to the smallest quadratically-unaliased Gaussian
         ! grid for `trunc` when left at -1 (see aeros_grid). Set them
@@ -117,9 +129,10 @@ module aeros_defs
         ! -- Timestepping [s]. ~30 min at T42 (section 4).
         real(wp) :: dt
 
-        ! -- Number of OpenMP threads for the spectral transforms. -1 leaves
-        ! SHTns to use whatever OMP_NUM_THREADS says. Explicit values exist for
-        ! the M0a scaling measurement (section 7), which sweeps 8/16/32/64.
+        ! -- Number of OpenMP threads, i.e. the size of the SHTns config pool
+        ! (aeros_sht_pool_class). -1 takes OMP_NUM_THREADS. An explicit value
+        ! exists for the M0a scaling sweep, which still needs to be run at
+        ! 16/32/64 on the HPC -- see docs/m0a_results.md section 4 caveat 4.
         integer :: nthreads
     end type aeros_param_class
 

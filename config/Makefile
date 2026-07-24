@@ -2,48 +2,30 @@
 .SHELL: /bin/sh
 
 # Command-line options at make call
-debug     ?= 0
-openmp    ?= 1
-precision ?= sp
+debug  ?= 0
+openmp ?= 1
 
-# Working precision of the aeros state and public interfaces (docs/design.md
-# section 4, "Float32 throughout the core"). `sp` is the production setting.
+# NOTE: there is no `precision=` switch. aeros is double precision
+# throughout, fixed in src/aeros_defs.f90.
 #
-# `dp` is not merely a debugging aid here. SHTns -- the spherical-harmonic
-# transform library, and the single largest cost centre in the model (25-40% of
-# runtime at T42L19, docs/design.md section 4) -- has a DOUBLE-PRECISION C
-# interface: `real(c_double)` spatial arrays and `complex(c_double_complex)`
-# spectral arrays. Single precision exists in SHTns only on GPU. So an sp build
-# cannot pass its state across the transform boundary without a copy-convert,
-# which a dp build does not need (see src/aeros_spectral.f90).
+# That reverses docs/design.md section 4 ("Float32 throughout the core") and it
+# was decided by measurement: SHTns has no single-precision CPU path, so an sp
+# core converts up and back at every transform, and transforms are 86-97% of a
+# dynamics step. Measured, sp was ~17% SLOWER than dp at every production
+# configuration. See docs/m0a_results.md section 5.
 #
-# Both builds are therefore real configurations to be measured against each
-# other at M0a, not a production setting plus a validation toggle:
-#   sp: half the memory traffic and SIMD width in the physics and the
-#       semi-implicit solve, paid for with a convert on every transform.
-#   dp: zero-copy transforms, twice the bandwidth everywhere else.
-# Which wins is an empirical question about a machine, and M0a answers it.
-ifeq ($(precision), dp)
-	psuffix = -dp
-else ifeq ($(precision), sp)
-	psuffix =
-else
-$(error precision must be 'sp' or 'dp', got '$(precision)')
-endif
+# Single precision survives only as wp_ext in aeros_defs -- the kind used at
+# the coupling boundary, where an external model hands over sp fields.
 
 # PATH options
-#
-# The sp build keeps the unsuffixed paths, so the artifact locations named by
-# .configme/manifest.toml and .runme/info.json are unchanged and the dp build
-# is purely additive. The two builds therefore coexist without `make clean`.
 #
 # NOTE: openmp=0 and openmp=1 share these directories, so switching openmp does
 # need a `make clean`. Only the dependency include dirs are swapped.
 srcdir  = src
 dyndir  = src/dynamics
 physdir = src/physics
-objdir  = libaeros/include$(psuffix)
-bindir  = libaeros/bin$(psuffix)
+objdir  = libaeros/include
+bindir  = libaeros/bin
 drvdir  = drivers
 testdir = tests
 
@@ -74,14 +56,6 @@ endif
 # Debugging flags with profiling output enabled
 ifeq ($(debug), 2)
 	DFLAGS = $(DFLAGS_PROFILE)
-endif
-
-# Select the working precision. src/aeros_defs.F90 is the only preprocessed
-# source; its .F90 extension makes both gfortran and ifort preprocess it
-# automatically, so no -cpp/-fpp flag is needed and no configme compiler
-# fragment has to know about this switch.
-ifeq ($(precision), dp)
-	DFLAGS += -DAEROS_DP
 endif
 
 # Include flags shared by every compile in this project. Collected once here
@@ -180,13 +154,13 @@ usage:
 	@echo ""
 	@echo " make aeros-static : compiles libaeros.a, the aeros static library."
 	@echo " make run          : compiles aeros_run.x, the standalone driver."
-	@echo " make bench        : compiles bench_sht.x, the M0a transform benchmark."
+	@echo " make bench        : compiles the M0a benchmarks (bench_sht, bench_m0a)."
 	@echo " make tests        : compiles all acceptance tests."
 	@echo " make all          : drivers + tests."
 	@echo " make clean        : cleans object files"
 	@echo ""
 	@echo " Options: debug=1 (bounds/traps), debug=2 (profiling),"
-	@echo "          openmp=0 (serial; omp is default), precision=dp (sp is default)"
+	@echo "          openmp=0 (serial; omp is the default)"
 	@echo ""
 
 clean:

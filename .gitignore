@@ -3,12 +3,9 @@
 # every level and silently excludes it.
 /Makefile
 
-# Build products. The precision=dp build gets its own suffixed directories so
-# it can coexist with the sp build (config/Makefile: psuffix).
+# Build products
 libaeros/include/*
 libaeros/bin/*
-libaeros/include-dp/
-libaeros/bin-dp/
 !libaeros/include/.gitkeep
 !libaeros/bin/.gitkeep
 *.o
@@ -22,7 +19,9 @@ fesm-utils
 # Build provenance
 git_aeros.txt
 
-# Run output
+# Run output. The anchored *.nc catches a driver run by hand from the repo
+# root; under runme the output lands in the staged run directory instead.
+/*.nc
 output/
 logs/
 tmp/

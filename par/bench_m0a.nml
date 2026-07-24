@@ -1,6 +1,7 @@
 &bench
     ! Free-text label for this machine/run, carried into the CSV so a laptop
-    ! run and an HPC run can sit in the same file and be told apart.
+    ! run and an HPC run can sit in the same file and be told apart. Overridable
+    ! as the second command-line argument.
     label = "macbook-m5-10core"
 
     ! Sweep lists. Up to 8 entries each; 0 or absent entries are skipped.
