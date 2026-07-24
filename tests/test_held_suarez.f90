@@ -313,6 +313,7 @@ contains
         par%raw_alpha  = 0.53_wp
         par%ndiff      = 6
         par%tau_diff   = 6.0_wp
+        par%mass_fixer = .FALSE.
 
         call aeros_state_alloc(now, grd, s%nlm, nlev)
         call aeros_timestep_init(ts, par, pool, grd, vg)

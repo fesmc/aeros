@@ -14,6 +14,7 @@ module aeros_timestep
     !   3. horizontal diffusion, implicitly, on zeta, D, T
     !   4. RAW time filter on X^n, using X^(n-1), X^n, X^(n+1)
     !   5. shift: (old, now) <- (now, new), by swapping descriptors
+    !   6. global mass fixer, optional
     !
     ! h = 2 dt, except on the very first step of a run, where there is no
     ! X^(n-1) and the scheme starts as X^(n-1) = X^n with h = dt -- forward in
@@ -70,17 +71,75 @@ module aeros_timestep
     ! operator no longer a pure power of the Laplacian. aeros_budget measures
     ! the drift rather than assuming it away.
     !
+    ! === The mass fixer ======================================================
+    !
+    ! Optional (`mass_fixer`), off by default, applied LAST so that the state
+    ! the caller receives is the fixed one.
+    !
+    ! docs/m1_results.md section 5.3 measures global mass drifting linearly at
+    ! ~6.6e-6 per year under Held-Suarez -- 0.66 of the atmosphere over the
+    ! 10^5 yr this model exists to run -- while the adiabatic tests hold it at
+    ! 2e-16. The cause is not a bug and not the filter: halving dt halves the
+    ! drift, so the per-step error is the scheme's ordinary O(dt^2) one, and
+    ! what makes it accumulate rather than cancel is that the model integrates
+    ! ln(p_s) while mass is int exp(ln p_s) dA. What the discretization
+    ! conserves exactly is the CONTINUOUS statement.
+    !
+    ! The fix is exact and closed-form rather than iterative. Multiplying p_s
+    ! by a constant r multiplies int p_s dA by exactly r, so
+    !
+    !     r = M_target / M ,      ln(p_s) <- ln(p_s) + ln(r)
+    !
+    ! and adding a constant to ln(p_s) changes the (0,0) spectral coefficient
+    ! and NOTHING else. The fixer therefore cannot alter the surface-pressure
+    ! pattern, only its global level -- which is the property that makes it
+    ! safe to apply every step.
+    !
+    ! WHAT `lnr_cum` IS, AND WHAT IT IS NOT. Every correction is accumulated in
+    ! `lnr_cum`, so the fixer's work is always visible rather than silent, and
+    ! a fixer whose workload starts growing is a fixer that is covering for
+    ! something -- watch it.
+    !
+    ! But it is NOT the drift an unfixed twin would have shown, and it must not
+    ! be quoted as one. Measured, it runs 2-2.5x larger: 1.9e-5 against a
+    ! 7.5e-6 unfixed drift on the adiabatic moving state over 200 steps
+    ! (tests/test_timestep.f90), and -1.3e-5/yr against -6.6e-6/yr under
+    ! Held-Suarez at T31L20 over 400 days.
+    !
+    ! The gap is not chaos -- the adiabatic state is not chaotic, and unfixed
+    ! Held-Suarez trajectories seeded differently agree on their drift to
+    ! under a percent. It is that the unfixed run's mass carries a bounded
+    ! oscillation as well as a secular drift (the leapfrog computational mode
+    ! in mass, docs/m1_results.md section 4), and over many steps that
+    ! oscillation largely cancels in the accumulated total. The fixer resets it
+    ! every step and therefore pays for it every step. Each individual
+    ! `lnr_last` is still exactly the leak of that step from the fixed state --
+    ! that is asserted to 1e-14 -- but the SUM is the fixer's workload, not the
+    ! twin's drift.
+    !
+    ! So measuring the unfixed drift needs an unfixed twin run. That is the
+    ! same discipline docs/design.md section 3.8 already requires of the
+    ! correction terms, and for the same reason.
+    !
+    ! It is deliberately NOT a substitute for the deeper choice. Carrying p_s
+    ! rather than ln(p_s) removes the nonlinearity at its root, at the cost of
+    ! the reason ln(p_s) was chosen (the pressure-gradient term is linear in
+    ! it). That remains open; this switch is what makes the two comparable,
+    ! since `mass_fixer = .FALSE.` recovers the unfixed integrator exactly.
+    !
     ! SIGMA-SURFACE DIFFUSION: diffusing T along model levels rather than
     ! pressure surfaces drives spurious heat fluxes over steep orography. It
     ! does not arise at M1 -- the surface is flat -- and the correction belongs
     ! with topography at M2, where docs/design.md section 4.2 already flags the
     ! ice-margin Gibbs problem it is entangled with.
 
-    use aeros_defs,     only : dp, wp, wp_sh, io_unit_err, r_earth, &
+    use aeros_defs,     only : dp, wp, wp_sh, io_unit_err, r_earth, grav, &
                                 aeros_param_class, aeros_grid_class, &
                                 aeros_spec_class, aeros_state_class
     use aeros_spectral, only : aeros_sht_class, aeros_sht_pool_class, &
-                                aeros_sht_pool_get, aeros_sht_synthesis
+                                aeros_sht_pool_get, aeros_sht_synthesis, &
+                                aeros_sht_analysis, aeros_sht_surface_integral, &
+                                aeros_sht_lm
     use aeros_state,    only : aeros_spec_alloc, aeros_spec_end, aeros_spec_copy, &
                                 aeros_spec_swap
     use aeros_vertical, only : aeros_vgrid_class
@@ -127,6 +186,37 @@ module aeros_timestep
         ! [ l(l+1) / lmax(lmax+1) ]^(ndiff/2), precomputed per degree. The
         ! step-dependent part is one multiply, so this never needs rebuilding.
         real(wp), allocatable :: dratio(:)   ! (0:lmax)
+
+        ! === The mass fixer (see the module header) ==========================
+
+        logical  :: mass_fixer = .FALSE.
+
+        ! The mass the fixer restores to [kg]. Negative means "not yet set":
+        ! the first fixed step captures the initial state's mass and corrects
+        ! nothing. A RESTART must set it explicitly, with
+        ! aeros_timestep_set_mass_target, or the target is recaptured from a
+        ! state that has already drifted and the fixer silently ratifies the
+        ! drift instead of removing it.
+        real(dp) :: mass_target = -1.0_dp
+
+        ! What the fixer has had to do. lnr_last is this step's log correction
+        ! factor, and IS exactly that step's leak; lnr_cum is the running
+        ! total, which is the fixer's cumulative workload and runs 2-2.5x an
+        ! unfixed twin's drift -- see the module header before quoting it.
+        real(dp) :: lnr_last = 0.0_dp
+        real(dp) :: lnr_cum  = 0.0_dp
+
+        ! The spectral coefficient of the constant field 1, read back from a
+        ! transform at init rather than written down as sqrt(4 pi). It is the
+        ! only number the fixer needs from SHTns' normalization convention,
+        ! and reading it keeps the fixer correct if that convention ever
+        ! changes -- the same reason aeros_grid reads its geometry back rather
+        ! than recomputing it.
+        real(dp) :: c00  = 0.0_dp
+        integer  :: lm00 = 0            ! index of the (l=0, m=0) mode
+
+        ! Grid scratch for the surface pressure the fixer integrates.
+        real(dp), allocatable :: ps_fix(:,:)
     end type aeros_timestep_class
 
     public :: aeros_timestep_class
@@ -134,6 +224,7 @@ module aeros_timestep
     public :: aeros_timestep_end
     public :: aeros_timestep_step
     public :: aeros_timestep_set_phis
+    public :: aeros_timestep_set_mass_target
     public :: aeros_timestep_diagnose
     public :: aeros_timestep_print
 
@@ -152,6 +243,7 @@ contains
 
         integer  :: nlm, lmax, l
         real(wp) :: lref
+        complex(wp_sh), allocatable :: c_one(:)
 
         nlm  = pool%sht(1)%nlm
         lmax = pool%sht(1)%lmax
@@ -189,7 +281,12 @@ contains
         ts%tau_diff      = par%tau_diff*3600.0_wp      ! namelist is in hours
         ts%ndiff         = par%ndiff
         ts%semi_implicit = par%semi_implicit
+        ts%mass_fixer    = par%mass_fixer
         ts%nstep         = 0
+
+        ts%mass_target = -1.0_dp
+        ts%lnr_last    = 0.0_dp
+        ts%lnr_cum     = 0.0_dp
 
         call aeros_spec_alloc(ts%old, nlm, vg%nlev)
         call aeros_spec_alloc(ts%new, nlm, vg%nlev)
@@ -206,6 +303,32 @@ contains
         do l = 0, lmax
             ts%dratio(l) = (real(l*(l+1), wp)/lref)**(ts%ndiff/2)
         end do
+
+        if (ts%mass_fixer) then
+            allocate(ts%ps_fix(grd%nlon, grd%nlat))
+
+            ! Read the (0,0) coefficient of the constant field 1 out of a
+            ! transform. Analysis overwrites its input, which is why this uses
+            ! the scratch it has just allocated rather than a saved field.
+            ts%lm00 = aeros_sht_lm(pool%sht(1), 0, 0)
+
+            allocate(c_one(nlm))
+            ts%ps_fix = 1.0_dp
+            call aeros_sht_analysis(pool%sht(1), ts%ps_fix, c_one)
+            ts%c00 = real(c_one(ts%lm00), dp)
+            deallocate(c_one)
+
+            ! The constant field 1 must have a non-zero (0,0) coefficient in
+            ! any normalization. A zero means the transform or the indexing is
+            ! not what the fixer believes, and it is better to say so at init
+            ! than to divide by it a thousand steps in.
+            if (abs(ts%c00) < 1.0e-12_dp) then
+                write(io_unit_err,*) "aeros_timestep_init:: error: the mass fixer read a "// &
+                                        "(0,0) coefficient of ", ts%c00, " for the constant "// &
+                                        "field 1, which cannot be right."
+                error stop 1
+            end if
+        end if
 
         return
 
@@ -227,6 +350,11 @@ contains
         call aeros_hs_end(ts%hs)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
+        if (allocated(ts%ps_fix)) deallocate(ts%ps_fix)
+
+        ts%mass_target = -1.0_dp
+        ts%lnr_last    = 0.0_dp
+        ts%lnr_cum     = 0.0_dp
 
         return
 
@@ -254,6 +382,13 @@ contains
             ! No X^(n-1) yet: start from rest against the current state.
             h = ts%dt
             call aeros_spec_copy(ts%old, now%spec)
+
+            ! Capture the fixer's target BEFORE any dynamics have run. Taking
+            ! it after the first step instead would bake that step's error into
+            ! the target and make it permanent.
+            if (ts%mass_fixer .and. ts%mass_target < 0.0_dp) then
+                ts%mass_target = mass_of(ts, s, now%spec)
+            end if
         else
             h = 2.0_wp*ts%dt
         end if
@@ -316,11 +451,95 @@ contains
         call aeros_spec_swap(ts%old, now%spec)
         call aeros_spec_swap(now%spec, ts%new)
 
+        ! === 6. Mass fixer ===================================================
+        ! After the swap, so it acts on X^(n+1) -- the state the caller is
+        ! about to receive -- and after the filter, so nothing follows it that
+        ! could reintroduce what it just removed.
+        if (ts%mass_fixer) call mass_fix(ts, s, now%spec)
+
         ts%nstep = ts%nstep + 1
 
         return
 
     end subroutine aeros_timestep_step
+
+    subroutine mass_fix(ts, sht, spec)
+        ! Restore the global mass by the one rescaling of p_s that does it
+        ! exactly. See the module header for why this exists and what it is
+        ! deliberately not.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_sht_class),      intent(in)    :: sht
+        type(aeros_spec_class),     intent(inout) :: spec
+
+        real(dp) :: lnr
+
+        lnr = log(ts%mass_target/mass_of(ts, sht, spec))
+
+        ! p_s <- r p_s, which in ln(p_s) is the addition of a constant, which
+        ! is a change to the (0,0) coefficient alone. Every other wavenumber is
+        ! untouched, so the surface-pressure pattern is exactly what the
+        ! dynamics produced.
+        spec%lnps(ts%lm00) = spec%lnps(ts%lm00) + cmplx(lnr*ts%c00, 0.0_dp, wp_sh)
+
+        ts%lnr_last = lnr
+        ts%lnr_cum  = ts%lnr_cum + lnr
+
+        return
+
+    end subroutine mass_fix
+
+    real(dp) function mass_of(ts, sht, spec) result(mass)
+        ! Global dry-air mass [kg] of a spectral state.
+        !
+        ! Deliberately the SAME quadrature aeros_budget uses: a fixer that
+        ! measured mass differently from the diagnostic would drive the
+        ! diagnostic somewhere other than zero, and the disagreement would look
+        ! like a leak.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_sht_class),      intent(in)    :: sht
+        type(aeros_spec_class),     intent(in)    :: spec
+
+        ! ln(p_s) -> p_s on the grid. One single-level synthesis, against the
+        ! ~11 per level the step has already done.
+        call aeros_sht_synthesis(sht, spec%lnps, ts%ps_fix)
+        ts%ps_fix = exp(ts%ps_fix)
+
+        mass = aeros_sht_surface_integral(sht, ts%ps_fix)/grav
+
+        return
+
+    end function mass_of
+
+    subroutine aeros_timestep_set_mass_target(ts, mass)
+        ! Set the mass the fixer restores to, explicitly.
+        !
+        ! Exists for restarts. Without it a restarted run recaptures the target
+        ! from its own initial state, which is the already-drifted state the
+        ! previous run ended on -- so the fixer would hold the drift rather
+        ! than remove it, and would do so silently.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        real(dp),                   intent(in)    :: mass
+
+        if (mass <= 0.0_dp) then
+            write(io_unit_err,*) "aeros_timestep_set_mass_target:: error: mass must be > 0, got ", &
+                                    mass
+            error stop 1
+        end if
+
+        ts%mass_target = mass
+
+        return
+
+    end subroutine aeros_timestep_set_mass_target
 
     subroutine diffuse(ts, sht, h)
         ! Implicit del^ndiff damping of vorticity, divergence and temperature.
@@ -508,6 +727,11 @@ contains
                                     "  (1 = classical Robert-Asselin)"
         write(iou,"(a,i9)")     "   diffusion order            ", ts%ndiff
         write(iou,"(a,f9.2,a)") "   diffusion e-folding at lmax", ts%tau_diff/3600.0_wp, " h"
+        if (ts%mass_fixer) then
+            write(iou,"(a)")    "   mass fixer                  ON  (p_s rescaled each step)"
+        else
+            write(iou,"(a)")    "   mass fixer                  off"
+        end if
 
         call aeros_semiimp_print(ts%si, iou)
         call aeros_hs_print(ts%hs, iou)

@@ -81,6 +81,16 @@
     ! The point of this file.
     held_suarez = .TRUE.
 
+    ! Global mass fixer. ON: docs/m1_results.md 5.3 measured this configuration
+    ! leaking 6.6e-6 of the atmosphere per year, which over the integrations
+    ! this model exists for is 0.66 of it. The fixer removes that exactly.
+    !
+    ! It reports what it put back, but that total is the fixer's WORKLOAD and
+    ! is ~2x an unfixed run's drift (docs/m2_results.md 6). To measure the
+    ! drift itself, run an unfixed twin: set this .FALSE., which also
+    ! reproduces the unfixed M1.5 numbers.
+    mass_fixer = .TRUE.
+
     nthreads = -1
 /
 

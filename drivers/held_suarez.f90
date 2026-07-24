@@ -128,7 +128,12 @@ program held_suarez
     write(*,"(a,f9.2,a,i0,a)")   "               sampling every ", dt_sample, &
                                     " days (", nsample, " samples)"
     write(*,*) ""
-    write(*,"(a)") "        day      max|u|     min[T]     max[T]        mass drift"
+    ! The last column is the mass the fixer has put back so far. With the fixer
+    ! off it is identically zero; with it on, the "mass drift" column goes to
+    ! machine zero and this one carries the fixer's running workload. It is NOT
+    ! the drift an unfixed run would show -- see the note after the budgets.
+    write(*,"(a)") "        day      max|u|     min[T]     max[T]        mass drift"// &
+                    "       fixer removed"
 
     do n = 1, nsample
 
@@ -153,9 +158,10 @@ program held_suarez
         ! quantity that should not move at all.
         if (mod(n, max(1, nsample/40)) == 0) then
             call aeros_budget_calc(bud1, ams%vgrid, ams%grd, ams%now, phis)
-            write(*,"(f11.1,3f11.2,es18.3)") day, &
+            write(*,"(f11.1,3f11.2,2es18.3)") day, &
                     maxval(abs(ams%now%u)), minval(ams%now%temp_g), maxval(ams%now%temp_g), &
-                    (bud1%mass - bud0%mass)/bud0%mass
+                    (bud1%mass - bud0%mass)/bud0%mass, &
+                    exp(-ams%ts%lnr_cum) - 1.0_dp
         end if
 
     end do
@@ -174,6 +180,21 @@ program held_suarez
     write(*,"(a)") " construction, so only the mass drift says anything about the integrator."
     call aeros_budget_report(bud1, bud0, real(day_end, dp)*86400.0_dp, &
                                 "Held-Suarez run")
+
+    if (ams%ts%mass_fixer) then
+        write(*,*) ""
+        write(*,"(a)") " The mass fixer was ON, so the mass drift above is the fixer's"
+        write(*,"(a)") " residual and not the integrator's. What it had to put back:"
+        write(*,"(a,es12.3)")   "   relative mass restored, total    ", &
+                                    exp(-ams%ts%lnr_cum) - 1.0_dp
+        write(*,"(a,es12.3,a)") "   the same as a rate               ", &
+                                    (exp(-ams%ts%lnr_cum) - 1.0_dp) &
+                                        /(real(day_end, dp)/365.25_dp), " per year"
+        write(*,"(a)") " This is the fixer's WORKLOAD, not the drift an unfixed run would"
+        write(*,"(a)") " show -- measured, it runs ~2x larger, because the unfixed run's"
+        write(*,"(a)") " mass oscillation partly cancels over time while the fixer pays"
+        write(*,"(a)") " for it every step. For the drift itself, run an unfixed twin."
+    end if
 
     call aeros_diag_finalize(dgn, ams%vgrid)
     call aeros_diag_summary(dgn, ams%grd)
