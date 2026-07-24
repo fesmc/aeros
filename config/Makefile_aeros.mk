@@ -81,13 +81,22 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
 							$(objdir)/aeros_state.o $(objdir)/aeros_vertical.o \
 							$(objdir)/aeros_vordiv.o $(objdir)/aeros_tendency.o \
-							$(objdir)/aeros_semiimp.o
+							$(objdir)/aeros_semiimp.o $(objdir)/aeros_held_suarez.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
 #
 # Column physics: radiation, condensation, surface tiles (sections 5, 6).
-# Empty at M0; filled at M2.
+# Empty at M0; the Held-Suarez benchmark forcing lands at M1.5 and the real
+# parameterizations at M2.
+
+# M1.5: Held & Suarez (1994) idealized forcing, the M1 validation benchmark.
+# Consumes the tendency's grid-space work arrays, so it is compiled after the
+# dynamics and archived between them and the core.
+$(objdir)/aeros_held_suarez.o: $(physdir)/aeros_held_suarez.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
+							$(objdir)/aeros_vertical.o $(objdir)/aeros_tendency.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros core #################################
 #
@@ -126,12 +135,13 @@ aeros_base =     $(objdir)/aeros_defs.o \
 aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_vordiv.o \
                  $(objdir)/aeros_tendency.o \
-                 $(objdir)/aeros_semiimp.o \
-                 $(objdir)/aeros_timestep.o
+                 $(objdir)/aeros_semiimp.o
 
-# M2
-aeros_physics =
+aeros_physics =  $(objdir)/aeros_held_suarez.o
 
-aeros_core =     $(objdir)/aeros_budget.o \
+# aeros_timestep sits above the physics as well as the dynamics -- it is what
+# calls the forcing -- so it is archived after both.
+aeros_core =     $(objdir)/aeros_timestep.o \
+                 $(objdir)/aeros_budget.o \
                  $(objdir)/aeros_io.o \
                  $(objdir)/aeros.o

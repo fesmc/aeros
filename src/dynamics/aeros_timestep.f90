@@ -88,10 +88,12 @@ module aeros_timestep
     use aeros_tendency, only : aeros_tend_class, aeros_work_class, &
                                 aeros_tend_alloc, aeros_tend_end, &
                                 aeros_work_alloc, aeros_work_end, &
-                                aeros_tendency_calc
+                                aeros_tendency_grid, aeros_tendency_spectral
     use aeros_semiimp,  only : aeros_semiimp_class, aeros_semiimp_init, &
                                 aeros_semiimp_end, aeros_semiimp_set_step, &
                                 aeros_semiimp_step, aeros_semiimp_print
+    use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
+                                aeros_hs_apply, aeros_hs_print
 
     implicit none
 
@@ -117,6 +119,10 @@ module aeros_timestep
         type(aeros_tend_class)    :: tnd
         type(aeros_work_class)    :: wrk
         type(aeros_semiimp_class) :: si
+
+        ! Idealized forcing (M1.5). At M2 this becomes a physics driver with
+        ! several components; the seam it is applied at does not change.
+        type(aeros_hs_class)      :: hs
 
         ! [ l(l+1) / lmax(lmax+1) ]^(ndiff/2), precomputed per degree. The
         ! step-dependent part is one multiply, so this never needs rebuilding.
@@ -193,6 +199,8 @@ contains
         ! Factorized for the start-up step; switched to 2 dt after it.
         call aeros_semiimp_init(ts%si, vg, lmax, ts%dt)
 
+        call aeros_hs_init(ts%hs, grd, par%held_suarez)
+
         allocate(ts%dratio(0:lmax))
         lref = real(lmax*(lmax+1), wp)
         do l = 0, lmax
@@ -216,6 +224,7 @@ contains
         call aeros_tend_end(ts%tnd)
         call aeros_work_end(ts%wrk)
         call aeros_semiimp_end(ts%si)
+        call aeros_hs_end(ts%hs)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
 
@@ -251,8 +260,17 @@ contains
 
         if (ts%si%dt_step /= h) call aeros_semiimp_set_step(ts%si, h)
 
-        ! === 1. The nonlinear right-hand sides ===============================
-        call aeros_tendency_calc(pool, vg, grd, now%spec, ts%wrk, ts%tnd)
+        ! === 1. The right-hand sides, dynamics then physics ==================
+        !
+        ! Split at the grid-space seam so the forcing enters BEFORE the
+        ! transforms back to spectral space -- which for a horizontally varying
+        ! Rayleigh drag is a correctness requirement, not an optimization. See
+        ! aeros_tendency_grid.
+        call aeros_tendency_grid(pool, vg, grd, now%spec, ts%wrk)
+
+        if (ts%hs%enabled) call aeros_hs_apply(ts%hs, vg, ts%wrk)
+
+        call aeros_tendency_spectral(pool, vg, ts%wrk, ts%tnd)
 
         ! === 2. Advance ======================================================
         !
@@ -492,6 +510,7 @@ contains
         write(iou,"(a,f9.2,a)") "   diffusion e-folding at lmax", ts%tau_diff/3600.0_wp, " h"
 
         call aeros_semiimp_print(ts%si, iou)
+        call aeros_hs_print(ts%hs, iou)
 
         return
 

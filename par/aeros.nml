@@ -91,6 +91,17 @@
     ndiff    = 6
     tau_diff = 6.0
 
+    ! Held & Suarez (1994) idealized forcing -- the M1 validation benchmark
+    ! (docs/design.md section 7). .FALSE. leaves the bare adiabatic core, which
+    ! is what the conservation tests want and what this namelist's default
+    ! resting initial condition should sit still in.
+    !
+    ! Run the benchmark with par/held_suarez.nml rather than by flipping this:
+    ! the benchmark needs its own vertical grid (20 evenly spaced sigma levels)
+    ! and its own run length, and those live together in one file so a
+    ! Held-Suarez result cannot be produced from a half-converted namelist.
+    held_suarez = .FALSE.
+
     ! OpenMP threads, i.e. the size of the SHTns config pool. -1 leaves it to
     ! OMP_NUM_THREADS. The M0a scaling sweep still has to be run at 16/32/64 on
     ! the HPC -- see docs/m0a_results.md section 4 caveat 4.

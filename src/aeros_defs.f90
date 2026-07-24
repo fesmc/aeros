@@ -157,6 +157,13 @@ module aeros_defs
         ! semi-implicit solve's value measurable (tests/test_timestep.f90).
         logical  :: semi_implicit
 
+        ! -- Idealized forcing. Held & Suarez (1994), the M1 validation
+        ! benchmark (docs/design.md section 7). Off gives the bare adiabatic
+        ! core, which is what the conservation tests want. The benchmark's own
+        ! constants are NOT namelist parameters -- see
+        ! src/physics/aeros_held_suarez.f90 for why.
+        logical  :: held_suarez
+
         ! -- Number of OpenMP threads, i.e. the size of the SHTns config pool
         ! (aeros_sht_pool_class). -1 takes OMP_NUM_THREADS. An explicit value
         ! exists for the M0a scaling sweep, which still needs to be run at
@@ -185,6 +192,15 @@ module aeros_defs
         real(wp), allocatable :: lon(:)       ! longitude [degrees east], (nlon)
         real(wp), allocatable :: lat(:)       ! latitude [degrees north], (nlat), descending
         real(dp), allocatable :: colat(:)     ! colatitude [rad], (nlat), ascending
+
+        ! sin(latitude), i.e. SHTns' Gauss nodes verbatim, (nlat). Kept
+        ! alongside `lat` because it is the only exactly antisymmetric
+        ! representation of them: anything routed through acos and back is
+        ! symmetric only to a rounding error, which is enough to put a spurious
+        ! hemispheric asymmetry into a latitudinally-symmetric forcing (the
+        ! Held-Suarez sin^2/cos^4 factors) and hence into the diagnostic that
+        ! is supposed to measure the model's own symmetry.
+        real(dp), allocatable :: sinlat(:)
 
         ! Gauss-Legendre quadrature weights, (nlat), summing to 2. Kept in dp
         ! in both builds: every global conservation check the design demands
@@ -281,6 +297,7 @@ contains
         call nml_read(filename, nml_group, "tau_diff",      par%tau_diff)
         call nml_read(filename, nml_group, "ndiff",         par%ndiff)
         call nml_read(filename, nml_group, "semi_implicit", par%semi_implicit)
+        call nml_read(filename, nml_group, "held_suarez",   par%held_suarez)
 
         if (par%trunc < 1) then
             write(io_unit_err,*) "aeros_par_load:: error: trunc must be >= 1, got ", par%trunc

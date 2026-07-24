@@ -107,6 +107,7 @@ contains
 
         par%dt            = dt
         par%semi_implicit = semi_implicit
+        par%held_suarez   = .FALSE.
         par%eps_filter    = 0.06_wp
         par%raw_alpha     = 0.53_wp
         par%ndiff         = 6

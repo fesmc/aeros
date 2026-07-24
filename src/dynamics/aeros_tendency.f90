@@ -157,6 +157,8 @@ module aeros_tendency
     public :: aeros_work_alloc
     public :: aeros_work_end
     public :: aeros_tendency_calc
+    public :: aeros_tendency_grid
+    public :: aeros_tendency_spectral
 
 contains
 
@@ -258,7 +260,12 @@ contains
     end subroutine aeros_work_end
 
     subroutine aeros_tendency_calc(pool, vg, grd, now, wrk, tnd)
-        ! One evaluation of the primitive-equation right-hand sides.
+        ! One evaluation of the primitive-equation right-hand sides, with no
+        ! forcing. The two halves below, back to back.
+        !
+        ! Kept because it is what a test of the DYNAMICS wants: the adiabatic
+        ! right-hand side and nothing else. The integrator does not use it --
+        ! it calls the halves so that physics can go between them.
 
         implicit none
 
@@ -269,8 +276,50 @@ contains
         type(aeros_work_class),     intent(inout) :: wrk
         type(aeros_tend_class),     intent(inout) :: tnd
 
+        call aeros_tendency_grid(pool, vg, grd, now, wrk)
+        call aeros_tendency_spectral(pool, vg, wrk, tnd)
+
+        return
+
+    end subroutine aeros_tendency_calc
+
+    subroutine aeros_tendency_grid(pool, vg, grd, now, wrk)
+        ! Spectral state -> grid-space right-hand sides.
+        !
+        ! Leaves the momentum RHS in wrk%ae/wrk%an, the thermodynamic one in
+        ! wrk%dtdt and the surface-pressure one in wrk%dlnpsdt, all ON THE GRID
+        ! and all ADIABATIC.
+        !
+        ! === Why the evaluation is split here ================================
+        !
+        ! This is the physics seam. A forcing or parameterization adds its
+        ! contribution to those three arrays between this routine and
+        ! aeros_tendency_spectral, and the transforms back to spectral space
+        ! then carry dynamics and physics together -- no second set of
+        ! transforms, and no separate physics tendency to keep in step.
+        !
+        ! It has to be here rather than after the analysis, and that is a
+        ! correctness point rather than an efficiency one. The momentum RHS is
+        ! turned into vorticity and divergence tendencies by taking a CURL and
+        ! a DIVERGENCE of the vector (ae, an). A drag -k(x) v with k varying
+        ! horizontally -- Held-Suarez' Rayleigh friction, whose k_v depends on
+        ! sigma and therefore on the local surface pressure -- is not
+        ! -k*zeta and -k*D in spectral space, because k does not commute with
+        ! the curl. Applied here it is exact; applied to the spectral
+        ! tendencies afterwards it would be wrong wherever k has structure.
+        !
+        ! The same seam is where M2's column physics goes, for the same reason
+        ! and with the same interface.
+
+        implicit none
+
+        type(aeros_sht_pool_class), intent(in), target :: pool
+        type(aeros_vgrid_class),    intent(in)    :: vg
+        type(aeros_grid_class),     intent(in)    :: grd
+        type(aeros_spec_class),     intent(in)    :: now
+        type(aeros_work_class),     intent(inout) :: wrk
+
         type(aeros_sht_class), pointer :: s
-        complex(wp_sh) :: ek_lm(pool%sht(1)%nlm)
         integer :: k, nlev
 
         nlev = vg%nlev
@@ -295,6 +344,30 @@ contains
 
         ! === 3. Column loop: everything vertical ============================
         call column_terms(vg, grd, wrk)
+
+        return
+
+    end subroutine aeros_tendency_grid
+
+    subroutine aeros_tendency_spectral(pool, vg, wrk, tnd)
+        ! Grid-space right-hand sides -> spectral tendencies.
+        !
+        ! Whatever is in wrk%ae, wrk%an, wrk%dtdt and wrk%dlnpsdt at this point
+        ! is what gets transformed, so a forcing added since
+        ! aeros_tendency_grid is carried through with the dynamics.
+
+        implicit none
+
+        type(aeros_sht_pool_class), intent(in), target :: pool
+        type(aeros_vgrid_class),    intent(in)    :: vg
+        type(aeros_work_class),     intent(inout) :: wrk
+        type(aeros_tend_class),     intent(inout) :: tnd
+
+        type(aeros_sht_class), pointer :: s
+        complex(wp_sh) :: ek_lm(pool%sht(1)%nlm)
+        integer :: k, nlev
+
+        nlev = vg%nlev
 
         ! === 4. Grid -> spectral, one thread per level ======================
         !$omp parallel do num_threads(pool%nthreads) private(k,s,ek_lm) schedule(static)
@@ -321,7 +394,7 @@ contains
 
         return
 
-    end subroutine aeros_tendency_calc
+    end subroutine aeros_tendency_spectral
 
     subroutine column_terms(vg, grd, wrk)
         ! The vertical half of the right-hand sides, column by column.

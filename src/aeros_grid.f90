@@ -39,11 +39,13 @@ contains
         allocate(grd%lon(grd%nlon))
         allocate(grd%lat(grd%nlat))
         allocate(grd%colat(grd%nlat))
+        allocate(grd%sinlat(grd%nlat))
         allocate(grd%gauss_w(grd%nlat))
         allocate(grd%area(grd%nlon,grd%nlat))
         allocate(grd%coriolis(grd%nlon,grd%nlat))
 
         grd%colat   = sht%colat
+        grd%sinlat  = sht%sinlat
         grd%gauss_w = sht%gauss_w
 
         do i = 1, grd%nlon
@@ -98,6 +100,7 @@ contains
         if (allocated(grd%lon))      deallocate(grd%lon)
         if (allocated(grd%lat))      deallocate(grd%lat)
         if (allocated(grd%colat))    deallocate(grd%colat)
+        if (allocated(grd%sinlat))   deallocate(grd%sinlat)
         if (allocated(grd%gauss_w))  deallocate(grd%gauss_w)
         if (allocated(grd%area))     deallocate(grd%area)
         if (allocated(grd%coriolis)) deallocate(grd%coriolis)
