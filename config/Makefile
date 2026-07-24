@@ -125,6 +125,13 @@ run : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    aeros_run.x is ready."
 
+# M0a: the transform scaling measurement that decides the truncation
+# (docs/design.md sections 4.3, 7, 9 risk 2). Needs openmp=1 to mean anything.
+bench : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/bench_sht.x $(drvdir)/bench_sht.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    bench_sht.x is ready."
+
 ## Acceptance tests ###########################
 
 defs : aeros-static
@@ -146,7 +153,7 @@ grid : aeros-static
 tests : defs grid spectral
 
 # Driver executables
-drivers : run
+drivers : run bench
 
 all : drivers tests
 
@@ -157,6 +164,7 @@ usage:
 	@echo ""
 	@echo " make aeros-static : compiles libaeros.a, the aeros static library."
 	@echo " make run          : compiles aeros_run.x, the standalone driver."
+	@echo " make bench        : compiles bench_sht.x, the M0a transform benchmark."
 	@echo " make tests        : compiles all acceptance tests."
 	@echo " make all          : drivers + tests."
 	@echo " make clean        : cleans object files"
