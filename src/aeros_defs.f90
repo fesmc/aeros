@@ -129,6 +129,26 @@ module aeros_defs
         ! -- Timestepping [s]. ~30 min at T42 (section 4).
         real(wp) :: dt
 
+        ! -- Time filter and horizontal diffusion (src/dynamics/aeros_timestep.f90).
+        !
+        ! `raw_alpha` = 1 turns the Williams (2009) filter back into the
+        ! classical Robert-Asselin one, which is the comparison that keeps the
+        ! choice auditable rather than baked in.
+        !
+        ! `tau_diff` is in HOURS, and is the e-folding time of the shortest
+        ! resolved wave -- the one number in a hyperdiffusion that can be
+        ! reasoned about without knowing the truncation.
+        real(wp) :: eps_filter    ! Robert-Asselin coefficient nu [-]
+        real(wp) :: raw_alpha     ! Williams alpha [-]
+        real(wp) :: tau_diff      ! diffusion e-folding time at l = lmax [h]
+        integer  :: ndiff         ! diffusion order: 2, 4 or 6
+
+        ! Explicit leapfrog instead of semi-implicit. Not a production
+        ! configuration -- it is limited by the ~300 m s-1 external gravity
+        ! wave, so dt must drop by ~5x -- but it is what makes the
+        ! semi-implicit solve's value measurable (tests/test_timestep.f90).
+        logical  :: semi_implicit
+
         ! -- Number of OpenMP threads, i.e. the size of the SHTns config pool
         ! (aeros_sht_pool_class). -1 takes OMP_NUM_THREADS. An explicit value
         ! exists for the M0a scaling sweep, which still needs to be run at
@@ -247,6 +267,12 @@ contains
         call nml_read(filename, nml_group, "nlev",     par%nlev)
         call nml_read(filename, nml_group, "dt",       par%dt)
         call nml_read(filename, nml_group, "nthreads", par%nthreads)
+
+        call nml_read(filename, nml_group, "eps_filter",    par%eps_filter)
+        call nml_read(filename, nml_group, "raw_alpha",     par%raw_alpha)
+        call nml_read(filename, nml_group, "tau_diff",      par%tau_diff)
+        call nml_read(filename, nml_group, "ndiff",         par%ndiff)
+        call nml_read(filename, nml_group, "semi_implicit", par%semi_implicit)
 
         if (par%trunc < 1) then
             write(io_unit_err,*) "aeros_par_load:: error: trunc must be >= 1, got ", par%trunc

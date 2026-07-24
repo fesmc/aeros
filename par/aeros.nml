@@ -40,7 +40,48 @@
     nlev     = 16
 
     ! Dynamics timestep [s]. ~30 min at T42 (section 4).
+    !
+    ! The semi-implicit solve is what makes this affordable: the explicit
+    ! gravity-wave limit is ~600 s at T31L20 and ~450 s at T42, both printed at
+    ! run start by aeros_semiimp_print. Raising dt above ~2x the ADVECTIVE CFL
+    ! is not protected by the semi-implicit scheme -- it only handles the
+    ! gravity waves.
     dt       = 1800.0
+
+    ! Semi-implicit leapfrog (.TRUE.) or fully explicit leapfrog (.FALSE.).
+    ! Explicit is not a production configuration; it exists so the value of the
+    ! semi-implicit solve is measured rather than asserted. With it, dt must
+    ! fall below the explicit limit above or the run diverges within ~20 steps.
+    semi_implicit = .TRUE.
+
+    ! Time filter. Williams (2009) RAW: nu is the classical Robert-Asselin
+    ! coefficient and alpha splits the displacement between the two time
+    ! levels. alpha = 1.0 recovers the classical filter exactly, which is the
+    ! comparison to run if the filter is ever suspected.
+    !
+    ! nu = 0.06 is mid-range for a spectral model of this size; alpha = 0.53 is
+    ! Williams' recommended value, and buys third-order amplitude accuracy and
+    ! exact conservation of the mean -- which is what matters over 10^5 yr,
+    ! where the classical filter's mean damping is a slow drift rather than a
+    ! transient.
+    eps_filter = 0.06
+    raw_alpha  = 0.53
+
+    ! Horizontal hyperdiffusion, applied implicitly to vorticity, divergence
+    ! and temperature (never to ln p_s -- that would leak mass).
+    !
+    ! ndiff is the order: 6 = del^6, the usual choice for a T31-T85 spectral
+    ! core. Lower orders damp the resolved scales too broadly; higher ones make
+    ! the operator so scale-selective that the last wavenumber is the only one
+    ! affected at all.
+    !
+    ! tau_diff [h] is the e-folding time of the l = lmax wave. 6 h is a
+    ! conventional starting value; it is a TUNING parameter, and the right
+    ! value depends on truncation and on how vigorous the flow is. Retune it
+    ! when the truncation changes, and check it against the enstrophy spectrum
+    ! rather than against the look of a single field.
+    ndiff    = 6
+    tau_diff = 6.0
 
     ! OpenMP threads, i.e. the size of the SHTns config pool. -1 leaves it to
     ! OMP_NUM_THREADS. The M0a scaling sweep still has to be run at 16/32/64 on

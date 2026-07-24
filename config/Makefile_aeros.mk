@@ -74,6 +74,16 @@ $(objdir)/aeros_semiimp.o: $(dyndir)/aeros_semiimp.f90 \
 							$(objdir)/aeros_vertical.o $(objdir)/aeros_tendency.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M1.4: the leapfrog itself -- time levels, RAW filter, hyperdiffusion. Sits on
+# top of every other dynamics module and is the only place a prognostic
+# variable changes value.
+$(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
+							$(objdir)/aeros_state.o $(objdir)/aeros_vertical.o \
+							$(objdir)/aeros_vordiv.o $(objdir)/aeros_tendency.o \
+							$(objdir)/aeros_semiimp.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 ## aeros physics ##############################
 #
 # Column physics: radiation, condensation, surface tiles (sections 5, 6).
@@ -83,6 +93,14 @@ $(objdir)/aeros_semiimp.o: $(dyndir)/aeros_semiimp.f90 \
 #
 # IO and the public facade. These sit above everything else and must be
 # archived last.
+
+# Global conservation integrals. In src/ rather than src/dynamics/ because the
+# budgets are a property of the model state, not of the integrator, and M2 adds
+# water and latent energy to them. Depends on the vertical coordinate for the
+# layer masses, so it is archived after the dynamics.
+$(objdir)/aeros_budget.o: $(srcdir)/aeros_budget.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 $(objdir)/aeros_io.o: $(srcdir)/aeros_io.f90 \
 							$(objdir)/aeros_defs.o
@@ -108,10 +126,12 @@ aeros_base =     $(objdir)/aeros_defs.o \
 aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_vordiv.o \
                  $(objdir)/aeros_tendency.o \
-                 $(objdir)/aeros_semiimp.o
+                 $(objdir)/aeros_semiimp.o \
+                 $(objdir)/aeros_timestep.o
 
 # M2
 aeros_physics =
 
-aeros_core =     $(objdir)/aeros_io.o \
+aeros_core =     $(objdir)/aeros_budget.o \
+                 $(objdir)/aeros_io.o \
                  $(objdir)/aeros.o
