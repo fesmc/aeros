@@ -44,8 +44,13 @@ $(objdir)/aeros_state.o: $(srcdir)/aeros_state.f90 \
 
 ## aeros dynamics #############################
 #
-# The spectral primitive-equation core (docs/design.md sections 3.2, 4).
-# Empty at M0; filled at M1, validated against Held-Suarez.
+# The spectral primitive-equation core (docs/design.md sections 3.2, 4),
+# validated against Held-Suarez.
+
+# M1.1: hybrid sigma-pressure coordinate and the hydrostatic relation on it.
+$(objdir)/aeros_vertical.o: $(dyndir)/aeros_vertical.f90 \
+							$(objdir)/aeros_defs.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
 #
@@ -63,7 +68,8 @@ $(objdir)/aeros_io.o: $(srcdir)/aeros_io.f90 \
 
 $(objdir)/aeros.o: $(srcdir)/aeros.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
-							$(objdir)/aeros_grid.o $(objdir)/aeros_state.o
+							$(objdir)/aeros_grid.o $(objdir)/aeros_state.o \
+							$(objdir)/aeros_vertical.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ###############################################
@@ -77,8 +83,7 @@ aeros_base =     $(objdir)/aeros_defs.o \
                  $(objdir)/aeros_grid.o \
                  $(objdir)/aeros_state.o
 
-# M1
-aeros_dynamics =
+aeros_dynamics = $(objdir)/aeros_vertical.o
 
 # M2
 aeros_physics =

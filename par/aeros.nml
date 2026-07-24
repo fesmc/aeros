@@ -42,8 +42,44 @@
     ! Dynamics timestep [s]. ~30 min at T42 (section 4).
     dt       = 1800.0
 
-    ! OpenMP threads for the spectral transforms. -1 leaves it to
-    ! OMP_NUM_THREADS. The M0a scaling measurement (section 7) sweeps
-    ! 8/16/32/64 through this parameter.
+    ! OpenMP threads, i.e. the size of the SHTns config pool. -1 leaves it to
+    ! OMP_NUM_THREADS. The M0a scaling sweep still has to be run at 16/32/64 on
+    ! the HPC -- see docs/m0a_results.md section 4 caveat 4.
     nthreads = -1
+/
+
+&aeros_vert
+    ! Vertical coordinate: hybrid sigma-pressure (Simmons & Burridge 1981),
+    !     p_(k+1/2) = A_(k+1/2) + B_(k+1/2) * p_s
+    ! generated from a stretched sigma profile. See src/dynamics/aeros_vertical.f90.
+
+    ! Level placement. Spacing is proportional to stretch_a at the surface and
+    ! to stretch_a + stretch_r*(1-stretch_a) at the top, so SMALLER stretch_a
+    ! means finer resolution near the ground.
+    !
+    ! 0.4 / 2.0 gives 4 full levels below 850 hPa at L16 and 5 at L20 --
+    ! docs/design.md section 4.1 asks for 3-4, because the polar winter
+    ! boundary layer is 50-200 m deep with 10-25 K inversions -- while keeping
+    ! 3 levels above 200 hPa. Section 4.1 also warns that level count moves the jet latitude
+    ! and hence the storm track, so do not starve the upper troposphere to feed
+    ! the boundary layer.
+    !
+    ! stretch_a = 1.0 gives EVENLY SPACED sigma, the Held-Suarez configuration.
+    stretch_a = 0.4
+    stretch_r = 2.0
+
+    ! Hybrid transition: B = 0 (pure pressure) above this sigma, ramping to 1
+    ! at the surface. 0.0 gives pure sigma exactly, with A = 0 everywhere.
+    sigma_t   = 0.2
+
+    ! Model top [Pa]. Low-top is accepted (docs/design.md section 4.1: give up
+    ! on the QBO); must be > 0 for a hybrid coordinate.
+    p_top     = 1000.0
+
+    ! Reference state for the semi-implicit solve (M1.4). Isothermal, and
+    ! deliberately warm: the scheme is stable when the reference temperature is
+    ! at or above the column temperature and unstable well below it, so the
+    ! error is one-sided.
+    ps_ref    = 1.0e5
+    t_ref     = 300.0
 /

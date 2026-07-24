@@ -20,6 +20,8 @@ module aeros
     use aeros_spectral, only : aeros_sht_class, aeros_sht_init, aeros_sht_end
     use aeros_grid,     only : aeros_grid_init, aeros_grid_end
     use aeros_state,    only : aeros_state_alloc, aeros_state_end
+    use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_load, aeros_vgrid_end, &
+                                aeros_vgrid_print
 
     implicit none
 
@@ -29,6 +31,7 @@ module aeros
         type(aeros_param_class) :: par
         type(aeros_sht_class)   :: sht
         type(aeros_grid_class)  :: grd
+        type(aeros_vgrid_class) :: vgrid
         type(aeros_state_class) :: now
 
         real(wp) :: time      ! current model time [yr]
@@ -58,6 +61,8 @@ contains
                                 nthreads=ams%par%nthreads)
 
         call aeros_grid_init(ams%grd, ams%sht)
+
+        call aeros_vgrid_load(ams%vgrid, ams%par%nlev, filename)
 
         call aeros_state_alloc(ams%now, ams%grd, ams%sht%nlm, ams%par%nlev)
 
@@ -100,6 +105,7 @@ contains
         type(aeros_class), intent(inout) :: ams
 
         call aeros_state_end(ams%now)
+        call aeros_vgrid_end(ams%vgrid)
         call aeros_grid_end(ams%grd)
         call aeros_sht_end(ams%sht)
 
@@ -138,6 +144,8 @@ contains
         write(iou,"(a24,i8)")    "wp bytes     ", storage_size(1.0_wp)/8
         write(iou,"(a24,i8)")    "wp_sh bytes  ", storage_size(1.0_wp_sh)/8
         write(iou,*) ""
+
+        call aeros_vgrid_print(ams%vgrid, iou)
 
         return
 
