@@ -44,7 +44,7 @@ program test_tendency
     ! Exits non-zero on failure.
 
     use aeros_defs,     only : dp, wp, wp_sh, R_d, p0, grav, aeros_grid_class, &
-                                aeros_state_class
+                                aeros_spec_class
     use aeros_spectral
     use aeros_grid
     use aeros_vertical
@@ -60,7 +60,7 @@ program test_tendency
     type(aeros_sht_pool_class), target :: pool
     type(aeros_grid_class)     :: grd
     type(aeros_vgrid_class)    :: vg
-    type(aeros_state_class)    :: now
+    type(aeros_spec_class)    :: now
     type(aeros_work_class)     :: wrk
     type(aeros_tend_class)     :: tnd
 
@@ -133,11 +133,11 @@ contains
         type(aeros_sht_pool_class), intent(in), target :: pool
         type(aeros_grid_class),  intent(in)    :: grd
         type(aeros_vgrid_class), intent(in)    :: vg
-        type(aeros_state_class), intent(inout) :: now
+        type(aeros_spec_class), intent(inout) :: now
         type(aeros_work_class),  intent(inout) :: wrk
         type(aeros_tend_class),  intent(inout) :: tnd
 
-        call aeros_state_alloc(now, grd, pool%sht(1)%nlm, vg%nlev)
+        call aeros_spec_alloc(now, pool%sht(1)%nlm, vg%nlev)
         call aeros_work_alloc(wrk, grd%nlon, grd%nlat, vg%nlev)
         call aeros_tend_alloc(tnd, pool%sht(1)%nlm, vg%nlev)
 
@@ -149,11 +149,11 @@ contains
 
         implicit none
 
-        type(aeros_state_class), intent(inout) :: now
+        type(aeros_spec_class), intent(inout) :: now
         type(aeros_work_class),  intent(inout) :: wrk
         type(aeros_tend_class),  intent(inout) :: tnd
 
-        call aeros_state_end(now)
+        call aeros_spec_end(now)
         call aeros_work_end(wrk)
         call aeros_tend_end(tnd)
 
@@ -176,7 +176,7 @@ contains
         type(aeros_sht_pool_class), intent(in), target :: pool
         type(aeros_grid_class),  intent(in)    :: grd
         type(aeros_vgrid_class), intent(in)    :: vg
-        type(aeros_state_class), intent(inout) :: now
+        type(aeros_spec_class), intent(inout) :: now
         type(aeros_work_class),  intent(inout) :: wrk
         logical, intent(in) :: topography
 
@@ -232,7 +232,7 @@ contains
         type(aeros_sht_pool_class), intent(in), target :: pool
         type(aeros_grid_class),  intent(in)    :: grd
         type(aeros_vgrid_class), intent(in)    :: vg
-        type(aeros_state_class), intent(inout) :: now
+        type(aeros_spec_class), intent(inout) :: now
         type(aeros_work_class),  intent(inout) :: wrk
         type(aeros_tend_class),  intent(inout) :: tnd
         character(len=*), intent(in) :: label
@@ -308,7 +308,7 @@ contains
         type(aeros_sht_pool_class), intent(in), target :: pool
         type(aeros_grid_class),  intent(in)    :: grd
         type(aeros_vgrid_class), intent(in)    :: vg
-        type(aeros_state_class), intent(inout) :: now
+        type(aeros_spec_class), intent(inout) :: now
         type(aeros_work_class),  intent(inout) :: wrk
         type(aeros_tend_class),  intent(inout) :: tnd
         integer, intent(inout) :: nfail

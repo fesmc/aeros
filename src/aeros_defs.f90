@@ -170,28 +170,44 @@ module aeros_defs
 
     ! === Prognostic state ====================================================
 
-    type aeros_state_class
-        ! The primitive-equation prognostic state (docs/design.md section 3.2),
-        ! held in spectral space, with its grid-space counterpart alongside.
+    type aeros_spec_class
+        ! The spectral prognostic state (docs/design.md section 3.2), on its
+        ! own, because the time integrator needs THREE of these and only one of
+        ! the grid-space diagnostics below.
         !
-        ! M0 allocates and zeroes these; nothing evolves them yet. The layout
-        ! is declared now because it fixes the transform interface that M0a
-        ! benchmarks and M1 fills in.
+        ! Leapfrog carries t-dt, t and t+dt simultaneously. Bundling the grid
+        ! fields in here would triple them for nothing: at T42L20 the spectral
+        ! half of a state is 0.6 MB and the grid half is 66 MB, so the split is
+        ! not a tidiness argument.
         !
         ! Spectral arrays are (nlm, nlev) -- coefficient index contiguous, so a
         ! single level is one contiguous SHTns call, and the level loop (which
         ! section 4.3 parallelizes) strides over whole transforms.
+        !
+        ! Vorticity/divergence rather than u,v: it is what makes the
+        ! semi-implicit gravity-wave solve diagonal in l.
 
-        integer :: nlm                        ! spectral coefficients per level
-        integer :: nlev                       ! vertical levels
+        integer :: nlm  = 0                       ! spectral coefficients per level
+        integer :: nlev = 0                       ! vertical levels
 
-        ! -- Spectral prognostics. Vorticity/divergence rather than u,v: it is
-        ! what makes the semi-implicit gravity-wave solve diagonal in l.
         complex(wp_sh), allocatable :: vor(:,:)   ! relative vorticity [s-1]
         complex(wp_sh), allocatable :: div(:,:)   ! divergence [s-1]
         complex(wp_sh), allocatable :: temp(:,:)  ! temperature [K]
         complex(wp_sh), allocatable :: qv(:,:)    ! specific humidity [kg kg-1]
         complex(wp_sh), allocatable :: lnps(:)    ! ln(surface pressure) [-], (nlm)
+    end type aeros_spec_class
+
+    type aeros_state_class
+        ! The model state at one time level: the spectral prognostics, plus the
+        ! grid-space fields synthesized from them.
+        !
+        ! Only the CURRENT time level needs the grid half -- it is what the
+        ! column physics (M2) and the output consume -- which is why the
+        ! spectral half is a type of its own.
+
+        integer :: nlev = 0                       ! vertical levels
+
+        type(aeros_spec_class) :: spec
 
         ! -- Grid-space diagnostics, recomputed from the spectral state each
         ! step and consumed by the column physics.
@@ -204,6 +220,7 @@ module aeros_defs
 
     public :: aeros_param_class
     public :: aeros_grid_class
+    public :: aeros_spec_class
     public :: aeros_state_class
 
     public :: aeros_par_load

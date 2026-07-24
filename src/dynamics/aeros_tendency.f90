@@ -91,7 +91,7 @@ module aeros_tendency
     ! nothing. Revisit only if a polar-noise problem actually shows up.
 
     use aeros_defs,     only : dp, wp, wp_sh, io_unit_err, MV, R_d, kappa, &
-                                aeros_grid_class, aeros_state_class
+                                aeros_grid_class, aeros_spec_class
     use aeros_spectral, only : aeros_sht_class, aeros_sht_pool_class, &
                                 aeros_sht_pool_get, aeros_sht_analysis, &
                                 aeros_sht_synthesis, aeros_sht_laplacian
@@ -265,7 +265,7 @@ contains
         type(aeros_sht_pool_class), intent(in), target :: pool
         type(aeros_vgrid_class),    intent(in)    :: vg
         type(aeros_grid_class),     intent(in)    :: grd
-        type(aeros_state_class),    intent(in)    :: now
+        type(aeros_spec_class),     intent(in)    :: now
         type(aeros_work_class),     intent(inout) :: wrk
         type(aeros_tend_class),     intent(inout) :: tnd
 
