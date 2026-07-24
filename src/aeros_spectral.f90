@@ -25,11 +25,10 @@ module aeros_spectral
     !   precision      double on both the grid and the spectral side, so
     !                  arrays cross the C boundary with no copy (aeros_defs).
     !
-    ! NOT YET HERE, deliberately: the vorticity/divergence <-> (u,v) mapping.
-    ! The raw spheroidal/toroidal transforms below are its building blocks, but
-    ! the factors of a and of -l(l+1) that connect them to the primitive
-    ! equations belong with the dynamical core (M1), where they can be
-    ! validated against Held-Suarez rather than asserted here.
+    ! NOT HERE, deliberately: the vorticity/divergence <-> (u,v) mapping. The
+    ! raw spheroidal/toroidal transforms below are its building blocks, but the
+    ! factors of a and of l(l+1) that connect them to the primitive equations
+    ! are dynamics, and live in aeros_vordiv (M1.2).
 
     use, intrinsic :: iso_c_binding
     !$ use omp_lib

@@ -139,13 +139,18 @@ vertical : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_vertical.x is ready."
 
+vordiv : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_vordiv.x $(testdir)/test_vordiv.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_vordiv.x is ready."
+
 grid : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_grid.x $(testdir)/test_grid.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_grid.x is ready."
 
 # All acceptance tests
-tests : defs grid spectral vertical
+tests : defs grid spectral vertical vordiv
 
 # Driver executables
 drivers : run bench

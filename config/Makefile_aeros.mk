@@ -52,6 +52,12 @@ $(objdir)/aeros_vertical.o: $(dyndir)/aeros_vertical.f90 \
 							$(objdir)/aeros_defs.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M1.2: vorticity/divergence <-> (u,v). Sits on the SHTns wrapper's vector
+# transforms, so it must be archived after aeros_spectral.
+$(objdir)/aeros_vordiv.o: $(dyndir)/aeros_vordiv.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 ## aeros physics ##############################
 #
 # Column physics: radiation, condensation, surface tiles (sections 5, 6).
@@ -83,7 +89,8 @@ aeros_base =     $(objdir)/aeros_defs.o \
                  $(objdir)/aeros_grid.o \
                  $(objdir)/aeros_state.o
 
-aeros_dynamics = $(objdir)/aeros_vertical.o
+aeros_dynamics = $(objdir)/aeros_vertical.o \
+                 $(objdir)/aeros_vordiv.o
 
 # M2
 aeros_physics =
