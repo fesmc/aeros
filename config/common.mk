@@ -17,8 +17,9 @@
 #               must be linked, and after SHTns (static archives resolve
 #               left-to-right, so a dependency must follow its dependent).
 #
-# No linear solver (lis) is wired: the semi-implicit solve is per-wavenumber and
-# tridiagonal in the vertical, handled in-tree.
+# No linear solver (lis) and no LAPACK are wired: the semi-implicit solve is one
+# DENSE nlev x nlev system per spectral degree (src/dynamics/aeros_semiimp.f90),
+# which is a forty-line pivoted LU and ~0.9 Mflop per timestep at T42L20.
 
 # --- fesm-utils
 # OpenMP is the DEFAULT build (openmp ?= 1). Unlike chion, aeros' OpenMP results

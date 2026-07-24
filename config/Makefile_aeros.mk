@@ -66,6 +66,14 @@ $(objdir)/aeros_tendency.o: $(dyndir)/aeros_tendency.f90 \
 							$(objdir)/aeros_vertical.o $(objdir)/aeros_vordiv.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M1.4: the semi-implicit gravity-wave solve. Needs the vertical coordinate
+# (the reference state and its alphas), the truncation (one factorization per
+# degree) and the tendency type it consumes.
+$(objdir)/aeros_semiimp.o: $(dyndir)/aeros_semiimp.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
+							$(objdir)/aeros_vertical.o $(objdir)/aeros_tendency.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 ## aeros physics ##############################
 #
 # Column physics: radiation, condensation, surface tiles (sections 5, 6).
@@ -99,7 +107,8 @@ aeros_base =     $(objdir)/aeros_defs.o \
 
 aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_vordiv.o \
-                 $(objdir)/aeros_tendency.o
+                 $(objdir)/aeros_tendency.o \
+                 $(objdir)/aeros_semiimp.o
 
 # M2
 aeros_physics =
