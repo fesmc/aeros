@@ -225,12 +225,51 @@ resolution is not a way out either.
 
 ## 6. What is still open
 
+### 6.0 Reconciling with the `mwm/` workstream
+
+`origin/main` carried a parallel line of work (`mwm/`, plus `docs/M1_scope.md`)
+that was developed from the same base commit and merged at `1427a36`. The two
+lines do not touch the same files, but they **disagree on three settled
+questions**, and nothing below is resolved:
+
+| | this line | `mwm/` line |
+|---|---|---|
+| precision | **dp throughout**, measured ~17% faster than sp because SHTns has no sp CPU path (`m0a_results.md` §5) | "Float32 throughout the core", sp ≈ 2× faster |
+| T42L19 cost | see `m0a_results.md` §2, ×11/8 | 101 core-s/yr, "~2× cheaper than §3.6" |
+| thread scaling | was open | saturates at 4 threads, N_eff ≈ 2 (§6.1 below) |
+
+The precision disagreement is the sharpest and is probably not a contradiction
+so much as two different transform paths: this line measured sp *through
+SHTns*, which must convert up and back at every transform; the `mwm/` line
+measured sp in a harness including a custom batched transform, where no such
+conversion happens. If the batched transform is ever adopted, the precision
+decision has to be re-measured with it, not inherited.
+
+`docs/M1_scope.md` also lists a **pluggable tendency-correction framework** as
+an M1 deliverable (its "definition of done"). **That was not built here** — M1.1
+through M1.5 built and validated the core. See the handoff notes.
+
 ### 6.1 Carried forward from M0a
 
-1. **The OpenMP thread sweep still needs a real machine.** Extend `threads` in
-   `par/bench_m0a.nml` to 16/32/64 on the HPC. That measurement is what
-   design.md §3.6 and §9 risk 2 actually turn on, and it is still the largest
-   unresolved engineering question in the project.
+1. ~~**The OpenMP thread sweep still needs a real machine.**~~ **ANSWERED, and
+   badly**, by the parallel `mwm/` workstream merged at `1427a36` —
+   `mwm/A_scaling/RESULTS.md`, on AWI Albedo 128-core nodes with `ifx`, swept
+   1–128 threads. **The SHTns-per-field core saturates at 4 threads and
+   collapses beyond 8**: at 64–128 threads it is 10–20× slower than one thread,
+   N_eff ≈ 2–2.3 against the ~24 design.md §3.6 needs for bare T42. That is
+   §9 risk 2 firing, not passing.
+
+   Two caveats before treating it as final. It is a *separate harness* — a
+   dynamics-only benchmark with a semi-implicit stand-in, not aeros' core — and
+   it measures the transform-bound component in isolation, so a full model with
+   column physics (embarrassingly parallel, §4.3) will do better. And
+   `mwm/A_scaling`'s **batched-DGEMM** variant, which is what design.md §4
+   actually specifies, holds ~4× speedup out to 64 threads where SHTns-per-field
+   falls off a cliff — it is slower at 1 thread but flat to 64.
+
+   **The live question is therefore no longer "what is the scaling curve" but
+   "does aeros' own SHTns wrapper inherit the cliff, and is the batched
+   transform worth building?"** That is now measurable against a running core.
 2. **`SHqst_to_spat` could take 11 transforms down to 10** by folding ζ in with
    (u,v). There is now a running core to measure it against.
 3. Cost figures: the dry core needs **11 transforms per level, not 8**, so
