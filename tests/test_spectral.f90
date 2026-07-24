@@ -129,6 +129,9 @@ program test_spectral
     ! deliberately not asserted here.
     call test_vector_roundtrip(sht, tol, nfail)
 
+    ! === 7. Thread pool ======================================================
+    call test_pool(trunc, nfail)
+
     call aeros_sht_end(sht)
 
     write(*,*) ""
@@ -202,6 +205,82 @@ contains
         return
 
     end subroutine test_vector_roundtrip
+
+    subroutine test_pool(trunc, nfail)
+        ! A threaded loop over levels through the pool must reproduce the
+        ! serial result EXACTLY.
+        !
+        ! Exactness is the right bar here and is worth being precise about.
+        ! Each transform is an independent call on its own config, so nothing
+        ! is reduced across threads and no addition is reordered -- the
+        ! floating-point work per level is bit-identical to the serial case.
+        ! (Threading a reduction, as SHTns' own OpenMP path does inside one
+        ! transform, would NOT have this property. That is a second reason to
+        ! prefer this arrangement, on top of it being faster.)
+        !
+        ! A tolerance here would hide exactly the bug this test exists to
+        ! catch: two threads sharing one config, which corrupts a transform
+        ! rather than perturbing it.
+
+        !$ use omp_lib
+
+        implicit none
+
+        integer, intent(in) :: trunc
+        integer, intent(inout) :: nfail
+
+        integer, parameter :: nlev = 16
+
+        type(aeros_sht_class), pointer :: s
+        type(aeros_sht_pool_class) :: pool
+        type(aeros_sht_class) :: ref
+
+        real(wp),       allocatable :: fld_s(:,:,:), fld_p(:,:,:)
+        complex(wp_sh), allocatable :: coef(:,:), out_s(:,:), out_p(:,:)
+        integer :: k, nt
+
+        nt = 1
+        !$ nt = omp_get_max_threads()
+
+        call aeros_sht_init(ref, trunc, quick=.TRUE.)
+        call aeros_sht_pool_init(pool, trunc, nthreads=nt, quick=.TRUE.)
+
+        call check(pool%nthreads == nt, "pool built one config per thread", nfail)
+        call check(pool%sht(1)%nlm == ref%nlm, "pool configs match the reference truncation", nfail)
+
+        allocate(fld_s(ref%nlon,ref%nlat,nlev), fld_p(ref%nlon,ref%nlat,nlev))
+        allocate(coef(ref%nlm,nlev), out_s(ref%nlm,nlev), out_p(ref%nlm,nlev))
+
+        do k = 1, nlev
+            call fill_test_spectrum(coef(:,k), ref)
+        end do
+
+        ! Serial reference.
+        do k = 1, nlev
+            call aeros_sht_synthesis(ref, coef(:,k), fld_s(:,:,k))
+            call aeros_sht_analysis(ref, fld_s(:,:,k), out_s(:,k))
+        end do
+
+        ! Same work, threaded through the pool.
+        !$omp parallel do private(k,s) schedule(static)
+        do k = 1, nlev
+            s => aeros_sht_pool_get(pool)
+            call aeros_sht_synthesis(s, coef(:,k), fld_p(:,:,k))
+            call aeros_sht_analysis(s, fld_p(:,:,k), out_p(:,k))
+        end do
+        !$omp end parallel do
+
+        call check(all(fld_p == fld_s), "pooled grid fields are bit-identical to serial", nfail)
+        call check(all(out_p == out_s), "pooled coefficients are bit-identical to serial", nfail)
+        write(*,"(a40,i6)") "   threads used ", nt
+
+        deallocate(fld_s, fld_p, coef, out_s, out_p)
+        call aeros_sht_pool_end(pool)
+        call aeros_sht_end(ref)
+
+        return
+
+    end subroutine test_pool
 
     subroutine check(ok, label, nfail)
 

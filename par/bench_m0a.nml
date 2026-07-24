@@ -1,0 +1,46 @@
+&bench
+    ! Free-text label for this machine/run, carried into the CSV so a laptop
+    ! run and an HPC run can sit in the same file and be told apart.
+    label = "macbook-m5-10core"
+
+    ! Sweep lists. Up to 8 entries each; 0 or absent entries are skipped.
+    !
+    ! T31 and T42 are the two candidates for the production truncation
+    ! (docs/design.md section 10.3). T85 is the reference truncation the
+    ! section 3.7 correction is diagnosed against, so its cost sets the
+    ! refresh budget.
+    truncs = 31, 42, 85
+
+    ! L8 is SpeedyWeather's configuration -- the anchor section 11 extrapolated
+    ! from -- so it is included to check that extrapolation directly.
+    ! L16-20 is the design target (section 4.1).
+    nlevs = 8, 16, 20
+
+    ! Thread counts. 0 entries are skipped; the list is capped by the pool,
+    ! which is built for exactly this many threads.
+    !
+    ! NOTE: the decision this benchmark exists to inform (T31+correction vs
+    ! bare T42, section 3.6) turns on effective thread count >= ~24, which a
+    ! 10-core laptop cannot reach. On this machine the sweep measures the
+    ! single-core cost and the shape of the curve; the decision waits for the
+    ! HPC. Extend this list to 16, 32, 64 there.
+    threads = 1, 2, 4, 8, 10
+
+    ! Scalar-equivalent transforms per level per timestep. THE assumption in
+    ! this benchmark -- the headline cost scales linearly in it. Accounting:
+    !   synthesis  (u,v) [vector = 2] + T + q                  = 4
+    !   analysis   (vor,div) tendency [vector = 2] + T' + q'   = 4
+    ! Single-level work (ln ps and its gradient) is neglected as O(1/nlev).
+    ntr_per_level = 8
+
+    ! Dynamics timestep [s]. ~30 min at T42 (docs/design.md section 4).
+    ! Held fixed across truncations here so the numbers isolate the cost of
+    ! resolution; a real T85 run would need a shorter step, which makes the
+    ! T85 cost reported below an UNDER-estimate per model year.
+    dt = 1800.0
+
+    ! Timed repeats per case.
+    nrep = 20
+
+    csv_out = "logs/bench_m0a.csv"
+/

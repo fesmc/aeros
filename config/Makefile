@@ -125,12 +125,28 @@ run : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    aeros_run.x is ready."
 
-# M0a: the transform scaling measurement that decides the truncation
-# (docs/design.md sections 4.3, 7, 9 risk 2). Needs openmp=1 to mean anything.
-bench : aeros-static
+# M0a. Both need openmp=1 to mean anything.
+#
+# bench_sht  : which threading mode (settled -- see aeros_sht_pool_class)
+# bench_m0a  : what a timestep costs, i.e. the number docs/design.md section 11
+#              admits is currently an extrapolation
+#
+# bench_m0a is .F90 so the machine and compiler configme resolved can be
+# compiled in, and land in the CSV alongside the timings. A benchmark result
+# without its toolchain attached is not a result.
+bench : bench-sht bench-m0a
+
+bench-sht : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/bench_sht.x $(drvdir)/bench_sht.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    bench_sht.x is ready."
+
+bench-m0a : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) \
+			-DAEROS_MACHINE='"$(MACHINE)"' -DAEROS_COMPILER='"$(COMPILER)"' \
+			-o $(bindir)/bench_m0a.x $(drvdir)/bench_m0a.F90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    bench_m0a.x is ready."
 
 ## Acceptance tests ###########################
 
