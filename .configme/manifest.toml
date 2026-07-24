@@ -1,0 +1,5 @@
+# configme manifest for aeros.
+package = "aeros"
+deps = [
+    "fesm-utils:dev",
+]

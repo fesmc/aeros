@@ -1,0 +1,38 @@
+&ctrl
+    time_init  = 0.0
+    time_end   = 10.0
+    dt_out     = 1.0
+    file_out   = "aeros.nc"
+/
+
+&aeros
+    ! Triangular truncation T. The central open question of the design
+    ! (docs/design.md section 10.3): T31 with the multi-resolution correction,
+    ! or bare T42. It is a namelist parameter for exactly that reason -- M0a
+    ! sweeps it, and nothing in the code may assume a value.
+    !   T21 ->  64x32   (ruled out for production: fails both NH ice sheets)
+    !   T31 ->  96x48
+    !   T42 -> 128x64
+    !   T85 -> 256x128  (the reference truncation for the section 3.7 correction)
+    trunc    = 31
+
+    ! Gaussian grid. -1 selects the smallest quadratically-unaliased grid for
+    ! `trunc`, which is what production should use. Set explicitly only to
+    ! study aliasing or to match another model's grid.
+    nlon     = -1
+    nlat     = -1
+
+    ! Vertical levels. docs/design.md section 4.1: L16-20, with 3-4 levels
+    ! below 850 hPa. Fix this before tuning anything -- level count moves the
+    ! jet latitude, and therefore the storm track, and therefore ice-sheet
+    ! precipitation.
+    nlev     = 16
+
+    ! Dynamics timestep [s]. ~30 min at T42 (section 4).
+    dt       = 1800.0
+
+    ! OpenMP threads for the spectral transforms. -1 leaves it to
+    ! OMP_NUM_THREADS. The M0a scaling measurement (section 7) sweeps
+    ! 8/16/32/64 through this parameter.
+    nthreads = -1
+/

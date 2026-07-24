@@ -1,0 +1,29 @@
+{
+
+    "exe_default" : "libaeros/bin/aeros_run.x",
+
+    "par_path_as_argument" : true,
+
+    "exe_aliases" :
+        {   "run"      : "libaeros/bin/aeros_run.x",
+            "defs"     : "libaeros/bin/test_defs.x",
+            "grid"     : "libaeros/bin/test_grid.x",
+            "spectral" : "libaeros/bin/test_spectral.x"
+        },
+
+    "grp_aliases" :
+        {   "ctl" : "ctrl",
+            "atm" : "aeros"
+        },
+
+    "par_paths" :
+        {   "run" : "par/aeros.nml"
+        },
+
+    "files" : [],
+
+    "dir-special" : {},
+
+    "links" : ["input"]
+
+}
