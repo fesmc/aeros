@@ -6,12 +6,19 @@ A fast global atmospheric model for coupled climate–ice-sheet simulation on
 Spectral primitive-equation core (T31–T42, L16–20) built as the static library
 `libaeros.a`, OpenMP-only, intended to couple to CLIMBER-X's ocean and to Yelmo.
 
-Status: **dry dynamical core integrates (M1.4)**. Hybrid σ–p coordinate,
-(ζ,D)↔(u,v), primitive-equation tendencies by the transform method, and a
-semi-implicit leapfrog with a RAW time filter and ∇⁶ diffusion. `aeros_update`
-advances the model. What is missing is forcing: Held–Suarez is M1.5, moisture
-and radiation M2, so a run from the shipped initial condition correctly does
-nothing at all.
+Status: **dry dynamical core validated (M1)**. Hybrid σ–p coordinate,
+(ζ,D)↔(u,v), primitive-equation tendencies by the transform method, a
+semi-implicit leapfrog with a RAW time filter and ∇⁶ diffusion, and the
+Held–Suarez (1994) benchmark, which reproduces the published circulation.
+Moisture, radiation and surface tiles are M2, so `par/aeros.nml` on its own
+still runs an unforced core that correctly does nothing.
+
+```bash
+make held-suarez && libaeros/bin/held_suarez.x par/held_suarez.nml
+```
+
+runs the benchmark: 1200 days, the last 1000 averaged into zonal-mean
+statistics. ~2 min at T31L20 and ~6 min at T42L20 on ten cores.
 
 ## Docs
 
@@ -20,7 +27,7 @@ nothing at all.
 - [docs/m0a_results.md](docs/m0a_results.md) — the measured cost of the
   dynamical core, and why aeros is double precision.
 - [docs/m1_results.md](docs/m1_results.md) — what the core does once it runs:
-  stability, conservation and the numbers M1.5 will need.
+  stability, conservation, and the Held–Suarez validation.
 
 ## Install
 

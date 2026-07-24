@@ -101,23 +101,131 @@ honest implementation of this scheme conserves it to machine precision, and
 what a paleo integration needs is the drift rate rather than a claim. The rest
 state is where the assertion belongs.
 
-## 5. What M1.5 needs from this
+## 5. Held–Suarez (M1.5)
 
-1. **Held–Suarez needs a non-zero `p_top`.** It is nominally defined on
-   σ ∈ [0,1], but a zero-pressure top makes the top layer hydrostatically
-   inconsistent — Simmons & Burridge impose `α₁ = ln 2` there rather than
-   deriving it, and `test_tendency` measures the residual (2.4×10⁻¹⁰ at k = 1
-   against 10⁻²² elsewhere). Use `p_top = 100`–`1000 Pa` and say so, or expect
-   top-layer noise. `stretch_a = 1.0`, `sigma_t = 0.0`, `p_top = 1000.0` gives
-   the 20 evenly spaced levels the benchmark asks for, with a consistent top.
-2. **`tau_diff` is a tuning parameter and 6 h is a starting value, not a
-   result.** Retune when the truncation changes, against the enstrophy
-   spectrum rather than the look of a single field.
-3. **Take the target values from Held & Suarez (1994) directly**, not from
-   recollection.
-4. The initial condition to perturb is `init_isothermal` in `src/aeros.f90`.
+`make held-suarez && libaeros/bin/held_suarez.x par/held_suarez.nml`. 1200 days,
+the last 1000 averaged. ~2 min at T31L20 and ~6 min at T42L20 on ten cores, so
+this is a routine regression run rather than a campaign.
 
-## 6. Still open, carried forward from M0a
+**There are no published target numbers.** Held & Suarez present figures and ask
+that yours look like theirs; CESM, ECMWF and MITgcm all restate it that way, and
+the AMS page is paywalled. So the numbers below are aeros' own, and their role
+is (a) to be compared by eye against the published figures — see
+[docs/figures/held_suarez.png](figures/held_suarez.png), reproducible with
+`tools/hs_report.py` — and (b) to be the regression reference for later changes.
+
+| | T31L20 | T42L20 |
+|---|---|---|
+| jet max `[u]`, NH | **34.6 m s⁻¹** at 46.4°, 233 hPa | **32.4 m s⁻¹** at 46.0°, 232 hPa |
+| jet max `[u]`, SH | 35.3 m s⁻¹ at −42.7°, 233 hPa | 32.9 m s⁻¹ at −43.3°, 233 hPa |
+| surface `[u]` max | 9.7 m s⁻¹ at 46.4° | 8.8 m s⁻¹ at 46.0° |
+| surface `[u]` tropics | −8.6 m s⁻¹ | −8.7 m s⁻¹ |
+| max `[v'T']` | 18.7 K m s⁻¹ at 39.0°, 883 hPa | 21.1 K m s⁻¹ at 37.7°, 882 hPa |
+| max `[u'v']` | 74.4 m² s⁻² at 35.3°, 235 hPa | 75.7 m² s⁻² at 34.9°, 235 hPa |
+| max eddy KE | 268 m² s⁻² | **367 m² s⁻²** |
+| max `[T'²]` | 31.3 K² | 40.4 K² |
+| surface `[T]`, equator−pole | 306.8 − 263.0 = 43.8 K | 305.9 − 263.8 = 42.2 K |
+| hemispheric asymmetry of `[u]` | 0.086 | 0.084 |
+
+Structurally this is the published circulation: two westerly jets near ±45° at
+~250 hPa, tropical and polar surface easterlies with midlatitude surface
+westerlies, an isothermal 200 K equatorial cap aloft where the `T_min` floor
+binds, `[v'T']` poleward in both hemispheres with its maximum in the lower
+troposphere near 850 hPa, and `[u'v']` converging into each jet from the
+upper-troposphere maxima near ±35°. All the signs are right:
+
+```
+              [v'T']    [u'v']        (means over 20-70 deg)
+    NH        +7.0      +12.2         poleward heat, momentum into the jet
+    SH        -7.0      -11.0
+```
+
+and the two hemispheres agree to ~1% in the fluxes and ~2% in the jet, from a
+forcing that is symmetric by construction and an integration that was seeded
+asymmetrically.
+
+### 5.1 T31 is missing a quarter of the eddy activity
+
+The one number that moves substantially between truncations is **eddy kinetic
+energy: 268 m² s⁻² at T31 against 367 at T42, i.e. T31 is 27% low**. Eddy
+temperature variance moves the same way (31.3 vs 40.4 K²) and the eddy heat flux
+with it (18.7 vs 21.1 K m s⁻¹). The jet responds as one would expect from
+weaker eddies: **T31's is ~7% STRONGER** (34.6 vs 32.4 m s⁻¹), there being less
+eddy momentum flux to decelerate it.
+
+This is the resolution bind of design.md §3.6 and §9 risk 1, now measured on
+aeros' own core rather than inferred: at T31 the storm track is under-resolved
+in amplitude while the jet is over-strong, and both of those set where
+precipitation lands on an ice sheet. It does not decide the truncation — §3.7's
+correction is what M2b tests, and the jet LATITUDE is nearly identical at both
+(46.4° vs 46.0°) — but it puts a number on what bare T31 costs.
+
+### 5.2 Diffusion is not part of the benchmark, and it matters
+
+Held & Suarez deliberately leave the horizontal diffusion to the modeller, since
+it is part of what an intercomparison compares. aeros brings ∇⁶ with a 6 h
+e-folding at `l = lmax`; Held & Suarez' own spectral model used ∇⁴, and CESM's
+Held–Suarez configuration uses ∇⁴ with a 0.5 day timescale. aeros' jets run
+~10% stronger than the ~30 m s⁻¹ usually read off the published figure, and a
+more scale-selective, weaker diffusion is the first thing to suspect. Any
+comparison against a published figure has to state which diffusion was used.
+
+### 5.3 The mass leak — the real finding
+
+**Global mass drifts linearly at ~6.6×10⁻⁶ per year**, and this is the one
+result from M1.5 that should change what happens next.
+
+The adiabatic tests (§4) show mass conserved to 2×10⁻¹⁶ on a resting state and
+bounded within ~10⁻⁵ on a moving one. Under Held–Suarez, in a statistically
+steady eddying state, it becomes a **secular** loss. T31L20 at `dt = 1800 s`:
+
+```
+    day  300     600     900    1200
+    dM/M  -5.1e-6 -1.1e-5 -1.8e-5 -2.4e-5      increments -6.3, -6.5, -6.2e-6
+```
+
+Perfectly linear. Extrapolated to design.md §1's 10⁵ yr target that is **0.66 of
+the atmosphere**, so it is not a rounding detail.
+
+It is not a bug and not the time filter. Measured at day 400, T31:
+
+| configuration | dM/M |
+|---|---|
+| ν = 0.06, dt = 1800 s | −7.24×10⁻⁶ |
+| ν = 0.15, dt = 1800 s | −7.75×10⁻⁶ |
+| ν = 0.06, dt = 900 s | −3.30×10⁻⁶ |
+
+**2.5× the filter strength changes the drift by 7%; halving the timestep halves
+it.** So the drift rate is ∝ `dt`, i.e. the per-step error is the scheme's
+ordinary O(dt²) time-truncation error, and what makes it accumulate rather than
+cancel is that the conserved quantity is a NONLINEAR functional of a prognostic:
+the model integrates `ln p_s`, and mass is `∫exp(ln p_s) dA`. What the
+discretization conserves exactly is `∫ p_s d(ln p_s)/dt dA = 0` — measured at
+1.4×10⁻¹⁶ in `test_tendency` — which is the continuous statement, not the
+discrete one. In an eddying state those per-step errors have a systematic sign.
+
+Running with the filter disabled entirely is not an option for comparison: the
+leapfrog computational mode grows and the run is NaN within 100 days.
+
+Three ways out, none of them implemented, all of them a decision rather than a
+fix:
+
+1. **A global mass fixer** — rescale `p_s` each step so the global integral is
+   restored. One line, standard practice in spectral models, and exact. It puts
+   a small non-local correction into the surface pressure.
+2. **Carry `p_s` rather than `ln p_s`.** Removes the nonlinearity at the root,
+   and costs the reason `ln p_s` was chosen: the pressure-gradient term is
+   linear in `ln p_s`.
+3. **Accept it and shorten `dt`.** Since the rate is ∝ `dt`, halving the step
+   halves the drift — at twice the cost, and it never reaches zero.
+
+Note that **T42 leaks less than T31** (−1.46×10⁻⁵ against −2.42×10⁻⁵ at day
+1050), so the rate depends on the flow rather than on the truncation, and
+resolution is not a way out either.
+
+## 6. What is still open
+
+### 6.1 Carried forward from M0a
 
 1. **The OpenMP thread sweep still needs a real machine.** Extend `threads` in
    `par/bench_m0a.nml` to 16/32/64 on the HPC. That measurement is what
