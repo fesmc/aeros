@@ -40,7 +40,6 @@ contains
         allocate(spec%vor(nlm,nlev))
         allocate(spec%div(nlm,nlev))
         allocate(spec%temp(nlm,nlev))
-        allocate(spec%qv(nlm,nlev))
         allocate(spec%lnps(nlm))
 
         call aeros_spec_zero(spec)
@@ -60,7 +59,6 @@ contains
         if (allocated(spec%vor))  deallocate(spec%vor)
         if (allocated(spec%div))  deallocate(spec%div)
         if (allocated(spec%temp)) deallocate(spec%temp)
-        if (allocated(spec%qv))   deallocate(spec%qv)
         if (allocated(spec%lnps)) deallocate(spec%lnps)
 
         return
@@ -76,7 +74,6 @@ contains
         spec%vor  = (0.0_wp_sh, 0.0_wp_sh)
         spec%div  = (0.0_wp_sh, 0.0_wp_sh)
         spec%temp = (0.0_wp_sh, 0.0_wp_sh)
-        spec%qv   = (0.0_wp_sh, 0.0_wp_sh)
         spec%lnps = (0.0_wp_sh, 0.0_wp_sh)
 
         return
@@ -103,7 +100,6 @@ contains
         dst%vor  = src%vor
         dst%div  = src%div
         dst%temp = src%temp
-        dst%qv   = src%qv
         dst%lnps = src%lnps
 
         return
@@ -131,7 +127,6 @@ contains
         call move_alloc(a%vor,  tmp2); call move_alloc(b%vor,  a%vor);  call move_alloc(tmp2, b%vor)
         call move_alloc(a%div,  tmp2); call move_alloc(b%div,  a%div);  call move_alloc(tmp2, b%div)
         call move_alloc(a%temp, tmp2); call move_alloc(b%temp, a%temp); call move_alloc(tmp2, b%temp)
-        call move_alloc(a%qv,   tmp2); call move_alloc(b%qv,   a%qv);   call move_alloc(tmp2, b%qv)
         call move_alloc(a%lnps, tmp1); call move_alloc(b%lnps, a%lnps); call move_alloc(tmp1, b%lnps)
 
         return

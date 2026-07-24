@@ -83,6 +83,13 @@ $(objdir)/aeros_correction.o: $(dyndir)/aeros_correction.f90 \
 							$(objdir)/aeros_tendency.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M2.3: prognostic humidity, transported on the grid by a positive-definite
+# finite-volume scheme. Off the spectral core entirely -- it needs only the
+# vertical coordinate (to diagnose layer masses) and the grid geometry.
+$(objdir)/aeros_moisture.o: $(dyndir)/aeros_moisture.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 # M1.4: the leapfrog itself -- time levels, RAW filter, hyperdiffusion. Sits on
 # top of every other dynamics module and is the only place a prognostic
 # variable changes value.
@@ -91,7 +98,7 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_state.o $(objdir)/aeros_vertical.o \
 							$(objdir)/aeros_vordiv.o $(objdir)/aeros_tendency.o \
 							$(objdir)/aeros_semiimp.o $(objdir)/aeros_held_suarez.o \
-							$(objdir)/aeros_correction.o
+							$(objdir)/aeros_correction.o $(objdir)/aeros_moisture.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
@@ -155,6 +162,7 @@ aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_vordiv.o \
                  $(objdir)/aeros_tendency.o \
                  $(objdir)/aeros_correction.o \
+                 $(objdir)/aeros_moisture.o \
                  $(objdir)/aeros_semiimp.o
 
 aeros_physics =  $(objdir)/aeros_held_suarez.o
