@@ -36,6 +36,16 @@ program test_timestep
     !    energy. What a paleo integration needs from those two is a drift rate,
     !    not a claim.
     !
+    ! 5. THE MASS FIXER DOES WHAT IT CLAIMS AND NOTHING ELSE. It restores the
+    !    mass exactly, it moves only the (0,0) surface-pressure coefficient,
+    !    and each step's reported correction is exactly that step's leak. The
+    !    third is the one that matters most: a fixer nobody can audit is a way
+    !    of not knowing what the model is doing.
+    !
+    !    The CUMULATIVE correction is reported here too, and deliberately not
+    !    asserted against the unfixed drift, because it is a larger number and
+    !    that is not a bug -- see the comment in test_mass_fixer.
+    !
     ! Exits non-zero on failure.
 
     use aeros_defs,     only : dp, wp, wp_sh, R_d, p0, grav, &
@@ -74,6 +84,7 @@ program test_timestep
     call test_stability(nfail)
     call test_diffusion(nfail)
     call test_conservation(nfail)
+    call test_mass_fixer(nfail)
 
     call aeros_vgrid_end(vg)
     call aeros_grid_end(grd)
@@ -89,7 +100,7 @@ program test_timestep
 
 contains
 
-    subroutine default_par(par, dt, semi_implicit, eps_filter, tau_diff)
+    subroutine default_par(par, dt, semi_implicit, eps_filter, tau_diff, mass_fixer)
         ! The shipped par/aeros.nml values, with the ones a test varies exposed.
 
         implicit none
@@ -98,6 +109,7 @@ contains
         real(wp), intent(in) :: dt
         logical,  intent(in) :: semi_implicit
         real(wp), intent(in), optional :: eps_filter, tau_diff
+        logical,  intent(in), optional :: mass_fixer
 
         par%trunc    = trunc
         par%nlon     = -1
@@ -112,9 +124,11 @@ contains
         par%raw_alpha     = 0.53_wp
         par%ndiff         = 6
         par%tau_diff      = 6.0_wp
+        par%mass_fixer    = .FALSE.
 
         if (present(eps_filter)) par%eps_filter = eps_filter
         if (present(tau_diff))   par%tau_diff   = tau_diff
+        if (present(mass_fixer)) par%mass_fixer = mass_fixer
 
         return
 
@@ -564,6 +578,226 @@ contains
         return
 
     end subroutine conserve_run
+
+    ! === 5. The mass fixer ===================================================
+
+    subroutine test_mass_fixer(nfail)
+        ! The fixer has to do three separable things, and getting one right
+        ! while getting another wrong would be worse than not having it:
+        !
+        !   1. RESTORE THE MASS EXACTLY. Not approximately, not eventually --
+        !      the correction is closed-form, so machine precision is the only
+        !      acceptable answer, and the unfixed run is measured alongside so
+        !      that the check is against a drift that actually exists.
+        !
+        !   2. TOUCH NOTHING ELSE. Only the (0,0) surface-pressure coefficient
+        !      may change. A fixer that moved any other wavenumber would be
+        !      quietly smoothing the surface pressure field, and after a few
+        !      thousand steps nobody would be able to tell what had done it.
+        !      Checked bitwise on a single step, where the two trajectories
+        !      have not yet had a chance to separate.
+        !
+        !   3. REPORT WHAT IT DID. `lnr_last` must be exactly the leak the
+        !      unfixed step produced, so that switching the fixer on hides
+        !      nothing. Also checked on the single step, for the same reason.
+        !
+        ! The cumulative correction is printed but NOT asserted against the
+        ! unfixed drift, because the two are different quantities and expecting
+        ! them to match is the mistake this comment exists to prevent. Here the
+        ! fixer puts back ~1.9e-5 while the unfixed run drifts ~7.5e-6. That is
+        ! not chaos -- this state is not chaotic -- it is that the unfixed run's
+        ! mass oscillates as well as drifts, the oscillation largely cancels in
+        ! an accumulated total, and the fixer resets it every step and so pays
+        ! for it every step. Per step the two agree exactly, which is what
+        ! check 3 pins down; over a run they do not, and only an unfixed twin
+        ! measures the drift.
+
+        implicit none
+
+        integer, intent(inout) :: nfail
+
+        integer,  parameter :: nstep = 200
+        real(dp) :: d_on, d_off, removed, lnr_expect, lnr_got
+        real(dp) :: dvor, ddiv, dtemp, dlnps_other, dlnps_00
+
+        write(*,*) ""
+        write(*,*) " -- the global mass fixer"
+
+        ! --- 1. the drift, with and without ---------------------------------
+        call fixer_run(.FALSE., nstep, d_off)
+        call fixer_run(.TRUE.,  nstep, d_on, removed)
+
+        write(*,"(a40,es12.3)") "   |dM/M| over 200 steps, fixer off", d_off
+        write(*,"(a40,es12.3)") "   |dM/M| over 200 steps, fixer on ", d_on
+        write(*,"(a40,es12.3)") "   what the fixer put back to do it", removed
+
+        call check(d_on < 1.0e-13_dp, "the fixer restores mass to machine precision", nfail)
+        call check(d_off > 1.0e3_dp*d_on, &
+                    "and there was a drift to remove (the check is not vacuous)", nfail)
+
+        ! --- 2 and 3. one step, side by side --------------------------------
+        call fixer_one_step(lnr_expect, lnr_got, dvor, ddiv, dtemp, dlnps_other, dlnps_00)
+
+        write(*,"(a40,es12.3)") "   max |d zeta| from the fixer     ", dvor
+        write(*,"(a40,es12.3)") "   max |d D|                       ", ddiv
+        write(*,"(a40,es12.3)") "   max |d T|                       ", dtemp
+        write(*,"(a40,es12.3)") "   max |d lnps|, (l,m) /= (0,0)    ", dlnps_other
+        write(*,"(a40,es12.3)") "   |d lnps| at (0,0)               ", dlnps_00
+        write(*,"(a40,es12.3)") "   reported lnr vs the actual leak ", abs(lnr_got - lnr_expect)
+
+        call check(dvor == 0.0_dp .and. ddiv == 0.0_dp .and. dtemp == 0.0_dp, &
+                    "the fixer leaves vorticity, divergence and temperature untouched", nfail)
+        call check(dlnps_other == 0.0_dp, &
+                    "the fixer leaves every surface-pressure wavenumber but (0,0) untouched", nfail)
+        call check(dlnps_00 > 0.0_dp, &
+                    "the fixer did change the (0,0) coefficient", nfail)
+        ! 1e-14 is not slack, it is the floor: the two masses are dp sums over
+        ! ~10^4 grid points accumulated in different orders, so they agree to
+        ! ~1e-15 relative and lnr inherits that as an absolute error. The leak
+        ! itself is ~5e-6 here, so this still pins the reported correction to
+        ! eight decimal places of the thing it claims to be.
+        call check(abs(lnr_got - lnr_expect) < 1.0e-14_dp, &
+                    "the reported correction is exactly the leak it removed", nfail)
+
+        return
+
+    end subroutine test_mass_fixer
+
+    subroutine fixer_run(fixer, nsteps, d_mass, removed)
+        ! Integrate the moving state and return the relative mass change, and
+        ! optionally what the fixer had to put back to achieve it.
+
+        implicit none
+
+        logical,  intent(in)  :: fixer
+        integer,  intent(in)  :: nsteps
+        real(dp), intent(out) :: d_mass
+        real(dp), intent(out), optional :: removed
+
+        type(aeros_param_class)    :: par
+        type(aeros_state_class)    :: now
+        type(aeros_timestep_class) :: ts
+        type(aeros_budget_class)   :: b0, b1
+        real(wp) :: phis(grd%nlon,grd%nlat)
+        real(wp), parameter :: dt = 1800.0_wp
+        integer  :: n
+
+        phis = 0.0_wp
+
+        call default_par(par, dt=dt, semi_implicit=.TRUE., mass_fixer=fixer)
+        call aeros_state_alloc(now, grd, pool%sht(1)%nlm, nlev)
+        call aeros_timestep_init(ts, par, pool, grd, vg)
+
+        call moving_state(now)
+        call aeros_timestep_set_phis(ts, phis)
+
+        call aeros_timestep_diagnose(ts, pool, vg, grd, now)
+        call aeros_budget_calc(b0, vg, grd, now, phis)
+
+        do n = 1, nsteps
+            call aeros_timestep_step(ts, pool, vg, grd, now)
+        end do
+
+        call aeros_timestep_diagnose(ts, pool, vg, grd, now)
+        call aeros_budget_calc(b1, vg, grd, now, phis)
+
+        d_mass = abs(b1%mass - b0%mass)/b0%mass
+        if (present(removed)) removed = exp(-ts%lnr_cum) - 1.0_dp
+
+        call aeros_timestep_end(ts)
+        call aeros_state_end(now)
+
+        return
+
+    end subroutine fixer_run
+
+    subroutine fixer_one_step(lnr_expect, lnr_got, dvor, ddiv, dtemp, dlnps_other, dlnps_00)
+        ! Take one step from the same state twice, fixer off then on, and
+        ! compare the two spectral states coefficient by coefficient.
+        !
+        ! One step, because that is the only place the comparison is clean: the
+        ! two runs share an initial state, and the fixer acts after the state
+        ! update, so everything the dynamics produced must be bit-identical.
+        ! By step two the corrected run is on a different trajectory and a
+        ! difference no longer says anything about what the fixer touched.
+
+        implicit none
+
+        real(dp), intent(out) :: lnr_expect, lnr_got
+        real(dp), intent(out) :: dvor, ddiv, dtemp, dlnps_other, dlnps_00
+
+        type(aeros_param_class)    :: par
+        type(aeros_timestep_class) :: ts
+        type(aeros_budget_class)   :: b0, b1
+        type(aeros_state_class)    :: s_off, s_on
+        type(aeros_sht_class), pointer :: sh
+        real(wp) :: phis(grd%nlon,grd%nlat)
+        real(wp), parameter :: dt = 1800.0_wp
+        real(dp) :: m0, m1
+        integer  :: k, lm, lm00
+
+        sh => pool%sht(1)
+        lm00 = aeros_sht_lm(sh, 0, 0)
+        phis = 0.0_wp
+
+        ! -- fixer off
+        call default_par(par, dt=dt, semi_implicit=.TRUE., mass_fixer=.FALSE.)
+        call aeros_state_alloc(s_off, grd, sh%nlm, nlev)
+        call aeros_timestep_init(ts, par, pool, grd, vg)
+        call moving_state(s_off)
+        call aeros_timestep_set_phis(ts, phis)
+
+        call aeros_timestep_diagnose(ts, pool, vg, grd, s_off)
+        call aeros_budget_calc(b0, vg, grd, s_off, phis)
+        m0 = b0%mass
+
+        call aeros_timestep_step(ts, pool, vg, grd, s_off)
+
+        call aeros_timestep_diagnose(ts, pool, vg, grd, s_off)
+        call aeros_budget_calc(b1, vg, grd, s_off, phis)
+        m1 = b1%mass
+
+        ! What the fixer should report having removed. Any systematic
+        ! difference between this quadrature and the fixer's own cancels in the
+        ! ratio, so the comparison below is exact rather than approximate.
+        lnr_expect = log(m0/m1)
+        call aeros_timestep_end(ts)
+
+        ! -- fixer on, same initial state
+        call default_par(par, dt=dt, semi_implicit=.TRUE., mass_fixer=.TRUE.)
+        call aeros_state_alloc(s_on, grd, sh%nlm, nlev)
+        call aeros_timestep_init(ts, par, pool, grd, vg)
+        call moving_state(s_on)
+        call aeros_timestep_set_phis(ts, phis)
+
+        call aeros_timestep_step(ts, pool, vg, grd, s_on)
+
+        lnr_got = ts%lnr_last
+
+        ! -- compare
+        dvor = 0.0_dp; ddiv = 0.0_dp; dtemp = 0.0_dp
+        do k = 1, nlev
+            do lm = 1, sh%nlm
+                dvor  = max(dvor,  abs(s_on%spec%vor(lm,k)  - s_off%spec%vor(lm,k)))
+                ddiv  = max(ddiv,  abs(s_on%spec%div(lm,k)  - s_off%spec%div(lm,k)))
+                dtemp = max(dtemp, abs(s_on%spec%temp(lm,k) - s_off%spec%temp(lm,k)))
+            end do
+        end do
+
+        dlnps_other = 0.0_dp
+        do lm = 1, sh%nlm
+            if (lm == lm00) cycle
+            dlnps_other = max(dlnps_other, abs(s_on%spec%lnps(lm) - s_off%spec%lnps(lm)))
+        end do
+        dlnps_00 = abs(s_on%spec%lnps(lm00) - s_off%spec%lnps(lm00))
+
+        call aeros_timestep_end(ts)
+        call aeros_state_end(s_off)
+        call aeros_state_end(s_on)
+
+        return
+
+    end subroutine fixer_one_step
 
     subroutine check(ok, label, nfail)
 

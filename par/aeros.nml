@@ -102,6 +102,16 @@
     ! Held-Suarez result cannot be produced from a half-converted namelist.
     held_suarez = .FALSE.
 
+    ! Global mass fixer: rescale p_s at the end of every step so the global
+    ! mass returns to its initial value (src/dynamics/aeros_timestep.f90).
+    !
+    ! OFF here, deliberately. This namelist is the bare core, and the adiabatic
+    ! conservation tests must measure the integrator rather than the fixer --
+    ! they hold mass at 2e-16 without it. The drift the fixer exists to remove
+    ! is a property of the eddying forced state (docs/m1_results.md 5.3), so
+    ! par/held_suarez.nml is where it is switched on.
+    mass_fixer = .FALSE.
+
     ! OpenMP threads, i.e. the size of the SHTns config pool. -1 leaves it to
     ! OMP_NUM_THREADS. The M0a scaling sweep still has to be run at 16/32/64 on
     ! the HPC -- see docs/m0a_results.md section 4 caveat 4.

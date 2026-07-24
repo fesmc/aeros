@@ -207,8 +207,13 @@ discrete one. In an eddying state those per-step errors have a systematic sign.
 Running with the filter disabled entirely is not an option for comparison: the
 leapfrog computational mode grows and the run is NaN within 100 days.
 
-Three ways out, none of them implemented, all of them a decision rather than a
-fix:
+**Option 1 below is now implemented** (`mass_fixer`, off by default, on in
+`par/held_suarez.nml`) and drives the drift to −1.6×10⁻¹⁵/yr. Option 2 is
+deliberately left open rather than foreclosed. See
+[`m2_results.md`](m2_results.md) §6, including why the number the fixer reports
+is about twice this drift and must not be quoted as it.
+
+Three ways out, all of them a decision rather than a fix:
 
 1. **A global mass fixer** — rescale `p_s` each step so the global integral is
    restored. One line, standard practice in spectral models, and exact. It puts
@@ -238,12 +243,14 @@ questions**, and nothing below is resolved:
 | T42L19 cost | see `m0a_results.md` §2, ×11/8 | 101 core-s/yr, "~2× cheaper than §3.6" |
 | thread scaling | was open | saturates at 4 threads, N_eff ≈ 2 (§6.1 below) |
 
-The precision disagreement is the sharpest and is probably not a contradiction
-so much as two different transform paths: this line measured sp *through
-SHTns*, which must convert up and back at every transform; the `mwm/` line
-measured sp in a harness including a custom batched transform, where no such
-conversion happens. If the batched transform is ever adopted, the precision
-decision has to be re-measured with it, not inherited.
+**All three rows are now resolved — see [`m2_results.md`](m2_results.md).** In
+summary: the `mwm/` line never measured sp (every table there is double; the 2×
+is a rule of thumb, stated twice as an estimate), so the precision row is a
+measurement against an extrapolation and dp stands. The batched transform is
+not worth building on `mwm/`'s own numbers, which closes the one route that
+would have reopened precision. And the thread cliff does not reproduce on
+aeros' real core out to 10 threads, though N_eff ≈ 3–4.3 still falls far short
+of the ~24 §3.6 wants.
 
 `docs/M1_scope.md` also lists a **pluggable tendency-correction framework** as
 an M1 deliverable (its "definition of done"). **That was not built here** — M1.1
@@ -267,9 +274,13 @@ through M1.5 built and validated the core. See the handoff notes.
    actually specifies, holds ~4× speedup out to 64 threads where SHTns-per-field
    falls off a cliff — it is slower at 1 thread but flat to 64.
 
-   **The live question is therefore no longer "what is the scaling curve" but
+   ~~**The live question is therefore no longer "what is the scaling curve" but
    "does aeros' own SHTns wrapper inherit the cliff, and is the batched
-   transform worth building?"** That is now measurable against a running core.
+   transform worth building?"**~~ **MEASURED** on the running core —
+   [`m2_results.md`](m2_results.md) §1 and §4. It does not inherit the cliff
+   out to 10 threads (T31 plateaus at ~3×, T42 and T63 still improving at
+   3.86× and 4.29×), and the batched transform is not worth building. The
+   16–128 range still needs Albedo.
 2. **`SHqst_to_spat` could take 11 transforms down to 10** by folding ζ in with
    (u,v). There is now a running core to measure it against.
 3. Cost figures: the dry core needs **11 transforms per level, not 8**, so

@@ -164,6 +164,19 @@ module aeros_defs
         ! src/physics/aeros_held_suarez.f90 for why.
         logical  :: held_suarez
 
+        ! -- Global mass fixer (src/dynamics/aeros_timestep.f90).
+        !
+        ! Restores the global dry-air mass to its initial value at the end of
+        ! every step. OFF gives the bare integrator, which is what the
+        ! conservation tests measure and what docs/m1_results.md section 5.3
+        ! reports drifting at ~6.6e-6 per year under Held-Suarez.
+        !
+        ! It is a namelist switch and not a compile-time choice because the
+        ! quantity it removes is exactly what a future decision to carry p_s
+        ! instead of ln(p_s) would remove at the root. Whichever is adopted,
+        ! the other has to stay runnable for the comparison to mean anything.
+        logical  :: mass_fixer
+
         ! -- Number of OpenMP threads, i.e. the size of the SHTns config pool
         ! (aeros_sht_pool_class). -1 takes OMP_NUM_THREADS. An explicit value
         ! exists for the M0a scaling sweep, which still needs to be run at
@@ -298,6 +311,7 @@ contains
         call nml_read(filename, nml_group, "ndiff",         par%ndiff)
         call nml_read(filename, nml_group, "semi_implicit", par%semi_implicit)
         call nml_read(filename, nml_group, "held_suarez",   par%held_suarez)
+        call nml_read(filename, nml_group, "mass_fixer",    par%mass_fixer)
 
         if (par%trunc < 1) then
             write(io_unit_err,*) "aeros_par_load:: error: trunc must be >= 1, got ", par%trunc
