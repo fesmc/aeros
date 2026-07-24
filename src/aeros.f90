@@ -65,6 +65,8 @@ module aeros
     public :: aeros_init
     public :: aeros_update
     public :: aeros_end
+    public :: aeros_set_isothermal
+    public :: aeros_diagnose
     public :: aeros_print_config
 
 contains
@@ -107,7 +109,7 @@ contains
         ! NOT the zeroed state aeros_state_alloc leaves: ln(p_s) = 0 there
         ! means a surface pressure of 1 Pa, which is not a small error but a
         ! different planet.
-        call init_isothermal(ams)
+        call aeros_set_isothermal(ams)
 
         ams%time_init = 0.0_wp
         if (present(time_init)) ams%time_init = time_init
@@ -118,8 +120,19 @@ contains
 
     end subroutine aeros_init
 
-    subroutine init_isothermal(ams)
-        ! A motionless isothermal atmosphere at the reference state.
+    subroutine aeros_set_isothermal(ams, temp, ps)
+        ! Reset the state to a motionless isothermal atmosphere.
+        !
+        ! `temp` and `ps` default to the vertical grid's reference state, which
+        ! is the initial condition aeros_init installs. A benchmark that wants
+        ! to start somewhere else -- Held-Suarez conventionally starts
+        ! isothermal well below its own equilibrium, so the 40-day relaxation
+        ! has several e-folds to work over the 200-day spin-up -- passes its
+        ! own.
+        !
+        ! Ends by refreshing the grid-space fields, so the state is complete on
+        ! return and a driver can perturb it and integrate without knowing that
+        ! the two halves exist.
 
         implicit none
 
@@ -127,12 +140,17 @@ contains
         ! pointer assignment to a component of a non-target dummy. Harmless
         ! here -- the pointer does not outlive the call.
         type(aeros_class), intent(inout), target :: ams
+        real(wp), intent(in), optional :: temp   ! [K]
+        real(wp), intent(in), optional :: ps     ! [Pa]
 
         type(aeros_sht_class), pointer :: s
+        real(wp) :: t_, ps_
         real(dp) :: y00
         integer  :: k, lm00
 
         s => ams%pool%sht(1)
+
+        ps_ = ams%vgrid%ps_ref
 
         call aeros_spec_zero(ams%now%spec)
 
@@ -142,16 +160,37 @@ contains
         y00  = sqrt(4.0_dp*acos(-1.0_dp))
         lm00 = aeros_sht_lm(s, 0, 0)
 
+        if (present(ps)) ps_ = ps
+
         do k = 1, ams%vgrid%nlev
-            ams%now%spec%temp(lm00,k) = cmplx(real(ams%vgrid%t_ref(k),dp)*y00, 0.0_dp, wp_sh)
+            t_ = ams%vgrid%t_ref(k)
+            if (present(temp)) t_ = temp
+            ams%now%spec%temp(lm00,k) = cmplx(real(t_,dp)*y00, 0.0_dp, wp_sh)
         end do
-        ams%now%spec%lnps(lm00) = cmplx(log(real(ams%vgrid%ps_ref,dp))*y00, 0.0_dp, wp_sh)
+        ams%now%spec%lnps(lm00) = cmplx(log(real(ps_,dp))*y00, 0.0_dp, wp_sh)
 
         call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
 
         return
 
-    end subroutine init_isothermal
+    end subroutine aeros_set_isothermal
+
+    subroutine aeros_diagnose(ams)
+        ! Refresh the grid-space fields from the spectral state.
+        !
+        ! aeros_update already ends with this, so a driver only needs it after
+        ! reaching into the spectral state directly -- installing an initial
+        ! condition, or seeding a perturbation.
+
+        implicit none
+
+        type(aeros_class), intent(inout) :: ams
+
+        call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
+
+        return
+
+    end subroutine aeros_diagnose
 
     subroutine aeros_update(ams, time)
         ! Advance the model to `time` [yr].

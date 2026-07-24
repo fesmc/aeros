@@ -111,8 +111,17 @@ $(objdir)/aeros_budget.o: $(srcdir)/aeros_budget.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# Zonal-mean and eddy statistics, accumulated online. In src/ for the same
+# reason as aeros_budget: a property of the model state, not of the integrator.
+$(objdir)/aeros_diagnostics.o: $(srcdir)/aeros_diagnostics.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
+# Output, driven by the variable tables under input/. Depends on the
+# diagnostics type it writes.
 $(objdir)/aeros_io.o: $(srcdir)/aeros_io.f90 \
-							$(objdir)/aeros_defs.o
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o \
+							$(objdir)/aeros_diagnostics.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 $(objdir)/aeros.o: $(srcdir)/aeros.f90 \
@@ -143,5 +152,6 @@ aeros_physics =  $(objdir)/aeros_held_suarez.o
 # calls the forcing -- so it is archived after both.
 aeros_core =     $(objdir)/aeros_timestep.o \
                  $(objdir)/aeros_budget.o \
+                 $(objdir)/aeros_diagnostics.o \
                  $(objdir)/aeros_io.o \
                  $(objdir)/aeros.o

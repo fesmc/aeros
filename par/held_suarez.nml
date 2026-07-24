@@ -1,0 +1,117 @@
+&hs
+    ! Held & Suarez (1994) benchmark. Run with drivers/held_suarez.x, which
+    ! reads this file. Times are in DAYS -- the unit the paper and every
+    ! published comparison use.
+
+    ! The protocol: 1200 days, discard the first 200 as spin-up, average the
+    ! last 1000. 200 days is five e-folds of the free-troposphere relaxation
+    ! rate (1/40 day), which is where the number comes from.
+    day_end       = 1200.0
+    day_avg_start =  200.0
+
+    ! Sampling interval for the zonal-mean statistics [days]. Daily is
+    ! conventional and gives 1000 samples over the window. It is also free:
+    ! the driver calls aeros_update on exactly this interval, and aeros_update
+    ! already leaves the grid-space fields consistent, so a sample costs no
+    ! extra transforms. Shortening it does cost -- more, shorter aeros_update
+    ! calls means more synthesis -- for no statistical gain, since synoptic
+    ! eddies evolve over days.
+    dt_sample     =    1.0
+
+    ! Snapshot output interval [days]. Only for looking at the flow; the
+    ! benchmark result is the zonal-mean file. Keep it long: at T42L20 each
+    ! snapshot is ~5 MB.
+    dt_out        =  100.0
+
+    ! Initial condition: motionless, isothermal, well below the equilibrium.
+    ! Held & Suarez do not specify one -- the equilibrated statistics do not
+    ! depend on it -- but starting cold makes the spin-up length interpretable.
+    t_init        =  264.0
+
+    ! Amplitude of the deterministic temperature perturbation that seeds
+    ! baroclinic instability [K]. Both the forcing and the initial state are
+    ! zonally symmetric, so without a seed only round-off breaks the symmetry.
+    ! The value is not critical; it must be small enough to be irrelevant by
+    ! day 200 and large enough to grow before then.
+    perturb       =    1.0
+
+    file_out      = "hs_state.nc"
+    file_diag     = "hs_diag.nc"
+/
+
+&ctrl
+    ! Unused by drivers/held_suarez.x -- present so the same parameter file can
+    ! be handed to aeros_run.x for a quick look without editing.
+    time_init  = 0.0
+    time_end   = 0.1
+    dt_out     = 0.02
+    file_out   = "aeros.nc"
+/
+
+&aeros
+    ! Truncation. Held & Suarez ran T42 (and T63, T31 for convergence). T31 is
+    ! the fast development configuration; switch to 42 for the reference run.
+    trunc    = 31
+
+    nlon     = -1
+    nlat     = -1
+
+    ! Twenty levels, which is what the benchmark specifies.
+    nlev     = 20
+
+    dt       = 1800.0
+
+    semi_implicit = .TRUE.
+
+    eps_filter = 0.06
+    raw_alpha  = 0.53
+
+    ! DIFFUSION IS NOT SPECIFIED BY THE BENCHMARK, deliberately -- it is part
+    ! of what an intercomparison is comparing, and every group brings its own.
+    ! aeros brings del^6 with a 6 h e-folding at l = lmax, which is the shipped
+    ! default in par/aeros.nml and so is what the benchmark is testing.
+    !
+    ! For reference, others differ: Held & Suarez' own spectral model used
+    ! del^4, and CESM's Held-Suarez configuration uses del^4 with a 0.5 day
+    ! damping timescale. A comparison against a published figure should say
+    ! which was used, because the eddy amplitudes depend on it.
+    ndiff    = 6
+    tau_diff = 6.0
+
+    ! The point of this file.
+    held_suarez = .TRUE.
+
+    nthreads = -1
+/
+
+&aeros_vert
+    ! Twenty EVENLY SPACED SIGMA levels: stretch_a = 1.0 makes the spacing
+    ! uniform and sigma_t = 0.0 makes the coordinate pure sigma (A = 0
+    ! identically, B = sigma).
+    stretch_a = 1.0
+    stretch_r = 2.0
+    sigma_t   = 0.0
+
+    ! NON-ZERO MODEL TOP, and this is a deliberate departure from a literal
+    ! reading of the benchmark.
+    !
+    ! Held & Suarez define sigma on [0,1], i.e. a zero-pressure top. At p = 0
+    ! the layer-mean geopotential of the top layer diverges, and Simmons &
+    ! Burridge impose alpha_1 = ln 2 rather than deriving it -- so the top
+    ! layer is not hydrostatically consistent and does not balance. aeros
+    ! measures that residual directly: 2.4e-10 at k = 1 against 1e-22 in every
+    ! other layer (tests/test_tendency.f90).
+    !
+    ! 1000 Pa costs 1% of the atmosphere's mass and removes the inconsistency.
+    ! The levels are then evenly spaced on [0.01, 1] rather than [0, 1], which
+    ! is a real difference from a literal implementation and is stated here
+    ! rather than left to be discovered in the top-level noise.
+    p_top     = 1000.0
+
+    ps_ref    = 1.0e5
+
+    ! Semi-implicit reference temperature. Warm relative to the Held-Suarez
+    ! climate, which is the stable side: the scheme is stable when the
+    ! reference is at or above the column temperature.
+    t_ref     = 300.0
+/

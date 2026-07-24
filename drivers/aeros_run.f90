@@ -14,12 +14,14 @@ program aeros_run
     use aeros_defs, only : wp, io_unit_err
     use aeros,      only : aeros_class, aeros_init, aeros_update, aeros_end, &
                             aeros_print_config
-    use aeros_io,   only : aeros_write_init, aeros_write_step
+    use aeros_io,   only : aeros_io_class, aeros_io_init, aeros_write_init, &
+                            aeros_write_state
     use nml,        only : nml_read
 
     implicit none
 
-    type(aeros_class) :: ams
+    type(aeros_class)    :: ams
+    type(aeros_io_class) :: io
 
     character(len=512) :: path_par
     character(len=512) :: file_out
@@ -48,8 +50,9 @@ program aeros_run
     call aeros_init(ams, path_par, group="aeros", time_init=time_init)
     call aeros_print_config(ams)
 
-    call aeros_write_init(trim(file_out), ams%grd, ams%par%nlev, time_init)
-    call aeros_write_step(trim(file_out), ams%grd, ams%now, time_init, 1)
+    call aeros_io_init(io)
+    call aeros_write_init(trim(file_out), ams%grd, ams%vgrid, time_init)
+    call aeros_write_state(io, trim(file_out), ams%grd, ams%now, time_init, 1)
 
     ! -- Time loop, on the output interval. aeros_update is responsible for
     ! subdividing into its own dt: a host driver should never have to know the
@@ -60,7 +63,7 @@ program aeros_run
     do n = 1, nstep
         time = time_init + real(n, wp)*dt_out
         call aeros_update(ams, time)
-        call aeros_write_step(trim(file_out), ams%grd, ams%now, time, n+1)
+        call aeros_write_state(io, trim(file_out), ams%grd, ams%now, time, n+1)
     end do
 
     call aeros_end(ams)
