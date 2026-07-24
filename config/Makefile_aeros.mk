@@ -74,6 +74,15 @@ $(objdir)/aeros_semiimp.o: $(dyndir)/aeros_semiimp.f90 \
 							$(objdir)/aeros_vertical.o $(objdir)/aeros_tendency.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M2.2: the additive tendency correction (sections 3.7, 3.8). Consumes the
+# assembled tendency type and nothing else in the dynamics -- it is applied
+# spectrally, after aeros_tendency_spectral, precisely so that it does not have
+# to know about the grid-space machinery.
+$(objdir)/aeros_correction.o: $(dyndir)/aeros_correction.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
+							$(objdir)/aeros_tendency.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 # M1.4: the leapfrog itself -- time levels, RAW filter, hyperdiffusion. Sits on
 # top of every other dynamics module and is the only place a prognostic
 # variable changes value.
@@ -81,7 +90,8 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
 							$(objdir)/aeros_state.o $(objdir)/aeros_vertical.o \
 							$(objdir)/aeros_vordiv.o $(objdir)/aeros_tendency.o \
-							$(objdir)/aeros_semiimp.o $(objdir)/aeros_held_suarez.o
+							$(objdir)/aeros_semiimp.o $(objdir)/aeros_held_suarez.o \
+							$(objdir)/aeros_correction.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
@@ -144,6 +154,7 @@ aeros_base =     $(objdir)/aeros_defs.o \
 aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_vordiv.o \
                  $(objdir)/aeros_tendency.o \
+                 $(objdir)/aeros_correction.o \
                  $(objdir)/aeros_semiimp.o
 
 aeros_physics =  $(objdir)/aeros_held_suarez.o

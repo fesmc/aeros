@@ -122,6 +122,11 @@ bench-m0a : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    bench_m0a.x is ready."
 
+held-suarez : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/held_suarez.x $(drvdir)/held_suarez.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    held_suarez.x is ready."
+
 ## Acceptance tests ###########################
 
 defs : aeros-static
@@ -154,11 +159,31 @@ grid : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_grid.x is ready."
 
+semiimp : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_semiimp.x $(testdir)/test_semiimp.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_semiimp.x is ready."
+
+timestep : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_timestep.x $(testdir)/test_timestep.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_timestep.x is ready."
+
+correction : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_correction.x $(testdir)/test_correction.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_correction.x is ready."
+
+held-suarez-test : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_held_suarez.x $(testdir)/test_held_suarez.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_held_suarez.x is ready."
+
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction held-suarez-test
 
 # Driver executables
-drivers : run bench
+drivers : run bench held-suarez
 
 all : drivers tests
 
@@ -170,6 +195,7 @@ usage:
 	@echo " make aeros-static : compiles libaeros.a, the aeros static library."
 	@echo " make run          : compiles aeros_run.x, the standalone driver."
 	@echo " make bench        : compiles the M0a benchmarks (bench_sht, bench_m0a)."
+	@echo " make held-suarez  : compiles held_suarez.x, the M1 validation benchmark."
 	@echo " make tests        : compiles all acceptance tests."
 	@echo " make all          : drivers + tests."
 	@echo " make clean        : cleans object files"
