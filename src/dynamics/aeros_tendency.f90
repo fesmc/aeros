@@ -140,6 +140,15 @@ module aeros_tendency
         real(wp), allocatable :: ek(:,:,:)                 ! Phi + K [m2 s-2]
         real(wp), allocatable :: dtdt(:,:,:)               ! dT/dt [K s-1]
 
+        ! Forward-time-split physics temperature INCREMENT [K], not a rate.
+        ! Where dtdt carries the dynamical heating through the transform and the
+        ! centered leapfrog, dt_phys carries a physics temperature increment that
+        ! is applied FORWARD onto the n+1 state after the dynamics step, so a
+        ! large, vertically sign-alternating convective heating cannot excite the
+        ! leapfrog computational mode. See aeros_timestep_step and the
+        ! aeros_convection header. Zeroed each step by the caller.
+        real(wp), allocatable :: dt_phys(:,:,:)            ! physics dT [K]
+
         real(wp), allocatable :: lnps_g(:,:)               ! ln(p_s)
         real(wp), allocatable :: dlnpsdx(:,:), dlnpsdy(:,:)! grad ln p_s [m-1]
         real(wp), allocatable :: dlnpsdt(:,:)              ! [s-1]
@@ -219,6 +228,7 @@ contains
         allocate(wrk%dtdx(nlon,nlat,nlev), wrk%dtdy(nlon,nlat,nlev))
         allocate(wrk%ae(nlon,nlat,nlev), wrk%an(nlon,nlat,nlev))
         allocate(wrk%ek(nlon,nlat,nlev), wrk%dtdt(nlon,nlat,nlev))
+        allocate(wrk%dt_phys(nlon,nlat,nlev))
         allocate(wrk%lnps_g(nlon,nlat))
         allocate(wrk%dlnpsdx(nlon,nlat), wrk%dlnpsdy(nlon,nlat))
         allocate(wrk%dlnpsdt(nlon,nlat))
@@ -249,6 +259,7 @@ contains
         if (allocated(wrk%an))      deallocate(wrk%an)
         if (allocated(wrk%ek))      deallocate(wrk%ek)
         if (allocated(wrk%dtdt))    deallocate(wrk%dtdt)
+        if (allocated(wrk%dt_phys)) deallocate(wrk%dt_phys)
         if (allocated(wrk%lnps_g))  deallocate(wrk%lnps_g)
         if (allocated(wrk%dlnpsdx)) deallocate(wrk%dlnpsdx)
         if (allocated(wrk%dlnpsdy)) deallocate(wrk%dlnpsdy)
