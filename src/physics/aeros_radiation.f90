@@ -137,11 +137,36 @@ module aeros_radiation
         real(wp) :: co2_ppm  = 280.0_wp     ! CO2 volume mixing ratio [ppmv]
         logical  :: l_o3     = .FALSE.       ! include ozone absorption
         real(wp) :: q_co2    = 0.0_wp        ! CO2 mass mixing ratio [kg kg-1], derived
+
+        ! Insolation / shortwave.
+        real(wp) :: tsi      = S0            ! total solar irradiance [W m-2]
+        real(wp) :: albedo   = 0.06_wp       ! surface broadband albedo (ocean)
+        logical  :: seasonal = .FALSE.       ! .FALSE. = annual-mean insolation
+        real(wp) :: doy0     = 0.0_wp        ! start day-of-year (seasonal mode)
+
+        ! Call cadence: recompute the full transfer every `interval` seconds and
+        ! hold the heating rate fixed between, per design.md section 5.
+        real(wp) :: interval = 10800.0_wp    ! 3 h
+
+        ! Per-latitude insolation (nlat): annual-mean, or refreshed per call in
+        ! seasonal mode.
+        real(wp), allocatable :: sw_toa(:)   ! daily-mean TOA down SW [W m-2]
+        real(wp), allocatable :: coszen(:)   ! airmass cosine zenith [-]
+
+        ! Cached heating rate [K s-1], (nlon,nlat,nlev), applied every step.
+        real(wp), allocatable :: heat(:,:,:)
+
+        ! Diagnostics from the last recompute, (nlon,nlat) [W m-2].
+        real(wp), allocatable :: olr(:,:)        ! outgoing LW at TOA
+        real(wp), allocatable :: lw_dw_sur(:,:)  ! surface downward LW
+        real(wp), allocatable :: sw_dw_sur(:,:)  ! surface downward SW
+        real(wp), allocatable :: sw_up_toa(:,:)  ! reflected SW at TOA
     end type aeros_rad_class
 
     public :: aeros_radiation_init
     public :: aeros_radiation_load
     public :: aeros_radiation_end
+    public :: aeros_radiation_apply
     public :: aeros_radiation_report
     public :: aeros_lw_clearsky_column
     public :: aeros_sw_clearsky_column
@@ -150,17 +175,50 @@ module aeros_radiation
 contains
 
     subroutine aeros_radiation_init(rad, grd, enabled)
-        ! Minimal init: geometry, defaults, and the derived CO2 mass ratio.
+        ! Geometry, the derived CO2 mass ratio, and the per-latitude insolation.
+        ! The 3D heating cache is allocated lazily on the first apply, where the
+        ! level count is known.
 
         implicit none
         type(aeros_rad_class),   intent(inout) :: rad
         type(aeros_grid_class),  intent(in)    :: grd
         logical,                 intent(in)    :: enabled
 
+        integer  :: j, d
+        real(wp) :: cz, sw, wsum, czsum, swsum
+
+        call aeros_radiation_end(rad)
+
         rad%enabled = enabled
         rad%nlon    = grd%nlon
         rad%nlat    = grd%nlat
         rad%q_co2   = co2_mass_ratio(rad%co2_ppm)
+
+        allocate(rad%sw_toa(grd%nlat), rad%coszen(grd%nlat))
+        allocate(rad%olr(grd%nlon, grd%nlat), rad%lw_dw_sur(grd%nlon, grd%nlat))
+        allocate(rad%sw_dw_sur(grd%nlon, grd%nlat), rad%sw_up_toa(grd%nlon, grd%nlat))
+        rad%olr = 0.0_wp; rad%lw_dw_sur = 0.0_wp
+        rad%sw_dw_sur = 0.0_wp; rad%sw_up_toa = 0.0_wp
+
+        ! Annual-mean insolation per latitude: the daily-mean averaged over the
+        ! year, with the airmass cosine zenith insolation-weighted. In seasonal
+        ! mode these are overwritten each recompute from the current day.
+        do j = 1, grd%nlat
+            swsum = 0.0_wp; czsum = 0.0_wp; wsum = 0.0_wp
+            do d = 1, 360
+                call aeros_insolation_daily(grd%lat(j)*pi/180.0_wp, real(d, wp), &
+                                            rad%tsi, cz, sw)
+                swsum = swsum + sw
+                czsum = czsum + cz*sw          ! insolation-weighted
+                wsum  = wsum + sw
+            end do
+            rad%sw_toa(j) = swsum/360.0_wp
+            if (wsum > 0.0_wp) then
+                rad%coszen(j) = czsum/wsum
+            else
+                rad%coszen(j) = 0.0_wp
+            end if
+        end do
 
         return
     end subroutine aeros_radiation_init
@@ -173,24 +231,39 @@ contains
         character(len=*),        intent(in)    :: filename
         type(aeros_grid_class),  intent(in)    :: grd
 
-        logical  :: enabled
+        logical  :: enabled, seasonal
         integer  :: scheme
-        real(wp) :: co2_ppm
+        real(wp) :: co2_ppm, albedo, tsi, interval, doy0
         logical  :: l_o3
 
-        enabled = rad%enabled
-        scheme  = rad%scheme
-        co2_ppm = rad%co2_ppm
-        l_o3    = rad%l_o3
+        enabled  = rad%enabled
+        scheme   = rad%scheme
+        co2_ppm  = rad%co2_ppm
+        l_o3     = rad%l_o3
+        albedo   = rad%albedo
+        tsi      = rad%tsi
+        seasonal = rad%seasonal
+        interval = rad%interval
+        doy0     = rad%doy0
 
-        call nml_read(filename, "radiation", "enabled", enabled)
-        call nml_read(filename, "radiation", "scheme",  scheme)
-        call nml_read(filename, "radiation", "co2_ppm", co2_ppm)
-        call nml_read(filename, "radiation", "l_o3",    l_o3)
+        call nml_read(filename, "radiation", "enabled",  enabled)
+        call nml_read(filename, "radiation", "scheme",   scheme)
+        call nml_read(filename, "radiation", "co2_ppm",  co2_ppm)
+        call nml_read(filename, "radiation", "l_o3",     l_o3)
+        call nml_read(filename, "radiation", "albedo",   albedo)
+        call nml_read(filename, "radiation", "tsi",      tsi)
+        call nml_read(filename, "radiation", "seasonal", seasonal)
+        call nml_read(filename, "radiation", "interval", interval)
+        call nml_read(filename, "radiation", "doy0",     doy0)
 
-        rad%scheme  = scheme
-        rad%co2_ppm = co2_ppm
-        rad%l_o3    = l_o3
+        rad%scheme   = scheme
+        rad%co2_ppm  = co2_ppm
+        rad%l_o3     = l_o3
+        rad%albedo   = albedo
+        rad%tsi      = tsi
+        rad%seasonal = seasonal
+        rad%interval = interval
+        rad%doy0     = doy0
 
         call aeros_radiation_init(rad, grd, enabled)
 
@@ -200,7 +273,15 @@ contains
     subroutine aeros_radiation_end(rad)
         implicit none
         type(aeros_rad_class), intent(inout) :: rad
+        if (allocated(rad%sw_toa))    deallocate(rad%sw_toa)
+        if (allocated(rad%coszen))    deallocate(rad%coszen)
+        if (allocated(rad%heat))      deallocate(rad%heat)
+        if (allocated(rad%olr))       deallocate(rad%olr)
+        if (allocated(rad%lw_dw_sur)) deallocate(rad%lw_dw_sur)
+        if (allocated(rad%sw_dw_sur)) deallocate(rad%sw_dw_sur)
+        if (allocated(rad%sw_up_toa)) deallocate(rad%sw_up_toa)
         rad%enabled = .FALSE.
+        rad%nlon = 0; rad%nlat = 0
         return
     end subroutine aeros_radiation_end
 
@@ -527,6 +608,105 @@ contains
         end function itf_w_ir
 
     end subroutine aeros_sw_clearsky_column
+
+    subroutine aeros_radiation_apply(rad, vg, grd, t_g, qv_g, lnps_g, t_s, &
+                                     nstep, dt, dtdt)
+        ! Radiative heating at the grid seam. The full column transfer (LW + SW)
+        ! is recomputed every `interval` seconds; between recomputes the cached
+        ! heating rate is held fixed and added to wrk%dtdt each step -- the
+        ! standard infrequent-radiation treatment (design.md section 5). The
+        ! heating rides the centered path with the dynamical tendency: it is
+        ! smooth in time and vertically, unlike convection.
+        !
+        ! Surface (skin) temperature t_s is the prescribed SST from the surface
+        ! module; it is the LW lower boundary and, with the albedo, the SW
+        ! surface. Ozone is off until an ozone field exists (l_o3 = .FALSE.).
+
+        implicit none
+        type(aeros_rad_class),   intent(inout) :: rad
+        type(aeros_vgrid_class), intent(in)    :: vg
+        type(aeros_grid_class),  intent(in)    :: grd
+        real(wp), intent(in)    :: t_g(:,:,:)     ! (nlon,nlat,nlev) [K]
+        real(wp), intent(in)    :: qv_g(:,:,:)    ! (nlon,nlat,nlev) [kg kg-1]
+        real(wp), intent(in)    :: lnps_g(:,:)    ! (nlon,nlat) ln[Pa]
+        real(wp), intent(in)    :: t_s(:,:)       ! (nlon,nlat) skin temp [K]
+        integer,  intent(in)    :: nstep          ! step counter
+        real(wp), intent(in)    :: dt             ! [s]
+        real(wp), intent(inout) :: dtdt(:,:,:)    ! (nlon,nlat,nlev) [K s-1]
+
+        real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
+        real(wp) :: phi_full(vg%nlev), phi_half(0:vg%nlev), z_half(0:vg%nlev)
+        real(wp) :: o3col(vg%nlev)
+        real(wp) :: fnet(0:vg%nlev), heat_lw(vg%nlev), heat_sw(vg%nlev)
+        real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net, doy, cz, sw
+        integer  :: i, j, k, nlev, nrad
+
+        if (.not. rad%enabled) return
+
+        nlev = vg%nlev
+        if (.not. allocated(rad%heat)) then
+            allocate(rad%heat(rad%nlon, rad%nlat, nlev))
+            rad%heat = 0.0_wp
+        end if
+
+        nrad = max(1, nint(rad%interval/dt))
+
+        ! --- recompute the transfer on the cadence -------------------------
+        if (mod(nstep, nrad) == 0) then
+
+            if (rad%seasonal) then
+                doy = modulo(rad%doy0 + real(nstep, wp)*dt/86400.0_wp, DAYS_YEAR)
+                do j = 1, rad%nlat
+                    call aeros_insolation_daily(grd%lat(j)*pi/180.0_wp, doy, &
+                                                rad%tsi, cz, sw)
+                    rad%coszen(j) = cz
+                    rad%sw_toa(j) = sw
+                end do
+            end if
+
+            o3col = 0.0_wp
+            !$omp parallel do collapse(2) schedule(static) &
+            !$omp   private(i,j,phalf,pfull,dpc,phi_full,phi_half,z_half,fnet, &
+            !$omp           heat_lw,heat_sw,olr,fdw_lw,sw_up,sw_dw,sw_net)
+            do j = 1, rad%nlat
+                do i = 1, rad%nlon
+                    call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
+
+                    ! interface heights (aquaplanet: surface geopotential 0)
+                    call aeros_hydrostatic(vg, 0.0_wp, t_g(i,j,:), phalf, &
+                                           phi_full, phi_half)
+                    z_half = phi_half/grav
+
+                    call aeros_lw_clearsky_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
+                        o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
+                        fnet, heat_lw, olr, fdw_lw)
+
+                    call aeros_sw_clearsky_column(nlev, qv_g(i,j,:), dpc, &
+                        rad%sw_toa(j), rad%coszen(j), rad%albedo, rad%albedo, &
+                        heat_sw, sw_up, sw_dw, sw_net)
+
+                    rad%heat(i,j,:) = heat_lw + heat_sw
+
+                    rad%olr(i,j)       = olr
+                    rad%lw_dw_sur(i,j) = fdw_lw
+                    rad%sw_dw_sur(i,j) = sw_dw
+                    rad%sw_up_toa(i,j) = sw_up
+                end do
+            end do
+            !$omp end parallel do
+        end if
+
+        ! --- apply the cached heating every step ---------------------------
+        do k = 1, nlev
+            do j = 1, rad%nlat
+                do i = 1, rad%nlon
+                    dtdt(i,j,k) = dtdt(i,j,k) + rad%heat(i,j,k)
+                end do
+            end do
+        end do
+
+        return
+    end subroutine aeros_radiation_apply
 
     subroutine aeros_radiation_report(rad, io_unit)
         implicit none

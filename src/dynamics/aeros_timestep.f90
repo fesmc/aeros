@@ -166,6 +166,9 @@ module aeros_timestep
     use aeros_surface,    only : aeros_surf_class, aeros_surface_init, &
                                 aeros_surface_load, aeros_surface_end, &
                                 aeros_surface_apply, aeros_surface_report
+    use aeros_radiation,  only : aeros_rad_class, aeros_radiation_init, &
+                                aeros_radiation_load, aeros_radiation_end, &
+                                aeros_radiation_apply, aeros_radiation_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
 
@@ -225,6 +228,12 @@ module aeros_timestep
         ! namelist turns it on; the source that closes the budget once
         ! Held-Suarez relaxation is removed.
         type(aeros_surf_class) :: surf
+
+        ! Radiation (aeros_radiation): clear-sky LW+SW at the grid seam, cached
+        ! and recomputed on a multi-hour cadence, heating added to wrk%dtdt.
+        ! Uses the surface module's prescribed SST as the skin temperature. Off
+        ! unless a namelist turns it on.
+        type(aeros_rad_class) :: rad
 
         ! [ l(l+1) / lmax(lmax+1) ]^(ndiff/2), precomputed per degree. The
         ! step-dependent part is one multiply, so this never needs rebuilding.
@@ -361,10 +370,12 @@ contains
             call aeros_condensation_load(ts%cnd, filename, grd)
             call aeros_convection_load(ts%cnv, filename, grd)
             call aeros_surface_load(ts%surf, filename, grd)
+            call aeros_radiation_load(ts%rad, filename, grd)
         else
             call aeros_condensation_init(ts%cnd, grd, .FALSE.)
             call aeros_convection_init(ts%cnv, grd, .FALSE.)
             call aeros_surface_init(ts%surf, grd, .FALSE.)
+            call aeros_radiation_init(ts%rad, grd, .FALSE.)
         end if
 
         allocate(ts%dratio(0:lmax))
@@ -422,6 +433,7 @@ contains
         call aeros_condensation_end(ts%cnd)
         call aeros_convection_end(ts%cnv)
         call aeros_surface_end(ts%surf)
+        call aeros_radiation_end(ts%rad)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
         if (allocated(ts%ps_fix)) deallocate(ts%ps_fix)
@@ -509,6 +521,16 @@ contains
         ! dry. See aeros_condensation.
         call aeros_condensation_apply(ts%cnd, vg, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%wrk%dtdt, ts%dt)
+
+        ! Radiation, at the same grid seam and the same centered path: clear-sky
+        ! LW+SW heating, recomputed on a multi-hour cadence and cached, added to
+        ! wrk%dtdt. Uses the surface module's prescribed SST as the skin
+        ! temperature (allocated even when the surface fluxes are off). Off
+        ! unless enabled.
+        if (ts%rad%enabled) &
+            call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
+                                        ts%wrk%lnps_g, ts%surf%t_s, ts%nstep, &
+                                        ts%dt, ts%wrk%dtdt)
 
         call aeros_tendency_spectral(pool, vg, ts%wrk, ts%tnd)
 
@@ -897,6 +919,7 @@ contains
         call aeros_convection_report(ts%cnv, iou)
         call aeros_condensation_report(ts%cnd, iou)
         call aeros_surface_report(ts%surf, iou)
+        call aeros_radiation_report(ts%rad, iou)
 
         return
 

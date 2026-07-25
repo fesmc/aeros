@@ -100,7 +100,8 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_semiimp.o $(objdir)/aeros_held_suarez.o \
 							$(objdir)/aeros_correction.o $(objdir)/aeros_moisture.o \
 							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o \
-							$(objdir)/aeros_convection.o $(objdir)/aeros_surface.o
+							$(objdir)/aeros_convection.o $(objdir)/aeros_surface.o \
+							$(objdir)/aeros_radiation.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
