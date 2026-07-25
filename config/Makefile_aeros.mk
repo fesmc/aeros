@@ -100,7 +100,7 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_semiimp.o $(objdir)/aeros_held_suarez.o \
 							$(objdir)/aeros_correction.o $(objdir)/aeros_moisture.o \
 							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o \
-							$(objdir)/aeros_convection.o
+							$(objdir)/aeros_convection.o $(objdir)/aeros_surface.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
@@ -137,6 +137,13 @@ $(objdir)/aeros_convection.o: $(physdir)/aeros_convection.f90 \
 $(objdir)/aeros_radiation.o: $(physdir)/aeros_radiation.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o \
 							$(objdir)/aeros_grid.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
+# M2.4c: surface energy/moisture budget (section 6.1). Prescribed-SST
+# aquaplanet with bulk turbulent fluxes; reuses q_sat from condensation.
+$(objdir)/aeros_surface.o: $(physdir)/aeros_surface.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o \
+							$(objdir)/aeros_condensation.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros core #################################
@@ -192,7 +199,8 @@ aeros_dynamics = $(objdir)/aeros_vertical.o \
 aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_condensation.o \
                  $(objdir)/aeros_convection.o \
-                 $(objdir)/aeros_radiation.o
+                 $(objdir)/aeros_radiation.o \
+                 $(objdir)/aeros_surface.o
 
 # aeros_timestep sits above the physics as well as the dynamics -- it is what
 # calls the forcing -- so it is archived after both.

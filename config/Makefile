@@ -199,13 +199,18 @@ radiation : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_radiation.x is ready."
 
+surface : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_surface.x $(testdir)/test_surface.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_surface.x is ready."
+
 held-suarez-test : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_held_suarez.x $(testdir)/test_held_suarez.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_held_suarez.x is ready."
 
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation held-suarez-test
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation surface held-suarez-test
 
 # Driver executables
 drivers : run bench held-suarez

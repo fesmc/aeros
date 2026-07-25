@@ -163,6 +163,9 @@ module aeros_timestep
     use aeros_convection, only : aeros_conv_class, aeros_convection_init, &
                                 aeros_convection_load, aeros_convection_end, &
                                 aeros_convection_apply, aeros_convection_report
+    use aeros_surface,    only : aeros_surf_class, aeros_surface_init, &
+                                aeros_surface_load, aeros_surface_end, &
+                                aeros_surface_apply, aeros_surface_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
 
@@ -215,6 +218,13 @@ module aeros_timestep
         ! Moist convective adjustment (aeros_convection), at the grid seam and
         ! BEFORE condensation. Off unless a namelist turns it on.
         type(aeros_conv_class) :: cnv
+
+        ! Surface energy/moisture budget (aeros_surface): prescribed-SST bulk
+        ! turbulent fluxes into the lowest layer, at the grid seam BEFORE
+        ! convection (it is the source convection overturns). Off unless a
+        ! namelist turns it on; the source that closes the budget once
+        ! Held-Suarez relaxation is removed.
+        type(aeros_surf_class) :: surf
 
         ! [ l(l+1) / lmax(lmax+1) ]^(ndiff/2), precomputed per degree. The
         ! step-dependent part is one multiply, so this never needs rebuilding.
@@ -350,9 +360,11 @@ contains
         if (present(filename)) then
             call aeros_condensation_load(ts%cnd, filename, grd)
             call aeros_convection_load(ts%cnv, filename, grd)
+            call aeros_surface_load(ts%surf, filename, grd)
         else
             call aeros_condensation_init(ts%cnd, grd, .FALSE.)
             call aeros_convection_init(ts%cnv, grd, .FALSE.)
+            call aeros_surface_init(ts%surf, grd, .FALSE.)
         end if
 
         allocate(ts%dratio(0:lmax))
@@ -409,6 +421,7 @@ contains
         call aeros_moisture_end(ts%mst)
         call aeros_condensation_end(ts%cnd)
         call aeros_convection_end(ts%cnv)
+        call aeros_surface_end(ts%surf)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
         if (allocated(ts%ps_fix)) deallocate(ts%ps_fix)
@@ -465,6 +478,16 @@ contains
         call aeros_tendency_grid(pool, vg, grd, now%spec, ts%wrk)
 
         if (ts%hs%enabled) call aeros_hs_apply(ts%hs, vg, ts%wrk)
+
+        ! Surface turbulent fluxes, before convection: sensible heat warms the
+        ! lowest layer (added to wrk%dtdt, the centered path, like the HS
+        ! forcing it replaces) and evaporation moistens it (a forward increment
+        ! to now%qv_g). This is the boundary-layer source that convection then
+        ! carries up the column. Off unless enabled.
+        if (ts%surf%enabled) &
+            call aeros_surface_apply(ts%surf, vg, ts%wrk%t_g, now%qv_g, &
+                                        ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
+                                        ts%wrk%dtdt, ts%dt)
 
         ! Moist convective adjustment, before condensation: it overturns the
         ! column and precipitates, and large-scale condensation then removes
@@ -873,6 +896,7 @@ contains
         call aeros_moisture_report(ts%mst, iou)
         call aeros_convection_report(ts%cnv, iou)
         call aeros_condensation_report(ts%cnd, iou)
+        call aeros_surface_report(ts%surf, iou)
 
         return
 
