@@ -126,6 +126,15 @@ module aeros_radiation
     real(wp), parameter :: DAYS_YEAR  = 365.25_wp
     real(wp), parameter :: DOY_VE     = 80.0_wp    ! vernal equinox day-of-year
 
+    ! === Prescribed ozone (analytic, zonally uniform) ======================
+    ! A lognormal-in-pressure profile peaking in the stratosphere. Crude but
+    ! enough to give the model top an ozone shortwave heating that balances its
+    ! longwave cooling; without it a clear-sky top over-cools without bound.
+    ! Zonal/seasonal ozone structure waits for an ERA5 ozone field.
+    real(wp), parameter :: O3_MAX   = 1.5e-5_wp    ! peak mass mixing ratio [kg kg-1]
+    real(wp), parameter :: O3_PPEAK = 2000.0_wp    ! peak pressure [Pa] (~20 hPa)
+    real(wp), parameter :: O3_WIDTH = 1.2_wp       ! lognormal width in ln(p)
+
     ! === Configuration / state =============================================
     type, public :: aeros_rad_class
         logical :: enabled = .FALSE.        ! off by default, like convection
@@ -135,7 +144,7 @@ module aeros_radiation
         integer :: nlat = 0
 
         real(wp) :: co2_ppm  = 280.0_wp     ! CO2 volume mixing ratio [ppmv]
-        logical  :: l_o3     = .FALSE.       ! include ozone absorption
+        logical  :: l_o3     = .TRUE.        ! prescribed ozone (LW + stratospheric SW)
         real(wp) :: q_co2    = 0.0_wp        ! CO2 mass mixing ratio [kg kg-1], derived
 
         ! Insolation / shortwave.
@@ -293,6 +302,21 @@ contains
         q_co2 = co2_ppm*1.0e-6_wp * M_CO2/M_AIR
         return
     end function co2_mass_ratio
+
+    pure subroutine aeros_ozone_profile(pfull, o3)
+        ! Analytic ozone mass mixing ratio [kg kg-1] on the full levels, from
+        ! the lognormal-in-pressure profile above. Zonally uniform.
+        implicit none
+        real(wp), intent(in)  :: pfull(:)    ! (nlev) [Pa]
+        real(wp), intent(out) :: o3(:)       ! (nlev) [kg kg-1]
+        real(wp) :: x
+        integer  :: k
+        do k = 1, size(pfull)
+            x = log(pfull(k)/O3_PPEAK)/O3_WIDTH
+            o3(k) = O3_MAX*exp(-0.5_wp*x*x)
+        end do
+        return
+    end subroutine aeros_ozone_profile
 
     subroutine aeros_lw_clearsky_column(nlev, t, q, o3, dp_lev, z_half, ts, &
                                         q_co2, l_o3, fnet, heat, olr, fdw_sur)
@@ -497,25 +521,31 @@ contains
         return
     end subroutine aeros_insolation_daily
 
-    subroutine aeros_sw_clearsky_column(nlev, q, dp_lev, swdown_toa, coszen, &
-                                        alb_vis, alb_ir, heat, &
+    subroutine aeros_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
+                                        coszen, alb_vis, alb_ir, heat, &
                                         sw_up_toa, sw_dw_sur, sw_net_sur)
         ! Clear-sky shortwave for one column, model ordering (k=1 top ..
-        ! k=nlev surface). Two bands; near-IR water-vapour absorption is the
-        ! atmospheric heating, Rayleigh and ozone act in the visible.
+        ! k=nlev surface). Two bands; near-IR water-vapour absorption and
+        ! visible ozone absorption are the atmospheric heating, Rayleigh acts
+        ! in the visible.
         !
         ! The boundary quantities -- planetary albedo (TOA up) and the surface
         ! net/downward flux -- are SESAM's clear-sky formulas verbatim (its
         ! tuned two-path surface transmission). The column atmospheric
-        ! absorption is then the TOA-minus-surface residual, distributed over
-        ! the layers by the near-IR direct-beam absorption weight, which is
-        ! where a resolved column needs a profile that SESAM never forms. The
-        ! upward-beam re-absorption is folded into the boundary residual, not
-        ! resolved per layer -- a few W/m2, second order for a first pass.
+        ! absorption is then the TOA-minus-surface residual, split into a
+        ! near-IR water part (distributed by the water direct-beam absorption
+        ! weight) and a visible ozone part (distributed by the ozone amount).
+        ! Depositing the ozone absorption where the ozone is -- the stratosphere
+        ! -- is what balances the longwave cooling of the model top; lumping it
+        ! near the surface (with the water) leaves the top with no heating and
+        ! it over-cools. The upward-beam re-absorption is folded into the
+        ! boundary residual, not resolved per layer -- a few W/m2, second order.
 
         implicit none
         integer,  intent(in)  :: nlev
         real(wp), intent(in)  :: q(:)        ! (nlev) specific humidity [kg kg-1]
+        real(wp), intent(in)  :: o3(:)       ! (nlev) ozone mass mixing ratio [kg kg-1]
+        logical,  intent(in)  :: l_o3        ! resolve ozone SW heating
         real(wp), intent(in)  :: dp_lev(:)   ! (nlev) layer thickness [Pa], > 0
         real(wp), intent(in)  :: swdown_toa  ! daily-mean TOA down SW [W m-2]
         real(wp), intent(in)  :: coszen      ! airmass cosine zenith [-]
@@ -528,10 +558,10 @@ contains
         real(wp), intent(out) :: sw_net_sur  ! surface net absorbed SW [W m-2]
 
         real(wp) :: cosz, icos
-        real(wp) :: uwv_cum(0:nlev), fdw_ir(0:nlev), w(nlev)
+        real(wp) :: uwv_cum(0:nlev), fdw_ir(0:nlev), w(nlev), wo3(nlev)
         real(wp) :: m_col, itf_ir_full, alb_vu, alb_ir_p, alb_p
         real(wp) :: m_d1, m_d2, itf_d1, itf_d2, itf_atm_vu, itf_atm_ir
-        real(wp) :: a_atm, wsum, m
+        real(wp) :: a_atm, a_o3, a_w, wsum, wo3sum, m
         integer  :: k, i
 
         heat = 0.0_wp
@@ -576,8 +606,19 @@ contains
         ! --- distribute column absorption over layers ----------------------
         a_atm = max(0.0_wp, swdown_toa - sw_up_toa - sw_net_sur)
 
-        ! near-IR direct-beam transmission at each interface; the drop across a
-        ! layer is that layer's share of the absorption.
+        ! Split off the visible ozone absorption (the post-Rayleigh visible beam
+        ! that ozone takes) so it can be deposited where the ozone is. The
+        ! remainder is the near-IR water absorption. When ozone is not resolved,
+        ! a_o3 = 0 and everything rides the water weight, as before.
+        if (l_o3) then
+            a_o3 = swdown_toa*SW_FRAC_VU*(1.0_wp - SW_RSCAT)*(1.0_wp - SW_C_ITF_O)
+            a_o3 = min(a_o3, a_atm)
+        else
+            a_o3 = 0.0_wp
+        end if
+        a_w = a_atm - a_o3
+
+        ! near-IR water weight: the drop in direct-beam transmission per layer
         do i = 0, nlev
             m = uwv_cum(i)/cosz
             fdw_ir(i) = itf_w_ir(m)
@@ -592,8 +633,19 @@ contains
                 w(k) = dp_lev(k); wsum = wsum + dp_lev(k)
             end do
         end if
+
+        ! ozone weight: the ozone mass path per layer (stratosphere-peaked)
+        wo3sum = 0.0_wp
         do k = 1, nlev
-            heat(k) = (grav/cp_d)*a_atm*(w(k)/wsum)/dp_lev(k)
+            wo3(k) = max(0.0_wp, o3(k))*dp_lev(k)
+            wo3sum = wo3sum + wo3(k)
+        end do
+        if (wo3sum <= 0.0_wp) then               ! no ozone: fall back to water
+            wo3 = w; wo3sum = wsum
+        end if
+
+        do k = 1, nlev
+            heat(k) = (grav/cp_d)*(a_w*(w(k)/wsum) + a_o3*(wo3(k)/wo3sum))/dp_lev(k)
         end do
 
         return
@@ -610,17 +662,24 @@ contains
     end subroutine aeros_sw_clearsky_column
 
     subroutine aeros_radiation_apply(rad, vg, grd, t_g, qv_g, lnps_g, t_s, &
-                                     nstep, dt, dtdt)
+                                     nstep, dt, dt_phys)
         ! Radiative heating at the grid seam. The full column transfer (LW + SW)
         ! is recomputed every `interval` seconds; between recomputes the cached
-        ! heating rate is held fixed and added to wrk%dtdt each step -- the
-        ! standard infrequent-radiation treatment (design.md section 5). The
-        ! heating rides the centered path with the dynamical tendency: it is
-        ! smooth in time and vertically, unlike convection.
+        ! heating rate is held fixed (design.md section 5).
         !
-        ! Surface (skin) temperature t_s is the prescribed SST from the surface
-        ! module; it is the LW lower boundary and, with the albedo, the SW
-        ! surface. Ozone is off until an ozone field exists (l_o3 = .FALSE.).
+        ! The heating is applied FORWARD-SPLIT, as an increment [K] accumulated
+        ! in wrk%dt_phys and added to the n+1 state after the dynamics step --
+        ! the same path convection uses, NOT the centered leapfrog. Radiation is
+        ! smooth in time but its vertical structure is sharp and, once the model
+        ! top starts cooling, large; routed through the centered leapfrog it
+        ! excites the computational mode and the run blows up (the handoff's
+        ! "large and stiff" case). Forward-split is stable for a damping process
+        ! like radiation at this timestep.
+        !
+        ! Surface (skin) temperature t_s is the prescribed SST; it is the LW
+        ! lower boundary and, with the albedo, the SW surface. Ozone is the
+        ! prescribed analytic profile when l_o3 -- its shortwave heating in the
+        ! stratosphere is what keeps the model top from over-cooling.
 
         implicit none
         type(aeros_rad_class),   intent(inout) :: rad
@@ -632,7 +691,7 @@ contains
         real(wp), intent(in)    :: t_s(:,:)       ! (nlon,nlat) skin temp [K]
         integer,  intent(in)    :: nstep          ! step counter
         real(wp), intent(in)    :: dt             ! [s]
-        real(wp), intent(inout) :: dtdt(:,:,:)    ! (nlon,nlat,nlev) [K s-1]
+        real(wp), intent(inout) :: dt_phys(:,:,:) ! (nlon,nlat,nlev) [K] increment
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: phi_full(vg%nlev), phi_half(0:vg%nlev), z_half(0:vg%nlev)
@@ -664,13 +723,18 @@ contains
                 end do
             end if
 
-            o3col = 0.0_wp
             !$omp parallel do collapse(2) schedule(static) &
-            !$omp   private(i,j,phalf,pfull,dpc,phi_full,phi_half,z_half,fnet, &
+            !$omp   private(i,j,phalf,pfull,dpc,phi_full,phi_half,z_half,o3col,fnet, &
             !$omp           heat_lw,heat_sw,olr,fdw_lw,sw_up,sw_dw,sw_net)
             do j = 1, rad%nlat
                 do i = 1, rad%nlon
                     call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
+
+                    if (rad%l_o3) then
+                        call aeros_ozone_profile(pfull, o3col)
+                    else
+                        o3col = 0.0_wp
+                    end if
 
                     ! interface heights (aquaplanet: surface geopotential 0)
                     call aeros_hydrostatic(vg, 0.0_wp, t_g(i,j,:), phalf, &
@@ -681,9 +745,9 @@ contains
                         o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
                         fnet, heat_lw, olr, fdw_lw)
 
-                    call aeros_sw_clearsky_column(nlev, qv_g(i,j,:), dpc, &
-                        rad%sw_toa(j), rad%coszen(j), rad%albedo, rad%albedo, &
-                        heat_sw, sw_up, sw_dw, sw_net)
+                    call aeros_sw_clearsky_column(nlev, qv_g(i,j,:), o3col, &
+                        rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
+                        rad%albedo, heat_sw, sw_up, sw_dw, sw_net)
 
                     rad%heat(i,j,:) = heat_lw + heat_sw
 
@@ -696,11 +760,11 @@ contains
             !$omp end parallel do
         end if
 
-        ! --- apply the cached heating every step ---------------------------
+        ! --- accumulate the cached heating as a forward increment ----------
         do k = 1, nlev
             do j = 1, rad%nlat
                 do i = 1, rad%nlon
-                    dtdt(i,j,k) = dtdt(i,j,k) + rad%heat(i,j,k)
+                    dt_phys(i,j,k) = dt_phys(i,j,k) + rad%heat(i,j,k)*dt
                 end do
             end do
         end do

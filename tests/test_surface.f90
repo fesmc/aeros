@@ -44,7 +44,7 @@ program test_surface
     type(aeros_vgrid_class) :: vg
     type(aeros_surf_class)  :: surf
 
-    real(wp), allocatable :: t_g(:,:,:), qv(:,:,:), u(:,:,:), v(:,:,:), dtdt(:,:,:), lnps(:,:)
+    real(wp), allocatable :: t_g(:,:,:), qv(:,:,:), u(:,:,:), v(:,:,:), dt_phys(:,:,:), lnps(:,:)
     integer :: nlon, nlat, nfail, ks
 
     nfail = 0
@@ -61,7 +61,7 @@ program test_surface
                                        "  grid ", nlon, "x", nlat
 
     allocate(t_g(nlon,nlat,nlev), qv(nlon,nlat,nlev), u(nlon,nlat,nlev), &
-             v(nlon,nlat,nlev), dtdt(nlon,nlat,nlev), lnps(nlon,nlat))
+             v(nlon,nlat,nlev), dt_phys(nlon,nlat,nlev), lnps(nlon,nlat))
     lnps = log(real(p0,wp))
 
     call test_sst_profile(nfail)
@@ -134,9 +134,9 @@ contains
         qv0 = 1.0e-3_wp
         qv  = qv0
         u   = 3.0_wp; v = 0.0_wp
-        dtdt = 0.0_wp
+        dt_phys = 0.0_wp
 
-        call aeros_surface_apply(surf, vg, t_g, qv, lnps, u, v, dtdt, 1800.0_wp)
+        call aeros_surface_apply(surf, vg, t_g, qv, lnps, u, v, dt_phys, 1800.0_wp)
 
         write(*,"(a,es12.3,a)") "   min SHF over grid              ", minval(surf%shf), " W/m2"
         write(*,"(a,es12.3,a)") "   min evap over grid             ", minval(surf%evap), " kg/m2/s"
@@ -150,22 +150,23 @@ contains
         do j = 1, nlat
             do i = 1, nlon
                 call aeros_vgrid_pressure(vg, real(p0,wp), phalf, pfull, dpc)
-                ! heating [K/s] applied to the lowest layer this step
-                dsh = surf%shf(i,j)*real(grav,wp)/(real(cp_d,wp)*dpc(ks))
-                worst_h = max(worst_h, abs(dtdt(i,j,ks) - dsh))
+                ! forward temperature increment [K] applied to the lowest layer:
+                ! the sensible flux over the layer heat capacity, times the step
+                dsh = surf%shf(i,j)*real(grav,wp)/(real(cp_d,wp)*dpc(ks))*1800.0_wp
+                worst_h = max(worst_h, abs(dt_phys(i,j,ks) - dsh))
                 ! moistening [kg/kg] applied over the step
                 dqm = surf%evap(i,j)*real(grav,wp)/dpc(ks)*1800.0_wp
                 worst_q = max(worst_q, abs((qv(i,j,ks) - qv0) - dqm))
             end do
         end do
-        write(*,"(a,es12.3)") "   worst |dtdt - SHF/cap|         ", worst_h
+        write(*,"(a,es12.3)") "   worst |dt_phys - SHF/cap|         ", worst_h
         write(*,"(a,es12.3)") "   worst |dq - evap/mass|         ", worst_q
 
         call check(worst_h < 1.0e-15_wp, "lowest-layer heating equals SHF over heat capacity", nfail)
         call check(worst_q < 1.0e-15_wp, "lowest-layer moistening equals evap over layer mass", nfail)
 
         ! only the lowest layer is touched
-        call check(maxval(abs(dtdt(:,:,1:nlev-1))) == 0.0_wp, &
+        call check(maxval(abs(dt_phys(:,:,1:nlev-1))) == 0.0_wp, &
                    "only the lowest layer is forced", nfail)
         return
     end subroutine test_fluxes_up
@@ -189,9 +190,9 @@ contains
             end do
         end do
         u = 5.0_wp; v = 5.0_wp
-        dtdt = 0.0_wp
+        dt_phys = 0.0_wp
 
-        call aeros_surface_apply(surf, vg, t_g, qv, lnps, u, v, dtdt, 1800.0_wp)
+        call aeros_surface_apply(surf, vg, t_g, qv, lnps, u, v, dt_phys, 1800.0_wp)
 
         write(*,"(a,es12.3,a)") "   max |SHF|                      ", maxval(abs(surf%shf)), " W/m2"
         write(*,"(a,es12.3,a)") "   max |evap|                     ", maxval(abs(surf%evap)), " kg/m2/s"
@@ -217,9 +218,9 @@ contains
         t_g = real(T0,wp) + 5.0_wp        ! mild air, above the cold surface ...
         qv  = 1.0e-3_wp                    ! ... and moist relative to q_sat(SST)
         u = 30.0_wp; v = 0.0_wp
-        dtdt = 0.0_wp
+        dt_phys = 0.0_wp
 
-        call aeros_surface_apply(surf, vg, t_g, qv, lnps, u, v, dtdt, 1.0e4_wp)
+        call aeros_surface_apply(surf, vg, t_g, qv, lnps, u, v, dt_phys, 1.0e4_wp)
 
         write(*,"(a,es12.3)") "   min q after                    ", minval(qv)
         call check(minval(qv) >= 0.0_wp, "q never goes negative under a downward flux", nfail)

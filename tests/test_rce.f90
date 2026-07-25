@@ -10,21 +10,26 @@ program test_rce
     ! relaxes the temperature toward a prescribed target; the climate is whatever
     ! the physics balances to.
     !
-    ! A short run cannot reach equilibrium -- the radiative timescale is weeks --
-    ! so what is asserted is that the closed loop is STABLE and every part of it
-    ! is ACTIVE and BOUNDED:
+    ! SCOPE, stated honestly: this is a SHORT-RUN stability and activity check,
+    ! NOT a test of radiative-convective equilibrium. Reaching equilibrium takes
+    ! weeks of model time, and a longer integration does NOT yet stay stable:
+    ! after ~1-2 model months the lowest layer develops a grid-scale hot spot
+    ! and the run blows up. That is the open item (m2_handoff.md); it is a
+    ! surface-flux / moist-physics interaction, distinct from the model-top
+    ! over-cooling the sponge here already controls. So what is asserted is only
+    ! that over a few hundred steps the closed loop is STABLE and every part of
+    ! it is ACTIVE and BOUNDED:
     !
     !   STABILITY. No NaN in T or q, bounded wind, q >= 0 -- across a stack where
-    !   radiation and surface fluxes both feed the centered temperature path and
-    !   convection the forward-split one.
+    !   surface fluxes, convection and radiation all feed the forward-split
+    !   temperature path and the model-top sponge damps the lid.
     !
     !   EVERY COMPONENT ACTIVE. The surface fluxes move heat and moisture, the
     !   radiation cools (physical global-mean OLR), and it rains. A dead loop
     !   would pass "stable" vacuously; these check the loop is closed.
     !
-    !   BOUNDED, NOT RUNNING AWAY. Without a thermal relaxation an unstable
-    !   coupling would drift the global-mean temperature without limit; it stays
-    !   in a physical band, and the TOA imbalance is finite.
+    !   BOUNDED over the window. The global-mean lowest-layer temperature stays
+    !   in a physical band and the TOA imbalance is finite over these steps.
     !
     ! Exits non-zero on failure.
 
@@ -109,6 +114,7 @@ contains
         ts%cnv%enabled = .TRUE.
         ts%surf%enabled = .TRUE.         ! prescribed-SST surface fluxes: the source
         ts%rad%enabled  = .TRUE.         ! clear-sky LW+SW: the sink
+        ts%sponge_on    = .TRUE.         ! model-top sponge (C1 Rayleigh + C2 relax)
         ! annual-mean insolation, 280 ppm, ocean albedo -- init defaults; the
         ! insolation was precomputed in aeros_radiation_init.
 

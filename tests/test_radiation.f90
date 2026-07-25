@@ -318,7 +318,7 @@ contains
         write(*,*) " -- clear-sky shortwave (ocean surface, 30N midsummer)"
 
         call aeros_insolation_daily(30.0_wp*real(pi,wp)/180.0_wp, 172.0_wp, real(S0,wp), cz, swdn)
-        call aeros_sw_clearsky_column(nlev, q, dp_lev, swdn, cz, &
+        call aeros_sw_clearsky_column(nlev, q, o3, .FALSE., dp_lev, swdn, cz, &
                                       0.06_wp, 0.06_wp, heat, sw_up, sw_dw, sw_net)
 
         a_atm = swdn - sw_up - sw_net

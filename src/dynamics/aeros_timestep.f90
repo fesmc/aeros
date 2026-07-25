@@ -239,6 +239,29 @@ module aeros_timestep
         ! step-dependent part is one multiply, so this never needs rebuilding.
         real(wp), allocatable :: dratio(:)   ! (0:lmax)
 
+        ! === Upper-level sponge ==============================================
+        !
+        ! A model-top damping layer, off by default. It removes the runaway a
+        ! tropospheric lid (10 hPa, L12) develops once the artificial
+        ! Held-Suarez stratospheric temperature cap is gone and clear-sky
+        ! radiation cools the top layers without a strong balancing heating:
+        ! the top over-cools, its equator-pole gradient drives an unbounded
+        ! thermal wind, and the run blows up. Two pieces, both implicit and
+        ! ramped over the top layers:
+        !   C1  Rayleigh drag  -- vor,div relaxed toward zero (kills the winds)
+        !   C2  Newtonian cool -- temp relaxed toward sponge_tref, and its
+        !                         horizontal structure toward zero (removes the
+        !                         gradient that drives the thermal wind)
+        ! sponge_kr_lev / sponge_kt_lev are the per-level rates [s-1], nonzero
+        ! only where sigma_full < sponge_sigma, squared-ramped to the top.
+        logical  :: sponge_on    = .FALSE.
+        real(wp) :: sponge_kr    = 1.0_wp/43200.0_wp   ! max Rayleigh rate [s-1] (0.5 d)
+        real(wp) :: sponge_kt    = 1.0_wp/86400.0_wp   ! max Newtonian rate [s-1] (1 d)
+        real(wp) :: sponge_sigma = 0.12_wp             ! sponge top of ramp [sigma]
+        real(wp) :: sponge_tref  = 216.0_wp            ! reference strat T [K]
+        real(wp), allocatable :: sponge_kr_lev(:)      ! (nlev) [s-1]
+        real(wp), allocatable :: sponge_kt_lev(:)      ! (nlev) [s-1]
+
         ! === The mass fixer (see the module header) ==========================
 
         logical  :: mass_fixer = .FALSE.
@@ -301,9 +324,10 @@ contains
         type(aeros_vgrid_class),    intent(in)    :: vg
         character(len=*), intent(in), optional    :: filename
 
-        integer  :: nlm, lmax, l
-        real(wp) :: lref
+        integer  :: nlm, lmax, l, k
+        real(wp) :: lref, ramp
         complex(wp_sh), allocatable :: c_one(:)
+        real(dp), allocatable :: scr(:,:)
 
         nlm  = pool%sht(1)%nlm
         lmax = pool%sht(1)%lmax
@@ -384,31 +408,37 @@ contains
             ts%dratio(l) = (real(l*(l+1), wp)/lref)**(ts%ndiff/2)
         end do
 
-        if (ts%mass_fixer) then
-            allocate(ts%ps_fix(grd%nlon, grd%nlat))
-
-            ! Read the (0,0) coefficient of the constant field 1 out of a
-            ! transform. Analysis overwrites its input, which is why this uses
-            ! the scratch it has just allocated rather than a saved field.
-            ts%lm00 = aeros_sht_lm(pool%sht(1), 0, 0)
-
-            allocate(c_one(nlm))
-            ts%ps_fix = 1.0_dp
-            call aeros_sht_analysis(pool%sht(1), ts%ps_fix, c_one)
-            ts%c00 = real(c_one(ts%lm00), dp)
-            deallocate(c_one)
-
-            ! The constant field 1 must have a non-zero (0,0) coefficient in
-            ! any normalization. A zero means the transform or the indexing is
-            ! not what the fixer believes, and it is better to say so at init
-            ! than to divide by it a thousand steps in.
-            if (abs(ts%c00) < 1.0e-12_dp) then
-                write(io_unit_err,*) "aeros_timestep_init:: error: the mass fixer read a "// &
-                                        "(0,0) coefficient of ", ts%c00, " for the constant "// &
-                                        "field 1, which cannot be right."
-                error stop 1
-            end if
+        ! The (0,0) mode index and the (0,0) coefficient of the constant field 1
+        ! (= sqrt(4 pi) in this normalization), read back from a transform
+        ! rather than written down, so a normalization change cannot silently
+        ! break the mass fixer or the sponge's temperature reference. Always
+        ! computed: both features need it, and it is a one-off transform.
+        ts%lm00 = aeros_sht_lm(pool%sht(1), 0, 0)
+        allocate(c_one(nlm), scr(grd%nlon, grd%nlat))
+        scr = 1.0_dp
+        call aeros_sht_analysis(pool%sht(1), scr, c_one)
+        ts%c00 = real(c_one(ts%lm00), dp)
+        deallocate(c_one, scr)
+        if (abs(ts%c00) < 1.0e-12_dp) then
+            write(io_unit_err,*) "aeros_timestep_init:: error: read a (0,0) coefficient of ", &
+                                    ts%c00, " for the constant field 1, which cannot be right."
+            error stop 1
         end if
+
+        if (ts%mass_fixer) allocate(ts%ps_fix(grd%nlon, grd%nlat))
+
+        ! Per-level sponge rates: squared ramp from zero at sigma_sponge to the
+        ! maximum at the model top. Nonzero only in the top layers.
+        allocate(ts%sponge_kr_lev(vg%nlev), ts%sponge_kt_lev(vg%nlev))
+        ts%sponge_kr_lev = 0.0_wp
+        ts%sponge_kt_lev = 0.0_wp
+        do k = 1, vg%nlev
+            if (vg%sigma_full(k) < ts%sponge_sigma) then
+                ramp = ((ts%sponge_sigma - vg%sigma_full(k))/ts%sponge_sigma)**2
+                ts%sponge_kr_lev(k) = ts%sponge_kr*ramp
+                ts%sponge_kt_lev(k) = ts%sponge_kt*ramp
+            end if
+        end do
 
         return
 
@@ -436,6 +466,8 @@ contains
         call aeros_radiation_end(ts%rad)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
+        if (allocated(ts%sponge_kr_lev)) deallocate(ts%sponge_kr_lev)
+        if (allocated(ts%sponge_kt_lev)) deallocate(ts%sponge_kt_lev)
         if (allocated(ts%ps_fix)) deallocate(ts%ps_fix)
 
         ts%mass_target = -1.0_dp
@@ -491,46 +523,53 @@ contains
 
         if (ts%hs%enabled) call aeros_hs_apply(ts%hs, vg, ts%wrk)
 
+        ! Forward-split physics accumulator. Surface fluxes, convection and
+        ! radiation all add a forward temperature increment here, applied to the
+        ! n+1 state in step 6 -- off the centered leapfrog, which their large,
+        ! vertically sharp heating (a single-layer flux, an overturning column,
+        ! a cooling model top) would otherwise drive computational-mode
+        ! unstable. Zero it once if any is on.
+        if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled) &
+            ts%wrk%dt_phys = 0.0_wp
+
         ! Surface turbulent fluxes, before convection: sensible heat warms the
-        ! lowest layer (added to wrk%dtdt, the centered path, like the HS
-        ! forcing it replaces) and evaporation moistens it (a forward increment
-        ! to now%qv_g). This is the boundary-layer source that convection then
-        ! carries up the column. Off unless enabled.
+        ! lowest layer (a forward increment to wrk%dt_phys) and evaporation
+        ! moistens it (a forward increment to now%qv_g). This is the
+        ! boundary-layer source that convection then carries up the column. Off
+        ! unless enabled.
         if (ts%surf%enabled) &
             call aeros_surface_apply(ts%surf, vg, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
-                                        ts%wrk%dtdt, ts%dt)
+                                        ts%wrk%dt_phys, ts%dt)
 
         ! Moist convective adjustment, before condensation: it overturns the
         ! column and precipitates, and large-scale condensation then removes
         ! whatever gridbox-mean supersaturation it left. Both act on the
-        ! time-level-n gridpoint T and q. Convection's temperature change is a
-        ! forward increment in wrk%dt_phys, applied to the n+1 state in step 6
-        ! (NOT the centered leapfrog -- see aeros_convection); zero the
-        ! accumulator first. Its humidity change is applied to now%qv_g.
-        if (ts%cnv%enabled) then
-            ts%wrk%dt_phys = 0.0_wp
+        ! time-level-n gridpoint T and q. Its humidity change is applied to
+        ! now%qv_g; its heating to wrk%dt_phys. See aeros_convection.
+        if (ts%cnv%enabled) &
             call aeros_convection_apply(ts%cnv, vg, ts%wrk%t_g, now%qv_g, &
                                             ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
-        end if
 
-        ! Large-scale condensation, at the same grid seam and for the same
-        ! reason: it dries the gridpoint humidity in place and adds its latent
-        ! heating to wrk%dtdt, so the heating rides the transform and the
-        ! leapfrog with the dynamical temperature tendency. Returns at once when
-        ! dry. See aeros_condensation.
+        ! Large-scale condensation, at the same grid seam: it dries the
+        ! gridpoint humidity in place and adds its latent heating to wrk%dtdt, so
+        ! the heating rides the transform and the leapfrog with the dynamical
+        ! temperature tendency. Its heating is small and smooth, so unlike
+        ! convection and radiation it stays on the centered path. Returns at once
+        ! when dry. See aeros_condensation.
         call aeros_condensation_apply(ts%cnd, vg, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%wrk%dtdt, ts%dt)
 
-        ! Radiation, at the same grid seam and the same centered path: clear-sky
-        ! LW+SW heating, recomputed on a multi-hour cadence and cached, added to
-        ! wrk%dtdt. Uses the surface module's prescribed SST as the skin
-        ! temperature (allocated even when the surface fluxes are off). Off
-        ! unless enabled.
+        ! Radiation, at the same grid seam: clear-sky LW+SW heating, recomputed
+        ! on a multi-hour cadence and cached, accumulated into wrk%dt_phys as a
+        ! forward increment (NOT the centered path -- its top-of-atmosphere
+        ! cooling is sharp and stiff). Uses the surface module's prescribed SST
+        ! as the skin temperature (allocated even when the surface fluxes are
+        ! off). Off unless enabled.
         if (ts%rad%enabled) &
             call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%surf%t_s, ts%nstep, &
-                                        ts%dt, ts%wrk%dtdt)
+                                        ts%dt, ts%wrk%dt_phys)
 
         call aeros_tendency_spectral(pool, vg, ts%wrk, ts%tnd)
 
@@ -571,6 +610,9 @@ contains
         ! === 3. Horizontal diffusion, implicit ===============================
         call diffuse(ts, s, h)
 
+        ! === 3b. Upper-level sponge, implicit ================================
+        if (ts%sponge_on) call sponge(ts, s, h)
+
         ! === 4. Time filter ==================================================
         if (ts%nstep > 0) call raw_filter(ts, s, now%spec, vg%nlev)
 
@@ -581,15 +623,16 @@ contains
         call aeros_spec_swap(now%spec, ts%new)
 
         ! === 6. Forward-split physics heating ================================
-        ! Convective heating was accumulated on the grid in wrk%dt_phys as an
-        ! increment [K]. Apply it FORWARD onto the n+1 state now -- transform
-        ! per level and add to now%temp -- decoupled from the centered leapfrog,
-        ! which would otherwise turn convection's large, vertically
-        ! sign-alternating heating into a computational-mode instability. This
-        ! mirrors the forward treatment of gridpoint humidity in step 8.
-        ! (Large-scale condensation still rides the centered dtdt path: its
-        ! heating is small and smooth. See aeros_convection.)
-        if (ts%cnv%enabled) call apply_phys_heating(s, now%spec, ts%wrk%dt_phys, vg%nlev)
+        ! Convective AND radiative heating were accumulated on the grid in
+        ! wrk%dt_phys as an increment [K]. Apply it FORWARD onto the n+1 state
+        ! now -- transform per level and add to now%temp -- decoupled from the
+        ! centered leapfrog, which would otherwise turn their large, vertically
+        ! sharp heating into a computational-mode instability. This mirrors the
+        ! forward treatment of gridpoint humidity in step 8. (Large-scale
+        ! condensation still rides the centered dtdt path: its heating is small
+        ! and smooth. See aeros_convection.)
+        if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled) &
+            call apply_phys_heating(s, now%spec, ts%wrk%dt_phys, vg%nlev)
 
         ! === 7. Mass fixer ===================================================
         ! After the swap, so it acts on X^(n+1) -- the state the caller is
@@ -716,6 +759,44 @@ contains
         return
 
     end subroutine aeros_timestep_set_mass_target
+
+    subroutine sponge(ts, sht, h)
+        ! Implicit model-top sponge (C1 Rayleigh drag + C2 Newtonian cooling),
+        ! applied to the n+1 state in the top layers only. Same implicit form as
+        ! diffuse: X <- (X + h k X_target)/(1 + h k). Vorticity and divergence
+        ! relax toward zero; temperature toward sponge_tref in the mean and
+        ! toward zero in its horizontal structure -- the latter is what removes
+        ! the equator-pole gradient driving the runaway thermal wind.
+
+        implicit none
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_sht_class),      intent(in)    :: sht
+        real(wp), intent(in) :: h
+
+        real(wp) :: fr, ft, tref_c
+        integer  :: k, lm
+
+        do k = 1, ts%new%nlev
+            if (ts%sponge_kr_lev(k) <= 0.0_wp .and. ts%sponge_kt_lev(k) <= 0.0_wp) cycle
+
+            fr = 1.0_wp/(1.0_wp + h*ts%sponge_kr_lev(k))
+            ft = 1.0_wp/(1.0_wp + h*ts%sponge_kt_lev(k))
+            tref_c = ts%sponge_tref*real(ts%c00, wp)   ! (0,0) coeff of a constant field
+
+            do lm = 1, sht%nlm
+                ts%new%vor(lm,k) = fr*ts%new%vor(lm,k)
+                ts%new%div(lm,k) = fr*ts%new%div(lm,k)
+                if (lm == ts%lm00) then
+                    ts%new%temp(lm,k) = ft*(ts%new%temp(lm,k) &
+                                            + cmplx(h*ts%sponge_kt_lev(k)*tref_c, 0.0_wp, wp_sh))
+                else
+                    ts%new%temp(lm,k) = ft*ts%new%temp(lm,k)
+                end if
+            end do
+        end do
+
+        return
+    end subroutine sponge
 
     subroutine diffuse(ts, sht, h)
         ! Implicit del^ndiff damping of vorticity, divergence and temperature.

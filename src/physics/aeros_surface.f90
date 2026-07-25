@@ -27,8 +27,11 @@ module aeros_surface
     ! floor (gustiness), evaluated against the lowest model layer:
     !   SH = rho1 cp C_H |U| (T_s - T_1)                    [W m-2]
     !   E  = rho1    C_E |U| (q_sat(T_s,p_s) - q_1)         [kg m-2 s-1]
-    ! Sensible heat warms the lowest layer through wrk%dtdt (centered path, like
-    ! the Held-Suarez forcing it replaces: single-signed, smooth in time).
+    ! Sensible heat warms the lowest layer through wrk%dt_phys, the FORWARD-split
+    ! path convection and radiation use: the flux goes into one layer only, so
+    ! its sharp vertical structure would excite the computational mode on the
+    ! centered leapfrog (the Held-Suarez forcing it replaces was distributed over
+    ! the column, and was safe centered; a single-layer flux is not).
     ! Evaporation moistens the lowest layer as a forward increment to qv_g, the
     ! same treatment convection and transport give the gridpoint humidity.
     !
@@ -165,13 +168,13 @@ contains
         return
     end subroutine aeros_surface_end
 
-    subroutine aeros_surface_apply(surf, vg, t_g, qv_g, lnps_g, u, v, dtdt, dt)
+    subroutine aeros_surface_apply(surf, vg, t_g, qv_g, lnps_g, u, v, dt_phys, dt)
         ! Sensible and latent surface fluxes into the lowest model layer.
         !
         ! t_g, lnps_g, u, v are the current gridpoint fields (aeros_tendency's
         ! wrk); qv_g is the gridpoint humidity, moistened in place by
-        ! evaporation; dtdt is the grid temperature tendency the sensible
-        ! heating is added to. The lowest layer is k = vg%nlev.
+        ! evaporation; dt_phys is the forward-split temperature increment [K]
+        ! the sensible heating is added to. The lowest layer is k = vg%nlev.
 
         implicit none
         type(aeros_surf_class),  intent(inout) :: surf
@@ -181,7 +184,7 @@ contains
         real(wp), intent(in)    :: lnps_g(:,:)    ! (nlon,nlat) ln[Pa]
         real(wp), intent(in)    :: u(:,:,:)       ! (nlon,nlat,nlev) [m s-1]
         real(wp), intent(in)    :: v(:,:,:)       ! (nlon,nlat,nlev) [m s-1]
-        real(wp), intent(inout) :: dtdt(:,:,:)    ! (nlon,nlat,nlev) [K s-1]
+        real(wp), intent(inout) :: dt_phys(:,:,:) ! (nlon,nlat,nlev) [K] increment
         real(wp), intent(in)    :: dt             ! [s]
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
@@ -213,8 +216,11 @@ contains
                 call aeros_qsat(surf%t_s(i,j), ps, qs_s, dqs)
                 ev = rho1*surf%c_e*wind*(qs_s - q1)
 
-                ! sensible heating of the lowest layer, centered path
-                dtdt(i,j,ks) = dtdt(i,j,ks) + sh*grav/(cp_d*dpc(ks))
+                ! sensible heating of the lowest layer, forward-split increment
+                ! [K]: it is confined to one layer, so like convection and
+                ! radiation its sharp vertical structure would go
+                ! computational-mode unstable on the centered leapfrog.
+                dt_phys(i,j,ks) = dt_phys(i,j,ks) + sh*grav/(cp_d*dpc(ks))*dt
 
                 ! evaporative moistening, forward increment; never drive q < 0
                 ! when the flux is downward (dew onto a colder surface).
