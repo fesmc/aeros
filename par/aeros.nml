@@ -201,4 +201,10 @@
     ! Critical relative humidity for condensation. 1.0 is true saturation
     ! adjustment; a lower value stands in for sub-grid humidity variability.
     rh_crit = 1.0
+
+    ! Moist convective adjustment (src/physics/aeros_convection.f90). OFF by
+    ! default and in the dry Held-Suarez benchmark. `conv_scheme` selects the
+    ! scheme; only "manabe" is implemented (Betts-Miller is the planned second).
+    convect     = .FALSE.
+    conv_scheme = "manabe"
 /

@@ -99,7 +99,8 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_vordiv.o $(objdir)/aeros_tendency.o \
 							$(objdir)/aeros_semiimp.o $(objdir)/aeros_held_suarez.o \
 							$(objdir)/aeros_correction.o $(objdir)/aeros_moisture.o \
-							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o
+							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o \
+							$(objdir)/aeros_convection.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
@@ -121,6 +122,13 @@ $(objdir)/aeros_held_suarez.o: $(physdir)/aeros_held_suarez.f90 \
 # grid seam like the Held-Suarez forcing.
 $(objdir)/aeros_condensation.o: $(physdir)/aeros_condensation.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
+# M2.3d: moist convective adjustment. A column process; reuses q_sat from
+# condensation, so it is compiled after it.
+$(objdir)/aeros_convection.o: $(physdir)/aeros_convection.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o \
+							$(objdir)/aeros_condensation.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros core #################################
@@ -174,7 +182,8 @@ aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_semiimp.o
 
 aeros_physics =  $(objdir)/aeros_held_suarez.o \
-                 $(objdir)/aeros_condensation.o
+                 $(objdir)/aeros_condensation.o \
+                 $(objdir)/aeros_convection.o
 
 # aeros_timestep sits above the physics as well as the dynamics -- it is what
 # calls the forcing -- so it is archived after both.

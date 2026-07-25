@@ -160,6 +160,9 @@ module aeros_timestep
     use aeros_condensation, only : aeros_cond_class, aeros_condensation_init, &
                                 aeros_condensation_load, aeros_condensation_end, &
                                 aeros_condensation_apply, aeros_condensation_report
+    use aeros_convection, only : aeros_conv_class, aeros_convection_init, &
+                                aeros_convection_load, aeros_convection_end, &
+                                aeros_convection_apply, aeros_convection_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
 
@@ -208,6 +211,10 @@ module aeros_timestep
         ! Large-scale condensation (aeros_condensation), at the grid seam. Off
         ! unless a namelist turns it on; a dry run never enters it.
         type(aeros_cond_class) :: cnd
+
+        ! Moist convective adjustment (aeros_convection), at the grid seam and
+        ! BEFORE condensation. Off unless a namelist turns it on.
+        type(aeros_conv_class) :: cnv
 
         ! [ l(l+1) / lmax(lmax+1) ]^(ndiff/2), precomputed per degree. The
         ! step-dependent part is one multiply, so this never needs rebuilding.
@@ -342,8 +349,10 @@ contains
 
         if (present(filename)) then
             call aeros_condensation_load(ts%cnd, filename, grd)
+            call aeros_convection_load(ts%cnv, filename, grd)
         else
             call aeros_condensation_init(ts%cnd, grd, .FALSE.)
+            call aeros_convection_init(ts%cnv, grd, .FALSE.)
         end if
 
         allocate(ts%dratio(0:lmax))
@@ -399,6 +408,7 @@ contains
         call aeros_correction_end(ts%cor)
         call aeros_moisture_end(ts%mst)
         call aeros_condensation_end(ts%cnd)
+        call aeros_convection_end(ts%cnv)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
         if (allocated(ts%ps_fix)) deallocate(ts%ps_fix)
@@ -455,6 +465,13 @@ contains
         call aeros_tendency_grid(pool, vg, grd, now%spec, ts%wrk)
 
         if (ts%hs%enabled) call aeros_hs_apply(ts%hs, vg, ts%wrk)
+
+        ! Moist convective adjustment, before condensation: it overturns the
+        ! column and precipitates, and large-scale condensation then removes
+        ! whatever gridbox-mean supersaturation it left. Both act on the
+        ! time-level-n gridpoint T and q and add to wrk%dtdt.
+        call aeros_convection_apply(ts%cnv, vg, ts%wrk%t_g, now%qv_g, &
+                                        ts%wrk%lnps_g, ts%wrk%dtdt, ts%dt)
 
         ! Large-scale condensation, at the same grid seam and for the same
         ! reason: it dries the gridpoint humidity in place and adds its latent
@@ -809,6 +826,7 @@ contains
         call aeros_hs_print(ts%hs, iou)
         call aeros_correction_report(ts%cor, iou)
         call aeros_moisture_report(ts%mst, iou)
+        call aeros_convection_report(ts%cnv, iou)
         call aeros_condensation_report(ts%cnd, iou)
 
         return
