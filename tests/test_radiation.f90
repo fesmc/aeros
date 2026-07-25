@@ -36,7 +36,9 @@ program test_radiation
     use aeros_grid
     use aeros_vertical
     use aeros_condensation, only : aeros_qsat
-    use aeros_radiation,    only : aeros_lw_clearsky_column
+    use aeros_defs,         only : S0, pi
+    use aeros_radiation,    only : aeros_lw_clearsky_column, &
+                                   aeros_sw_clearsky_column, aeros_insolation_daily
 
     implicit none
 
@@ -90,6 +92,8 @@ program test_radiation
     call test_fluxes(nfail)
     call test_energy_identity(nfail)
     call test_co2_forcing(nfail)
+    call test_insolation(nfail)
+    call test_shortwave(nfail)
 
     call aeros_vgrid_end(vg)
     call aeros_grid_end(grd)
@@ -249,6 +253,102 @@ contains
                    "doubling CO2 cuts OLR by a few W/m2 (positive forcing)", nfail)
         return
     end subroutine test_co2_forcing
+
+    ! === 6. Insolation ========================================================
+
+    subroutine test_insolation(nfail)
+        integer, intent(inout) :: nfail
+        real(wp) :: cz, sw, cz2, sw2, annual, lat, doy
+        integer  :: d
+
+        write(*,*) ""
+        write(*,*) " -- daily-mean insolation"
+
+        ! equator at equinox: daily mean ~ S0/pi ~ 433 W/m2
+        call aeros_insolation_daily(0.0_wp, 80.0_wp, real(S0,wp), cz, sw)
+        write(*,"(a,f7.2,a)") "   equator equinox insolation     ", sw, " W/m2"
+        call check(abs(sw - real(S0,wp)/real(pi,wp)) < 15.0_wp, &
+                   "equator equinox daily insolation ~ S0/pi", nfail)
+        call check(cz > 0.0_wp .and. cz <= 1.0_wp, &
+                   "airmass cosine zenith is in (0,1]", nfail)
+
+        ! north pole in NH winter (doy ~ 355): polar night, zero insolation
+        call aeros_insolation_daily(80.0_wp*real(pi,wp)/180.0_wp, 355.0_wp, real(S0,wp), cz2, sw2)
+        write(*,"(a,f7.2,a)") "   80N midwinter insolation       ", sw2, " W/m2"
+        call check(sw2 == 0.0_wp .and. cz2 == 0.0_wp, &
+                   "polar night gives zero insolation", nfail)
+
+        ! annual-and-global mean insolation ~ S0/4 ~ 340 W/m2
+        annual = 0.0_wp
+        do d = 1, 360, 5
+            do lat = -85.0_wp, 85.0_wp, 10.0_wp
+                doy = real(d, wp)
+                call aeros_insolation_daily(lat*real(pi,wp)/180.0_wp, doy, real(S0,wp), cz, sw)
+                annual = annual + sw*cos(lat*real(pi,wp)/180.0_wp)
+            end do
+        end do
+        annual = annual/count_area()
+        write(*,"(a,f7.2,a)") "   annual-global mean insolation  ", annual, " W/m2"
+        call check(abs(annual - real(S0,wp)/4.0_wp) < 12.0_wp, &
+                   "annual-global mean insolation ~ S0/4", nfail)
+        return
+    end subroutine test_insolation
+
+    real(wp) function count_area() result(a)
+        real(wp) :: lat
+        integer  :: d
+        a = 0.0_wp
+        do d = 1, 360, 5
+            do lat = -85.0_wp, 85.0_wp, 10.0_wp
+                a = a + cos(lat*real(pi,wp)/180.0_wp)
+            end do
+        end do
+        return
+    end function count_area
+
+    ! === 7. Shortwave =========================================================
+
+    subroutine test_shortwave(nfail)
+        integer, intent(inout) :: nfail
+        real(wp) :: cz, swdn, heat(nlev)
+        real(wp) :: sw_up, sw_dw, sw_net, col_heat, a_atm, peak_kday
+        integer  :: kk
+
+        write(*,*) ""
+        write(*,*) " -- clear-sky shortwave (ocean surface, 30N midsummer)"
+
+        call aeros_insolation_daily(30.0_wp*real(pi,wp)/180.0_wp, 172.0_wp, real(S0,wp), cz, swdn)
+        call aeros_sw_clearsky_column(nlev, q, dp_lev, swdn, cz, &
+                                      0.06_wp, 0.06_wp, heat, sw_up, sw_dw, sw_net)
+
+        a_atm = swdn - sw_up - sw_net
+        write(*,"(a,f7.2,a)") "   TOA down SW                    ", swdn, " W/m2"
+        write(*,"(a,f7.3,a)") "   planetary albedo               ", sw_up/swdn, " "
+        write(*,"(a,f7.2,a)") "   surface down SW                ", sw_dw, " W/m2"
+        write(*,"(a,f7.2,a)") "   atmospheric SW absorption      ", a_atm, " W/m2"
+
+        call check(sw_up/swdn > 0.05_wp .and. sw_up/swdn < 0.4_wp, &
+                   "planetary albedo is physical for a dark ocean", nfail)
+        call check(sw_dw > 0.0_wp .and. sw_dw < swdn, &
+                   "surface down SW is positive and below TOA", nfail)
+        call check(a_atm > 0.0_wp, "the atmosphere absorbs shortwave", nfail)
+
+        ! column heating positive, and it equals the absorbed flux exactly
+        col_heat = 0.0_wp
+        peak_kday = 0.0_wp
+        do kk = 1, nlev
+            col_heat = col_heat + (real(cp_d, wp)/real(grav, wp))*heat(kk)*dp_lev(kk)
+            peak_kday = max(peak_kday, heat(kk)*86400.0_wp)
+        end do
+        write(*,"(a,f7.3,a)") "   peak SW heating                ", peak_kday, " K/day"
+        write(*,"(a,es12.3)") "   |col heating - absorption|/abs ", abs(col_heat - a_atm)/a_atm
+
+        call check(peak_kday > 0.1_wp .and. peak_kday < 4.0_wp, &
+                   "shortwave warms the column at a fraction of a K/day", nfail)
+        call check(abs(col_heat - a_atm)/a_atm < 1.0e-12_wp, &
+                   "column SW heating equals the absorbed flux", nfail)
+        return
+    end subroutine test_shortwave
 
     subroutine check(ok, label, nfail)
         logical, intent(in) :: ok

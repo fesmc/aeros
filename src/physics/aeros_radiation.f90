@@ -61,7 +61,7 @@ module aeros_radiation
     ! other physics.
 
     use aeros_defs,     only : dp, wp, io_unit_err, R_d, cp_d, grav, T0, p0, &
-                               sigma_sb, S0, aeros_grid_class
+                               sigma_sb, S0, pi, aeros_grid_class
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure, &
                                aeros_hydrostatic
     use nml,            only : nml_read
@@ -105,6 +105,27 @@ module aeros_radiation
     real(wp), parameter :: M_CO2 = 44.0095_wp      ! g/mol
     real(wp), parameter :: M_AIR = 28.97_wp        ! g/mol
 
+    ! === SESAM shortwave band coefficients =================================
+    ! Two bands: visible+UV (fraction SW_FRAC_VU) and near-infrared. Water
+    ! vapour absorbs only in the near-IR, via a two-exponential band; Rayleigh
+    ! scattering (SW_RSCAT) and ozone (SW_C_ITF_O) act in the visible. Clean
+    ! sky only in this first pass -- aerosol and cloud branches dropped
+    ! (aerosol_ot = 0 collapses SESAM's scattering albedo to SW_RSCAT).
+
+    real(wp), parameter :: SW_FRAC_VU = 0.45_wp    ! visible+UV fraction of TSI
+    real(wp), parameter :: SW_RSCAT   = 0.17_wp    ! Rayleigh visible reflectance
+    real(wp), parameter :: SW_C_ITF_O = 0.98_wp    ! ozone visible transmission
+    real(wp), parameter :: SW_A1_W    = 0.21_wp    ! near-IR H2O band, weights
+    real(wp), parameter :: SW_A2_W    = 1.0_wp - SW_A1_W
+    real(wp), parameter :: SW_B1_W    = 6.27_wp    ! near-IR H2O band, exponents
+    real(wp), parameter :: SW_B2_W    = 0.0267_wp
+    real(wp), parameter :: SW_COSZ_O  = 1.0_wp/1.66_wp  ! diffuse-beam cosine
+
+    ! === Orbit (present-day, for the stopgap insolation) ===================
+    real(wp), parameter :: OBLIQUITY  = 23.44_wp*pi/180.0_wp  ! [rad]
+    real(wp), parameter :: DAYS_YEAR  = 365.25_wp
+    real(wp), parameter :: DOY_VE     = 80.0_wp    ! vernal equinox day-of-year
+
     ! === Configuration / state =============================================
     type, public :: aeros_rad_class
         logical :: enabled = .FALSE.        ! off by default, like convection
@@ -123,6 +144,8 @@ module aeros_radiation
     public :: aeros_radiation_end
     public :: aeros_radiation_report
     public :: aeros_lw_clearsky_column
+    public :: aeros_sw_clearsky_column
+    public :: aeros_insolation_daily
 
 contains
 
@@ -345,6 +368,165 @@ contains
         end function trans
 
     end subroutine aeros_lw_clearsky_column
+
+    subroutine aeros_insolation_daily(lat, doy, tsi, coszen, swdown)
+        ! Daily-mean insolation for one latitude and day-of-year. Present-day
+        ! orbit, circular, obliquity-only -- a stopgap for the eventual Laskar
+        ! (2004) `insol` forcing (design.md section 8). Returns the daily-mean
+        ! TOA downward SW on a horizontal surface, and the daylight-weighted
+        ! mean cosine zenith the shortwave uses as its airmass. No diurnal
+        ! cycle: radiation is called on a multi-hour cadence and there is no
+        ! surface heat store yet to lag, so the daily mean is the honest input.
+
+        implicit none
+        real(wp), intent(in)  :: lat        ! latitude [rad]
+        real(wp), intent(in)  :: doy        ! day of year [1..365.25]
+        real(wp), intent(in)  :: tsi        ! solar constant [W m-2]
+        real(wp), intent(out) :: coszen     ! daylight-mean cos(zenith) [-]
+        real(wp), intent(out) :: swdown     ! daily-mean TOA down SW [W m-2]
+
+        real(wp) :: decl, lam, cosh0, h0, sinterm
+
+        ! solar declination, circular-orbit approximation
+        lam  = 2.0_wp*pi*(doy - DOY_VE)/DAYS_YEAR
+        decl = asin(sin(OBLIQUITY)*sin(lam))
+
+        ! sunset hour angle, clipped for polar day / night
+        cosh0 = -tan(lat)*tan(decl)
+        if (cosh0 >= 1.0_wp) then
+            h0 = 0.0_wp                       ! polar night
+        else if (cosh0 <= -1.0_wp) then
+            h0 = pi                           ! polar day
+        else
+            h0 = acos(cosh0)
+        end if
+
+        ! sinterm is proportional to both the daily-mean insolation and, divided
+        ! by h0, the daylight-mean cosine zenith.
+        sinterm = h0*sin(lat)*sin(decl) + cos(lat)*cos(decl)*sin(h0)
+        sinterm = max(0.0_wp, sinterm)
+
+        swdown = (tsi/pi)*sinterm
+        if (h0 > 0.0_wp .and. swdown > 0.0_wp) then
+            coszen = sinterm/h0
+        else
+            coszen = 0.0_wp
+        end if
+
+        return
+    end subroutine aeros_insolation_daily
+
+    subroutine aeros_sw_clearsky_column(nlev, q, dp_lev, swdown_toa, coszen, &
+                                        alb_vis, alb_ir, heat, &
+                                        sw_up_toa, sw_dw_sur, sw_net_sur)
+        ! Clear-sky shortwave for one column, model ordering (k=1 top ..
+        ! k=nlev surface). Two bands; near-IR water-vapour absorption is the
+        ! atmospheric heating, Rayleigh and ozone act in the visible.
+        !
+        ! The boundary quantities -- planetary albedo (TOA up) and the surface
+        ! net/downward flux -- are SESAM's clear-sky formulas verbatim (its
+        ! tuned two-path surface transmission). The column atmospheric
+        ! absorption is then the TOA-minus-surface residual, distributed over
+        ! the layers by the near-IR direct-beam absorption weight, which is
+        ! where a resolved column needs a profile that SESAM never forms. The
+        ! upward-beam re-absorption is folded into the boundary residual, not
+        ! resolved per layer -- a few W/m2, second order for a first pass.
+
+        implicit none
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: q(:)        ! (nlev) specific humidity [kg kg-1]
+        real(wp), intent(in)  :: dp_lev(:)   ! (nlev) layer thickness [Pa], > 0
+        real(wp), intent(in)  :: swdown_toa  ! daily-mean TOA down SW [W m-2]
+        real(wp), intent(in)  :: coszen      ! airmass cosine zenith [-]
+        real(wp), intent(in)  :: alb_vis     ! surface albedo, visible [-]
+        real(wp), intent(in)  :: alb_ir      ! surface albedo, near-IR [-]
+
+        real(wp), intent(out) :: heat(:)     ! (nlev) SW heating rate [K s-1]
+        real(wp), intent(out) :: sw_up_toa   ! TOA upward (reflected) SW [W m-2]
+        real(wp), intent(out) :: sw_dw_sur   ! surface downward SW [W m-2]
+        real(wp), intent(out) :: sw_net_sur  ! surface net absorbed SW [W m-2]
+
+        real(wp) :: cosz, icos
+        real(wp) :: uwv_cum(0:nlev), fdw_ir(0:nlev), w(nlev)
+        real(wp) :: m_col, itf_ir_full, alb_vu, alb_ir_p, alb_p
+        real(wp) :: m_d1, m_d2, itf_d1, itf_d2, itf_atm_vu, itf_atm_ir
+        real(wp) :: a_atm, wsum, m
+        integer  :: k, i
+
+        heat = 0.0_wp
+        if (swdown_toa <= 0.0_wp) then          ! polar night
+            sw_up_toa = 0.0_wp; sw_dw_sur = 0.0_wp; sw_net_sur = 0.0_wp
+            return
+        end if
+
+        cosz = max(coszen, 0.1_wp)
+        icos = 1.0_wp/cosz + 1.0_wp/SW_COSZ_O   ! down direct + diffuse up airmass
+
+        ! cumulative water-vapour path from TOA to each interface [g cm-2]
+        uwv_cum(0) = 0.0_wp
+        do k = 1, nlev
+            uwv_cum(k) = uwv_cum(k-1) + 0.1_wp*q(k)*dp_lev(k)/grav
+        end do
+
+        ! --- planetary albedo (SESAM clear-sky, aerosol off) ---------------
+        m_col = uwv_cum(nlev)*icos
+        itf_ir_full = itf_w_ir(m_col)
+        alb_vu   = (SW_RSCAT + (1.0_wp-SW_RSCAT)**2*alb_vis &
+                    /(1.0_wp - SW_RSCAT*alb_vis))*SW_C_ITF_O
+        alb_ir_p = alb_ir*itf_ir_full
+        alb_p    = SW_FRAC_VU*alb_vu + (1.0_wp-SW_FRAC_VU)*alb_ir_p
+        sw_up_toa = swdown_toa*alb_p
+
+        ! --- surface net and downward (SESAM two-path clear-sky) -----------
+        m_d1 = uwv_cum(nlev)/cosz
+        m_d2 = m_d1 + uwv_cum(nlev)*(1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O
+        itf_d1 = itf_w_ir(m_d1)
+        itf_d2 = itf_w_ir(m_d2)
+        ! visible: direct + one surface<->Rayleigh reflection, times ozone
+        itf_atm_vu = (1.0_wp-SW_RSCAT)*(1.0_wp-alb_vis)*SW_C_ITF_O &
+                   + (1.0_wp-SW_RSCAT)*alb_vis*SW_RSCAT*(1.0_wp-alb_vis) &
+                     /(1.0_wp - SW_RSCAT*alb_vis)*SW_C_ITF_O
+        ! near-IR: no atmospheric scattering, so only the direct absorbed beam
+        itf_atm_ir = (1.0_wp-alb_ir)*itf_d1
+        sw_net_sur = swdown_toa*(SW_FRAC_VU*itf_atm_vu + (1.0_wp-SW_FRAC_VU)*itf_atm_ir)
+        sw_dw_sur  = swdown_toa*(SW_FRAC_VU*itf_atm_vu/(1.0_wp-alb_vis) &
+                               + (1.0_wp-SW_FRAC_VU)*itf_atm_ir/(1.0_wp-alb_ir))
+
+        ! --- distribute column absorption over layers ----------------------
+        a_atm = max(0.0_wp, swdown_toa - sw_up_toa - sw_net_sur)
+
+        ! near-IR direct-beam transmission at each interface; the drop across a
+        ! layer is that layer's share of the absorption.
+        do i = 0, nlev
+            m = uwv_cum(i)/cosz
+            fdw_ir(i) = itf_w_ir(m)
+        end do
+        wsum = 0.0_wp
+        do k = 1, nlev
+            w(k) = max(0.0_wp, fdw_ir(k-1) - fdw_ir(k))
+            wsum = wsum + w(k)
+        end do
+        if (wsum <= 0.0_wp) then                 ! dry column: weight by mass
+            do k = 1, nlev
+                w(k) = dp_lev(k); wsum = wsum + dp_lev(k)
+            end do
+        end if
+        do k = 1, nlev
+            heat(k) = (grav/cp_d)*a_atm*(w(k)/wsum)/dp_lev(k)
+        end do
+
+        return
+
+    contains
+
+        pure real(wp) function itf_w_ir(m) result(tr)
+            ! near-IR water-vapour band transmission, path m [g cm-2]
+            real(wp), intent(in) :: m
+            tr = SW_A1_W*exp(-SW_B1_W*m) + SW_A2_W*exp(-SW_B2_W*m)
+            return
+        end function itf_w_ir
+
+    end subroutine aeros_sw_clearsky_column
 
     subroutine aeros_radiation_report(rad, io_unit)
         implicit none
