@@ -708,3 +708,67 @@ This is Tier 1 of the ERA5 spec (m2_handoff.md). Tier 2 (cloud fraction/water,
 RH, u, v for the moist stack) is absent from the delivered data, so only
 clear-sky is validated here; the cloudy-sky branch and the moist-line tuning
 still wait on those fields and on a stable RCE.
+
+## 15. The RCE lowest-layer instability, diagnosed and mitigated (M2.5b–c)
+
+Task #7 from the M2 handoff -- the coupled-RCE blow-up after ~1 model month --
+was diagnosed with an instrumented long-run driver (`drivers/rce_long.f90`,
+per-level min/max T with location, a zonal-mean-vs-departure split, and the
+per-level heating decomposition) and two principled fixes landed. It is not yet
+a clean equilibrium, but the immediate blocker is gone.
+
+### 15.1 The diagnosis: it is axisymmetric, and two mechanisms compound
+
+The handoff read the blow-up as a *grid-scale* hot spot. It is the opposite: the
+departure from the zonal mean is **exactly zero** (`max |T - zonalmean| = 0.00 K`)
+until the very end. The run starts m=0 and, with zonally symmetric forcing,
+never populates m>0 -- it is trapped in the axisymmetric manifold, and the "hot
+spot" is a zonal-mean lowest-layer temperature at a subtropical latitude running
+away. The max always landing at longitude index 1 was a tie-break over a zonally
+uniform field, not a grid point.
+
+Two compounding causes, isolated by toggling terms in the long run:
+
+1. **Lowest-layer pile-up (physical).** The prescribed-SST surface injects heat
+   and moisture into level 12 only; SBM convection mixes the cloud layer and
+   excludes the sub-cloud layer, and there was no boundary-layer diffusion. The
+   lowest layer built a 15-20 K warm/moist inversion. Diagnostics that ruled out
+   the handoff's cheaper hypotheses: stronger ∇⁶ made it blow up *sooner* (not a
+   horizontal grid mode), and halving `dt` only delayed it.
+2. **Condensation on the centered leapfrog (numerical).** Once the pile-up is
+   controlled, the latent release reaches ~100 K/day in the lowest layer at the
+   hot latitude; on the centered path it excites the 2Δt computational mode (the
+   zonal-mean there oscillates 379→297→357→382 K). `vdiff + condensation off`
+   runs 200 days; `vdiff + convection off` does not.
+
+### 15.2 The fixes
+
+- **M2.5b -- boundary-layer vertical diffusion** (`aeros_vdiff`): down-gradient
+  diffusion of T, q, u, v with a fixed eddy diffusivity tapering over a
+  boundary-layer depth, mixing the surface source up the column. It is applied
+  **implicitly on the n+1 state**, next to the horizontal diffusion and the
+  sponge -- *not* forward-split. Forward-splitting a diffusion term onto the
+  leapfrog is unconditionally unstable (the increment `dt·L·Xⁿ` on
+  `Xⁿ⁺¹ = Xⁿ⁻¹ + …` gives a root pair with product −1, and it is scale-selective,
+  so it blows up at the grid scale however small K is). The first, forward-split,
+  implementation confirmed this by blowing up in a day; the implicit version is
+  the one kept. Off by default; all 17 acceptance tests bit-unchanged.
+- **M2.5c -- condensation forward-split**: move the latent heating from the
+  centered `wrk%dtdt` to the forward-split `wrk%dt_phys`, the path convection,
+  radiation and the surface fluxes use. Same fix M2.3e applied to convection,
+  now warranted for condensation because its coupled-RCE heating is no longer
+  "small and smooth." Drying and heating now share one discretization, so their
+  budgets track exactly rather than to the filter's accuracy.
+
+### 15.3 Where it stands
+
+Together the two fixes carry the run from the day-34 blow-up to **200 model days
+NaN-free** (vdiff `k0=25`, full stack). What remains is not a blow-up but a slow
+secular warming of the subtropical lowest layer that has not equilibrated by day
+200. Seeding a zonal asymmetry confirms baroclinic eddies then grow (T departs
+from the zonal mean, winds ~20 m/s) and the early evolution is healthier, but the
+run still eventually runs away -- so the residual is a **tuning/physics** problem
+(surface exchange, convective `τ`, the K profile and depth, resolution at
+T21L12), not the axisymmetric constraint alone and not a remaining coupling bug.
+Reaching a bounded, validated RCE -- and with it the ERA5 moist-line validation
+(§14 did the clear-sky line, independent of this) -- is the next tuning step.
