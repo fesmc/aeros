@@ -143,7 +143,7 @@ module aeros_timestep
     use aeros_state,    only : aeros_spec_alloc, aeros_spec_end, aeros_spec_copy, &
                                 aeros_spec_swap
     use aeros_vertical, only : aeros_vgrid_class
-    use aeros_vordiv,   only : aeros_uv_from_vordiv
+    use aeros_vordiv,   only : aeros_uv_from_vordiv, aeros_vordiv_from_uv
     use aeros_tendency, only : aeros_tend_class, aeros_work_class, &
                                 aeros_tend_alloc, aeros_tend_end, &
                                 aeros_work_alloc, aeros_work_end, &
@@ -169,6 +169,9 @@ module aeros_timestep
     use aeros_radiation,  only : aeros_rad_class, aeros_radiation_init, &
                                 aeros_radiation_load, aeros_radiation_end, &
                                 aeros_radiation_apply, aeros_radiation_report
+    use aeros_vdiff,      only : aeros_vdiff_class, aeros_vdiff_init, &
+                                aeros_vdiff_load, aeros_vdiff_end, &
+                                aeros_vdiff_apply, aeros_vdiff_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
 
@@ -234,6 +237,13 @@ module aeros_timestep
         ! Uses the surface module's prescribed SST as the skin temperature. Off
         ! unless a namelist turns it on.
         type(aeros_rad_class) :: rad
+
+        ! Boundary-layer vertical diffusion (aeros_vdiff): mixes the surface
+        ! source (aeros_surface) up the column, BETWEEN the surface fluxes and
+        ! convection. Off unless a namelist turns it on. Without it the lowest
+        ! layer builds a warm/moist inversion that convection turns into a
+        ! grid-scale hot spot -- the M2 RCE instability (aeros_vdiff header).
+        type(aeros_vdiff_class) :: vd
 
         ! [ l(l+1) / lmax(lmax+1) ]^(ndiff/2), precomputed per degree. The
         ! step-dependent part is one multiply, so this never needs rebuilding.
@@ -395,11 +405,13 @@ contains
             call aeros_convection_load(ts%cnv, filename, grd)
             call aeros_surface_load(ts%surf, filename, grd)
             call aeros_radiation_load(ts%rad, filename, grd)
+            call aeros_vdiff_load(ts%vd, filename, grd)
         else
             call aeros_condensation_init(ts%cnd, grd, .FALSE.)
             call aeros_convection_init(ts%cnv, grd, .FALSE.)
             call aeros_surface_init(ts%surf, grd, .FALSE.)
             call aeros_radiation_init(ts%rad, grd, .FALSE.)
+            call aeros_vdiff_init(ts%vd, grd, .FALSE.)
         end if
 
         allocate(ts%dratio(0:lmax))
@@ -464,6 +476,7 @@ contains
         call aeros_convection_end(ts%cnv)
         call aeros_surface_end(ts%surf)
         call aeros_radiation_end(ts%rad)
+        call aeros_vdiff_end(ts%vd)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
         if (allocated(ts%sponge_kr_lev)) deallocate(ts%sponge_kr_lev)
@@ -535,8 +548,8 @@ contains
         ! Surface turbulent fluxes, before convection: sensible heat warms the
         ! lowest layer (a forward increment to wrk%dt_phys) and evaporation
         ! moistens it (a forward increment to now%qv_g). This is the
-        ! boundary-layer source that convection then carries up the column. Off
-        ! unless enabled.
+        ! boundary-layer source that vertical diffusion then mixes up the column.
+        ! Off unless enabled.
         if (ts%surf%enabled) &
             call aeros_surface_apply(ts%surf, vg, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
@@ -613,6 +626,14 @@ contains
         ! === 3b. Upper-level sponge, implicit ================================
         if (ts%sponge_on) call sponge(ts, s, h)
 
+        ! === 3c. Boundary-layer vertical diffusion, implicit =================
+        ! Mixes the surface source (aeros_surface) up the column. Implicit on the
+        ! n+1 state like the two diffusive operators above -- NOT forward-split,
+        ! which for a diffusion term is unconditionally unstable on the leapfrog
+        ! (aeros_vdiff header). Transforms the stepped T, winds and lnps to the
+        ! grid, diffuses T/q/u/v there, and transforms back.
+        if (ts%vd%enabled) call apply_vdiff(ts, s, vg, now)
+
         ! === 4. Time filter ==================================================
         if (ts%nstep > 0) call raw_filter(ts, s, now%spec, vg%nlev)
 
@@ -681,6 +702,54 @@ contains
         return
 
     end subroutine apply_phys_heating
+
+    subroutine apply_vdiff(ts, s, vg, now)
+        ! Boundary-layer vertical diffusion, implicit on the n+1 state. The
+        ! stepped spectral temperature, winds and surface pressure (ts%new) are
+        ! synthesized to the grid, aeros_vdiff diffuses T, q, u and v there in
+        ! place (a tridiagonal per column, unconditionally stable), and T and the
+        ! winds are transformed back into ts%new. Humidity is a gridpoint field
+        ! (now%qv_g) and is diffused directly. Called before the time filter and
+        ! the swap, alongside the horizontal diffusion and sponge, because a
+        ! diffusion operator must be implicit on the stepped state, not
+        ! forward-split (aeros_vdiff header).
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_sht_class),      intent(in)    :: s
+        type(aeros_vgrid_class),    intent(in)    :: vg
+        type(aeros_state_class),    intent(inout) :: now
+
+        real(wp), allocatable :: t3(:,:,:), u3(:,:,:), v3(:,:,:), lnps2(:,:)
+        complex(wp_sh) :: tlm(s%nlm), vor(s%nlm), div(s%nlm)
+        integer :: k
+
+        allocate(t3(s%nlon, s%nlat, vg%nlev), u3(s%nlon, s%nlat, vg%nlev), &
+                 v3(s%nlon, s%nlat, vg%nlev), lnps2(s%nlon, s%nlat))
+
+        do k = 1, vg%nlev
+            call aeros_sht_synthesis(s, ts%new%temp(:,k), t3(:,:,k))
+            call aeros_uv_from_vordiv(s, ts%new%vor(:,k), ts%new%div(:,k), &
+                                        u3(:,:,k), v3(:,:,k))
+        end do
+        call aeros_sht_synthesis(s, ts%new%lnps, lnps2)
+
+        call aeros_vdiff_apply(ts%vd, vg, t3, now%qv_g, u3, v3, lnps2, ts%dt)
+
+        do k = 1, vg%nlev
+            call aeros_sht_analysis(s, t3(:,:,k), tlm)
+            ts%new%temp(:,k) = tlm
+            call aeros_vordiv_from_uv(s, u3(:,:,k), v3(:,:,k), vor, div)
+            ts%new%vor(:,k) = vor
+            ts%new%div(:,k) = div
+        end do
+
+        deallocate(t3, u3, v3, lnps2)
+
+        return
+
+    end subroutine apply_vdiff
 
     subroutine mass_fix(ts, sht, spec)
         ! Restore the global mass by the one rescaling of p_s that does it
@@ -1001,6 +1070,7 @@ contains
         call aeros_condensation_report(ts%cnd, iou)
         call aeros_surface_report(ts%surf, iou)
         call aeros_radiation_report(ts%rad, iou)
+        call aeros_vdiff_report(ts%vd, iou)
 
         return
 

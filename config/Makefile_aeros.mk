@@ -101,7 +101,7 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_correction.o $(objdir)/aeros_moisture.o \
 							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o \
 							$(objdir)/aeros_convection.o $(objdir)/aeros_surface.o \
-							$(objdir)/aeros_radiation.o
+							$(objdir)/aeros_radiation.o $(objdir)/aeros_vdiff.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
@@ -145,6 +145,13 @@ $(objdir)/aeros_radiation.o: $(physdir)/aeros_radiation.f90 \
 $(objdir)/aeros_surface.o: $(physdir)/aeros_surface.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o \
 							$(objdir)/aeros_condensation.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
+# M2.5b: boundary-layer vertical diffusion. Mixes the surface source up the
+# column (implicit tridiagonal per column); needs the vertical coordinate for
+# the layer pressures and heights and nothing spectral.
+$(objdir)/aeros_vdiff.o: $(physdir)/aeros_vdiff.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros core #################################
@@ -201,7 +208,8 @@ aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_condensation.o \
                  $(objdir)/aeros_convection.o \
                  $(objdir)/aeros_radiation.o \
-                 $(objdir)/aeros_surface.o
+                 $(objdir)/aeros_surface.o \
+                 $(objdir)/aeros_vdiff.o
 
 # aeros_timestep sits above the physics as well as the dynamics -- it is what
 # calls the forcing -- so it is archived after both.

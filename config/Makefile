@@ -225,6 +225,11 @@ validate-era5 : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    validate_era5.x is ready."
 
+rce-long : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/rce_long.x $(drvdir)/rce_long.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    rce_long.x is ready."
+
 all : drivers tests
 
 .PHONY : usage
