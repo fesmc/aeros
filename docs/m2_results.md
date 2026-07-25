@@ -316,3 +316,54 @@ arithmetic, and transport is grid-local and cheap against the transforms.
 
 Condensation — supersaturation removal, latent heating, precipitation — is the
 next commit.
+
+## 9. Large-scale condensation (M2.3b)
+
+The first moist physics: where the air is supersaturated, the excess vapour
+condenses, the latent heat warms the air, and the condensate rains out. No
+stored cloud water, no re-evaporation, no convection (next), no ice phase
+(condensate is liquid, L_v, everywhere) — the minimum that closes a moist energy
+and water budget, built to be exactly that.
+
+**Two seams, kept consistent.** Condensation couples the *gridpoint* humidity to
+the *spectral* temperature, so it acts at both at once. The drying is applied
+straight to `qv_g`; the heating, `L_v/cp_d · dq_c/dt`, is added to the
+temperature tendency `wrk%dtdt` at the same grid seam as the Held–Suarez
+forcing, so it rides the same transform and the same leapfrog as the dynamical
+heating. Both come from the same condensed amount `dq_c`, so column moist static
+energy is conserved by construction — dry static energy gains `L_v dq_c`, latent
+energy loses it. `tests/test_condensation.f90` checks this as an equality, per
+cell, at 1.5×10⁻¹⁵ (relative), alongside: subsaturated columns untouched
+exactly, condensing columns brought to saturation (3×10⁻¹³), vapour removed =
+precipitation (1.9×10⁻¹⁶), q ≥ 0. The saturation adjustment is three Newton
+iterations of the implicit equation `dq_c = (q − q_sat(T))/(1 + (L_v/cp_d)
+dq_sat/dT)`; `q_sat` is Tetens with the full `p − (1−ε)e_s` denominator (14.66
+g/kg at 20 °C, 1000 hPa).
+
+**The coupled run holds together** (`tests/test_moist_run.f90`, a 200-step moist
+Held–Suarez at T21L12): 200 steps, no NaN, q ≥ 0 throughout, wind bounded, 3.3%
+of the vapour rained out. This is the test the two operator unit tests cannot be
+— that the latent heating actually reaches the spectral temperature and the
+system stays stable — and it caught two real things in the building:
+
+1. *Condensation off, the water closure is 2.4×10⁻⁴* over 200 steps — the
+   finite-volume transport's O(truncation) dispersion against the spectral
+   surface pressure, measured on a running model for the first time (§8
+   predicted it; here it is).
+2. *Condensation on, it rises to 2.1×10⁻³.* Not a leak: condensation sharpens
+   the humidity field, and the transport's dispersive error scales with the
+   field's roughness. The van Leer limiter (the deferred accuracy commit) is
+   what shrinks it, since it is the transport error that dominates. It is a
+   number to characterize and reduce, not machine precision — the design does
+   not permit machine-precision water conservation on a spectral core with
+   positive-definite transport, which is the trade §8 already named.
+
+**The two seams are on different time discretizations** — the drying is a
+forward step on `qv_g`, the heating goes through the 2 dt leapfrog and its
+filter — so over a run they track to the filter's accuracy rather than exactly.
+That is the same small inconsistency every leapfrog spectral model carries
+between grid physics and spectral dynamics; it is inside the 2.1×10⁻³ above,
+not separately asserted.
+
+Convection — the moist adjustment that keeps the tropics from grid-scale
+saturating — is the next commit.

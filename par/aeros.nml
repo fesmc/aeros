@@ -190,3 +190,15 @@
     ! instability its whole-field version hit.
     term_lcut    = -1, -1, -1, -1, -1, -1, -1, -1
 /
+
+&aeros_moisture
+    ! Large-scale condensation (src/physics/aeros_condensation.f90). The
+    ! humidity transport itself is always on -- it costs nothing on a dry field
+    ! -- so this switch is condensation, the moist physics. OFF by default and
+    ! in the Held-Suarez benchmark, which is dry by construction.
+    moist   = .FALSE.
+
+    ! Critical relative humidity for condensation. 1.0 is true saturation
+    ! adjustment; a lower value stands in for sub-grid humidity variability.
+    rh_crit = 1.0
+/

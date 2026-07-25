@@ -157,6 +157,9 @@ module aeros_timestep
     use aeros_moisture, only : aeros_moist_class, aeros_moisture_init, &
                                 aeros_moisture_end, aeros_moisture_transport, &
                                 aeros_moisture_report
+    use aeros_condensation, only : aeros_cond_class, aeros_condensation_init, &
+                                aeros_condensation_load, aeros_condensation_end, &
+                                aeros_condensation_apply, aeros_condensation_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
 
@@ -201,6 +204,10 @@ module aeros_timestep
         ! Always allocated; it transports whatever is in qv_g, which for a dry
         ! run is zero and stays zero.
         type(aeros_moist_class) :: mst
+
+        ! Large-scale condensation (aeros_condensation), at the grid seam. Off
+        ! unless a namelist turns it on; a dry run never enters it.
+        type(aeros_cond_class) :: cnd
 
         ! [ l(l+1) / lmax(lmax+1) ]^(ndiff/2), precomputed per degree. The
         ! step-dependent part is one multiply, so this never needs rebuilding.
@@ -333,6 +340,12 @@ contains
 
         call aeros_moisture_init(ts%mst, grd, vg%nlev)
 
+        if (present(filename)) then
+            call aeros_condensation_load(ts%cnd, filename, grd)
+        else
+            call aeros_condensation_init(ts%cnd, grd, .FALSE.)
+        end if
+
         allocate(ts%dratio(0:lmax))
         lref = real(lmax*(lmax+1), wp)
         do l = 0, lmax
@@ -385,6 +398,7 @@ contains
         call aeros_hs_end(ts%hs)
         call aeros_correction_end(ts%cor)
         call aeros_moisture_end(ts%mst)
+        call aeros_condensation_end(ts%cnd)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
         if (allocated(ts%ps_fix)) deallocate(ts%ps_fix)
@@ -441,6 +455,14 @@ contains
         call aeros_tendency_grid(pool, vg, grd, now%spec, ts%wrk)
 
         if (ts%hs%enabled) call aeros_hs_apply(ts%hs, vg, ts%wrk)
+
+        ! Large-scale condensation, at the same grid seam and for the same
+        ! reason: it dries the gridpoint humidity in place and adds its latent
+        ! heating to wrk%dtdt, so the heating rides the transform and the
+        ! leapfrog with the dynamical temperature tendency. Returns at once when
+        ! dry. See aeros_condensation.
+        call aeros_condensation_apply(ts%cnd, vg, ts%wrk%t_g, now%qv_g, &
+                                        ts%wrk%lnps_g, ts%wrk%dtdt, ts%dt)
 
         call aeros_tendency_spectral(pool, vg, ts%wrk, ts%tnd)
 
@@ -787,6 +809,7 @@ contains
         call aeros_hs_print(ts%hs, iou)
         call aeros_correction_report(ts%cor, iou)
         call aeros_moisture_report(ts%mst, iou)
+        call aeros_condensation_report(ts%cnd, iou)
 
         return
 
