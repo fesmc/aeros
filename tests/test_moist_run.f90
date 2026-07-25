@@ -187,12 +187,16 @@ contains
         call check(.not. neg_seen, "q stays non-negative through the coupled run", nfail)
         call check(umax < 200.0_dp, "the wind stays bounded (no blow-up)", nfail)
         call check(precip_tot > 0.0_dp, "it actually rains (the closure test is not vacuous)", nfail)
-        ! ~2e-3 at T21L12 over 200 steps, dominated by the finite-volume
-        ! transport's O(truncation) dispersion -- which condensation enlarges by
-        ! sharpening the humidity field (it was ~2e-4 on the smooth advected
-        ! field, condensation off). Not machine precision, not claimed to be:
-        ! the bound catches gross non-conservation, and the van Leer limiter
-        ! (the accuracy commit) is what shrinks the number.
+        ! ~3e-3 at T21L12 over 200 steps. This is the FV-vs-spectral AIR-mass
+        ! gap (m2_results.md §8), not tracer-transport error: the transport
+        ! conserves its own water to machine precision, but the diagnostic
+        ! weights q by the spectral layer masses, which differ from the
+        ! finite-volume ones by O(truncation). It scales with the roughness of
+        ! q -- condensation sharpens q and raises it (from ~2e-4 on the smooth
+        ! advected field), and so, counter-intuitively, does the van Leer
+        ! limiter, because a less-diffused q has larger gradients for the gap to
+        ! act on. It shrinks with resolution, not with the limiter. The bound
+        ! catches gross non-conservation; the number itself is a measurement.
         call check(closure < 5.0e-3_dp, &
                     "water closes to the transport's truncation-level consistency", nfail)
 

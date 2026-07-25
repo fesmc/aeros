@@ -304,9 +304,8 @@ arithmetic, and transport is grid-local and cheap against the transforms.
 
 - *Accuracy.* The fluxes are first-order upwind — the correct-and-provable
   baseline, whose conservation/positivity/constancy are unconditional, but too
-  diffusive for a real humidity field. A van Leer / MC limiter drops into
-  `face_upwind` without touching the invariants (they depend on monotonicity,
-  not order). Next accuracy commit.
+  diffusive for a real humidity field. A van Leer limiter is the next commit
+  (§10) and keeps the invariants (they depend on monotonicity, not order).
 - *The dry path.* A dry run still sub-steps the transport of identically-zero
   humidity every step — correct (0 stays 0) but wasted work. A moisture-active
   switch belongs with condensation, where there is a natural place for it.
@@ -350,13 +349,15 @@ system stays stable — and it caught two real things in the building:
    finite-volume transport's O(truncation) dispersion against the spectral
    surface pressure, measured on a running model for the first time (§8
    predicted it; here it is).
-2. *Condensation on, it rises to 2.1×10⁻³.* Not a leak: condensation sharpens
-   the humidity field, and the transport's dispersive error scales with the
-   field's roughness. The van Leer limiter (the deferred accuracy commit) is
-   what shrinks it, since it is the transport error that dominates. It is a
-   number to characterize and reduce, not machine precision — the design does
+2. *Condensation on, it rises to 2.1×10⁻³.* Not a leak, and — see §10 — not
+   the transport's own conservation error, which is machine precision. It is
+   the FV-vs-spectral air-mass gap (§8): the diagnostic weights q by the
+   spectral layer masses, the transport conserves against its finite-volume
+   ones, and the two differ by O(truncation). It scales with the roughness of
+   q, which is why condensation (sharpening q) raises it from ~2×10⁻⁴. It
+   shrinks with resolution, not with a better tracer scheme — the design does
    not permit machine-precision water conservation on a spectral core with
-   positive-definite transport, which is the trade §8 already named.
+   positive-definite transport, which is the trade §8 named.
 
 **The two seams are on different time discretizations** — the drying is a
 forward step on `qv_g`, the heating goes through the 2 dt leapfrog and its
@@ -367,3 +368,39 @@ not separately asserted.
 
 Convection — the moist adjustment that keeps the tropics from grid-scale
 saturating — is the next commit.
+
+## 10. The van Leer limiter (M2.3c)
+
+The first-order upwind transport of §8 was the correct-and-provable baseline;
+this replaces it with a second-order van Leer scheme, and the replacement is
+structural rather than a one-line swap. Upwind needs only the two cells at a
+face; a limited reconstruction needs a three-cell stencil in the flux
+direction, and multidim positivity is cleanest via operator-split
+one-dimensional sweeps. So `transport_substep` is now a zonal sweep, then a
+meridional sweep, then the vertical sweep — each flux-form, each monotone, each
+updating the air mass and the tracer mass by the same fluxes.
+
+**The invariants are untouched**, exactly because they rest on monotonicity, not
+on order: `test_moisture` still reports constancy 5.6×10⁻¹⁵, conservation
+4.1×10⁻¹⁶, positivity, and conservation through the polar sub-step 4.7×10⁻¹⁶.
+Van Leer is applied in the two horizontal sweeps, where humidity gradients and
+Courant numbers both live; the vertical stays first-order upwind (a handful of
+levels, a gentle mass-coordinate flux) — van Leer there is a later refinement.
+
+**What it buys is accuracy, measured.** A broad smooth bell advected one full
+solid-body rotation (371 steps) — for which the exact answer is the bell it
+started as — retains **91.7% of its peak amplitude**. First-order upwind smears
+the same bell well below half over that distance. That is the whole point: a
+humidity field with real fronts and an ITCZ edge survives being advected, rather
+than diffusing to mush.
+
+**What it does NOT buy — a correction to §9.** I expected the limiter to shrink
+the moist water-budget closure (2.1×10⁻³). It does the opposite: 2.1×10⁻³ →
+3.0×10⁻³. The closure is not tracer-transport error — the transport conserves
+its own water to machine precision — it is the FV-vs-spectral air-mass gap (§8),
+and that gap scales with the *roughness* of q. A less-diffused, more accurate q
+has larger gradients, so the truncation-level gap acts on more structure and the
+closure rises. The number improves with resolution, not with a better tracer
+scheme. This is worth stating plainly because it was a wrong prediction in §9,
+now corrected there: accuracy of the field and closure of the budget are
+different axes, and the limiter is on the first.

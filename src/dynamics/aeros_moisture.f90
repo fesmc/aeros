@@ -114,8 +114,7 @@ module aeros_moisture
         ! Scratch, all (nlon,nlat,nlev) unless noted. Allocated once.
         real(wp), allocatable :: dp_lev(:,:,:)  ! layer air mass (pressure) [Pa]
         real(wp), allocatable :: qm(:,:,:)      ! tracer mass  q*dp        [Pa]
-        real(wp), allocatable :: dh_air(:,:,:)  ! horiz air-mass divergence [Pa/s]
-        real(wp), allocatable :: dh_q(:,:,:)    ! horiz tracer   divergence [Pa/s]
+        real(wp), allocatable :: dp0(:,:,:)     ! layer air mass before the horizontal sweeps [Pa]
 
         ! Diagnostics, retained between calls for aeros_moisture_report.
         real(wp) :: last_cfl   = 0.0_wp        ! max total Courant last call
@@ -180,8 +179,7 @@ contains
 
         allocate(mst%dp_lev(grd%nlon,grd%nlat,nlev))
         allocate(mst%qm    (grd%nlon,grd%nlat,nlev))
-        allocate(mst%dh_air(grd%nlon,grd%nlat,nlev))
-        allocate(mst%dh_q  (grd%nlon,grd%nlat,nlev))
+        allocate(mst%dp0   (grd%nlon,grd%nlat,nlev))
 
         return
 
@@ -198,8 +196,7 @@ contains
         if (allocated(mst%cos_face)) deallocate(mst%cos_face)
         if (allocated(mst%dp_lev))   deallocate(mst%dp_lev)
         if (allocated(mst%qm))       deallocate(mst%qm)
-        if (allocated(mst%dh_air))   deallocate(mst%dh_air)
-        if (allocated(mst%dh_q))     deallocate(mst%dh_q)
+        if (allocated(mst%dp0))      deallocate(mst%dp0)
 
         mst%nlon = 0; mst%nlat = 0; mst%nlev = 0
         mst%last_cfl = 0.0_wp; mst%last_nsub = 0; mst%mass_consistency = 0.0_dp
@@ -273,9 +270,19 @@ contains
     end subroutine aeros_moisture_transport
 
     subroutine transport_substep(mst, vg, u, v, dt)
-        ! One forward sub-step of the flux-form update, unsplit in all three
-        ! directions. Updates dp_lev (the FV air mass) and qm (tracer mass) by
-        ! the SAME fluxes, which is what makes q = const exact.
+        ! One forward sub-step, operator-split: a zonal sweep, then a meridional
+        ! sweep, then a vertical sweep. Each updates the air mass (dp_lev) and
+        ! the tracer mass (qm) by the SAME fluxes, so q = const is preserved
+        ! through every sweep and hence through the step; each is flux-form, so
+        ! the global sums are conserved; and each is a monotone one-dimensional
+        ! scheme, so q stays bounded and therefore non-negative.
+        !
+        ! The horizontal sweeps use a van Leer limiter (second order, monotone);
+        ! the vertical stays first-order upwind. That split is where the
+        ! accuracy is spent to match where it matters: humidity gradients are
+        ! overwhelmingly horizontal, the horizontal Courant numbers are the
+        ! large ones, and the vertical has a handful of levels and a gentle
+        ! mass-coordinate flux. Van Leer in the vertical is a later refinement.
 
         implicit none
 
@@ -284,85 +291,41 @@ contains
         real(wp), intent(in) :: u(:,:,:), v(:,:,:)
         real(wp), intent(in) :: dt
 
-        integer  :: i, j, k, ip, im, jp, jm, nlon, nlat, nlev
-        real(wp) :: fl_e, fl_w, fl_n, fl_s          ! air-mass face fluxes [Pa/s]
-        real(wp) :: qf_e, qf_w, qf_n, qf_s          ! tracer  face fluxes [Pa/s]
-        real(wp) :: rmet, uc, vc
-        real(wp) :: scum_a(0:vg%nlev), scum_q(0:vg%nlev)
-        real(wp) :: mfl_a(0:vg%nlev), qface, dair, dqq
-        real(wp) :: da_v, dq_v
+        integer  :: i, j, k, nlon, nlat, nlev
+        real(wp) :: scum_a(0:vg%nlev), mfl_a(0:vg%nlev)
+        real(wp) :: dq_v, da_v
 
         nlon = mst%nlon; nlat = mst%nlat; nlev = mst%nlev
 
-        ! --- Horizontal flux divergences, per layer -------------------------
-        ! mu-form divergence (see the module header for the metric): the zonal
-        ! term carries 1/cos(lat) at the cell centre, the meridional term
-        ! carries cos(lat) at the interfaces, and cos(lat) = 0 at the poles
-        ! zeroes the flux out of the top and bottom rows.
-        !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,k,ip,im,jp,jm,fl_e,fl_w,fl_n,fl_s,qf_e,qf_w,qf_n,qf_s,rmet,uc,vc)
+        ! The air mass before the horizontal sweeps: the vertical mass flux is
+        ! built from the horizontal convergence, which is exactly the change the
+        ! two horizontal sweeps make to dp_lev.
+        !$omp parallel do collapse(2) private(i,j,k) schedule(static)
         do k = 1, nlev
             do j = 1, nlat
-                jp = j + 1        ! toward the south pole
-                jm = j - 1        ! toward the north pole
                 do i = 1, nlon
-                    ip = i + 1; if (ip > nlon) ip = 1
-                    im = i - 1; if (im < 1)    im = nlon
-
-                    ! Zonal faces. Face air flux = dp_face * u_face (upwind);
-                    ! metric 1/(a cos dlambda) applied to the difference below.
-                    uc   = 0.5_wp*(u(i,j,k) + u(ip,j,k))
-                    call face_upwind(uc, mst%dp_lev(i,j,k), mst%dp_lev(ip,j,k), &
-                                        mst%qm(i,j,k), mst%qm(ip,j,k), fl_e, qf_e)
-                    uc   = 0.5_wp*(u(im,j,k) + u(i,j,k))
-                    call face_upwind(uc, mst%dp_lev(im,j,k), mst%dp_lev(i,j,k), &
-                                        mst%qm(im,j,k), mst%qm(i,j,k), fl_w, qf_w)
-
-                    ! Meridional faces. cos(lat) at the interface weights the
-                    ! flux; the pole face (j = 1 north, j = nlat south) has
-                    ! cos_face = 0 so no air crosses it.
-                    if (jm >= 1) then
-                        vc = 0.5_wp*(v(i,jm,k) + v(i,j,k))
-                        call face_upwind(vc, mst%dp_lev(i,jm,k), mst%dp_lev(i,j,k), &
-                                            mst%qm(i,jm,k), mst%qm(i,j,k), fl_n, qf_n)
-                        fl_n = fl_n*mst%cos_face(jm); qf_n = qf_n*mst%cos_face(jm)
-                    else
-                        fl_n = 0.0_wp; qf_n = 0.0_wp
-                    end if
-                    if (jp <= nlat) then
-                        vc = 0.5_wp*(v(i,j,k) + v(i,jp,k))
-                        call face_upwind(vc, mst%dp_lev(i,j,k), mst%dp_lev(i,jp,k), &
-                                            mst%qm(i,j,k), mst%qm(i,jp,k), fl_s, qf_s)
-                        fl_s = fl_s*mst%cos_face(j); qf_s = qf_s*mst%cos_face(j)
-                    else
-                        fl_s = 0.0_wp; qf_s = 0.0_wp
-                    end if
-
-                    rmet = 1.0_wp/r_earth
-                    mst%dh_air(i,j,k) = rmet*( (fl_e - fl_w)/(mst%coslat(j)*mst%dlam) &
-                                                + (fl_s - fl_n)/mst%dmu(j) )
-                    mst%dh_q(i,j,k)   = rmet*( (qf_e - qf_w)/(mst%coslat(j)*mst%dlam) &
-                                                + (qf_s - qf_n)/mst%dmu(j) )
+                    mst%dp0(i,j,k) = mst%dp_lev(i,j,k)
                 end do
             end do
         end do
         !$omp end parallel do
 
-        ! --- Vertical mass flux from the column's horizontal convergence, and
-        !     the update, per column ----------------------------------------
-        ! mfl_a(k) = B(k) S_N - S_k mirrors aeros_tendency's `mflux`, but built
-        ! from the grid divergence dh_air so that the air budget the tracer
-        ! sees closes exactly. Zero at k = 0 (B(0) = 0) and k = nlev
-        ! (B(N) = 1, S_N - S_N = 0): no air through the model top or the ground.
+        call sweep_zonal(mst, u, dt)
+        call sweep_merid(mst, v, dt)
+
+        ! --- Vertical sweep, per column -------------------------------------
+        ! The horizontal convergence into each layer is (dp0 - dp_lev)/dt after
+        ! the two sweeps. Its running column sum drives the vertical mass flux
+        ! mfl_a(k) = B(k) S_N - S_k, exactly aeros_tendency's `mflux` form, so
+        ! the coordinate stays a mass coordinate. Zero at top and ground.
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,k,scum_a,scum_q,mfl_a,qface,dair,dqq,da_v,dq_v)
+        !$omp   private(i,j,k,scum_a,mfl_a,da_v,dq_v)
         do j = 1, nlat
             do i = 1, nlon
 
-                scum_a(0) = 0.0_wp; scum_q(0) = 0.0_wp
+                scum_a(0) = 0.0_wp
                 do k = 1, nlev
-                    scum_a(k) = scum_a(k-1) + mst%dh_air(i,j,k)
-                    scum_q(k) = scum_q(k-1) + mst%dh_q(i,j,k)
+                    scum_a(k) = scum_a(k-1) + (mst%dp0(i,j,k) - mst%dp_lev(i,j,k))/dt
                 end do
 
                 do k = 0, nlev
@@ -370,20 +333,12 @@ contains
                 end do
 
                 do k = 1, nlev
-                    ! Vertical air divergence: mfl_a(k) - mfl_a(k-1).
                     da_v = mfl_a(k) - mfl_a(k-1)
-
-                    ! Vertical tracer flux at the upper (k) and lower (k-1)
-                    ! interfaces, donor cell by the sign of the air flux. q at
-                    ! an interface = q of the layer the air is coming from.
                     dq_v = vflux_q(mst%qm, mst%dp_lev, i, j, k,   mfl_a(k),   nlev) &
                             - vflux_q(mst%qm, mst%dp_lev, i, j, k-1, mfl_a(k-1), nlev)
 
-                    dair = mst%dh_air(i,j,k) + da_v
-                    dqq  = mst%dh_q(i,j,k)   + dq_v
-
-                    mst%dp_lev(i,j,k) = mst%dp_lev(i,j,k) - dt*dair
-                    mst%qm(i,j,k)     = mst%qm(i,j,k)     - dt*dqq
+                    mst%dp_lev(i,j,k) = mst%dp_lev(i,j,k) - dt*da_v
+                    mst%qm(i,j,k)     = mst%qm(i,j,k)     - dt*dq_v
                 end do
 
             end do
@@ -394,34 +349,227 @@ contains
 
     end subroutine transport_substep
 
-    subroutine face_upwind(vel, dp_l, dp_r, qm_l, qm_r, fair, fq)
-        ! Donor-cell (first-order upwind) air and tracer flux across one face.
+    subroutine sweep_zonal(mst, u, dt)
+        ! Van Leer flux-form advection in longitude, periodic, per (level, row).
         !
-        ! fair = dp_upwind * vel, fq = qm_upwind * vel. The SAME velocity and
-        ! the SAME upwind choice for both is what makes q = const exact: for a
-        ! uniform q, qm = q*dp, so fq = q*fair identically and the tracer
-        ! divergence is q times the air divergence.
-        !
-        ! Replacing the upwind pick with a monotone (van Leer / MC) limited
-        ! reconstruction here upgrades the scheme to second order without
-        ! touching its invariants -- that is the next commit.
+        ! The face air flux is upwind (dp of the donor cell times the face
+        ! velocity); the face tracer value is the van Leer reconstruction of
+        ! q = qm/dp in the donor cell, carried by that same air flux. Carrying a
+        ! reconstruction of the RATIO q, rather than of qm, is what keeps
+        ! q = const exact: a flat q reconstructs flat, so the tracer flux is q
+        ! times the air flux and the two divergences differ only by that factor.
 
         implicit none
 
-        real(wp), intent(in)  :: vel, dp_l, dp_r, qm_l, qm_r
-        real(wp), intent(out) :: fair, fq
+        type(aeros_moist_class), intent(inout) :: mst
+        real(wp), intent(in) :: u(:,:,:)
+        real(wp), intent(in) :: dt
 
-        if (vel >= 0.0_wp) then
-            fair = dp_l*vel
-            fq   = qm_l*vel
+        integer  :: i, j, k, ip, nlon
+        real(wp) :: qc(mst%nlon), dc(mst%nlon)
+        real(wp) :: fair(mst%nlon), fq(mst%nlon)     ! face i+1/2 fluxes
+        real(wp) :: uf, cour, qface, dx
+
+        nlon = mst%nlon
+
+        !$omp parallel do collapse(2) schedule(static) &
+        !$omp   private(i,j,k,ip,qc,dc,fair,fq,uf,cour,qface,dx)
+        do k = 1, mst%nlev
+            do j = 1, mst%nlat
+                dx = r_earth*mst%coslat(j)*mst%dlam
+
+                do i = 1, nlon
+                    dc(i) = mst%dp_lev(i,j,k)
+                    qc(i) = mst%qm(i,j,k)/dc(i)
+                end do
+
+                ! Flux at each face i+1/2, van Leer on q with a Courant
+                ! correction. The donor cell's limited slope is evaluated on the
+                ! periodic stencil.
+                do i = 1, nlon
+                    ip = i + 1; if (ip > nlon) ip = 1
+                    uf   = 0.5_wp*(u(i,j,k) + u(ip,j,k))
+                    cour = abs(uf)*dt/dx
+                    if (uf >= 0.0_wp) then
+                        qface   = vl_face(qc, i,  +1, cour, nlon)
+                        fair(i) = dc(i)*uf
+                    else
+                        qface   = vl_face(qc, ip, -1, cour, nlon)
+                        fair(i) = dc(ip)*uf
+                    end if
+                    fq(i) = qface*fair(i)
+                end do
+
+                ! Update from the flux difference across each cell.
+                do i = 1, nlon
+                    ip = i - 1; if (ip < 1) ip = nlon         ! face i-1/2 index
+                    mst%dp_lev(i,j,k) = mst%dp_lev(i,j,k) - dt*(fair(i) - fair(ip))/dx
+                    mst%qm(i,j,k)     = mst%qm(i,j,k)     - dt*(fq(i)   - fq(ip))/dx
+                end do
+            end do
+        end do
+        !$omp end parallel do
+
+        return
+
+    end subroutine sweep_zonal
+
+    subroutine sweep_merid(mst, v, dt)
+        ! Van Leer flux-form advection in latitude (mu), per (level, column).
+        !
+        ! Bounded, not periodic: there is no cell beyond the poles, and the
+        ! interface cos(lat) = 0 there makes the pole face flux identically
+        ! zero, which is what closes the global budget. The van Leer stencil is
+        ! clamped at the first and last interior rows, degrading to upwind there
+        ! -- correct, since there is no cell to form the outer slope from.
+
+        implicit none
+
+        type(aeros_moist_class), intent(inout) :: mst
+        real(wp), intent(in) :: v(:,:,:)
+        real(wp), intent(in) :: dt
+
+        integer  :: i, j, k, nlat
+        real(wp) :: qc(mst%nlat), dc(mst%nlat)
+        real(wp) :: fair(0:mst%nlat), fq(0:mst%nlat)   ! face j+1/2, j = 0..nlat
+        real(wp) :: vf, cour, qface, dy
+
+        nlat = mst%nlat
+
+        !$omp parallel do collapse(2) schedule(static) &
+        !$omp   private(i,j,k,qc,dc,fair,fq,vf,cour,qface,dy)
+        do k = 1, mst%nlev
+            do i = 1, mst%nlon
+                do j = 1, nlat
+                    dc(j) = mst%dp_lev(i,j,k)
+                    qc(j) = mst%qm(i,j,k)/dc(j)
+                end do
+
+                ! Interior faces j+1/2 (between rows j and j+1), j = 1..nlat-1.
+                fair(0) = 0.0_wp; fq(0) = 0.0_wp         ! north pole face
+                fair(nlat) = 0.0_wp; fq(nlat) = 0.0_wp   ! south pole face
+                do j = 1, nlat - 1
+                    vf   = 0.5_wp*(v(i,j,k) + v(i,j+1,k))
+                    ! dy for the Courant number: the mu-band width scaled to a
+                    ! latitude distance at the interface, a dmu / cos(lat_face).
+                    dy   = r_earth*mst%dmu(j)/max(mst%cos_face(j), 1.0e-6_wp)
+                    cour = abs(vf)*dt/dy
+                    if (vf >= 0.0_wp) then
+                        qface = vl_face_bounded(qc, j,   +1, cour, nlat)
+                        fair(j) = dc(j)*vf*mst%cos_face(j)
+                    else
+                        qface = vl_face_bounded(qc, j+1, -1, cour, nlat)
+                        fair(j) = dc(j+1)*vf*mst%cos_face(j)
+                    end if
+                    ! Tracer flux is q_face times the air flux, so a flat q
+                    ! gives fq = q * fair and constancy is exact.
+                    fq(j) = qface*fair(j)
+                end do
+
+                do j = 1, nlat
+                    mst%dp_lev(i,j,k) = mst%dp_lev(i,j,k) &
+                                        - dt*(fair(j) - fair(j-1))/(r_earth*mst%dmu(j))
+                    mst%qm(i,j,k)     = mst%qm(i,j,k) &
+                                        - dt*(fq(j)   - fq(j-1))/(r_earth*mst%dmu(j))
+                end do
+            end do
+        end do
+        !$omp end parallel do
+
+        return
+
+    end subroutine sweep_merid
+
+    real(wp) function vl_face(q, iup, dir, cour, n) result(qf)
+        ! Van Leer face value from the donor cell iup, periodic in i.
+        !
+        ! dir = +1 when the flow is left-to-right (the face is on the cell's
+        ! right), -1 when right-to-left. The reconstructed value the flux
+        ! carries over one step is the donor value plus half its limited slope,
+        ! reduced by the Courant number so it is the average of what actually
+        ! crosses the face, not the instantaneous edge value.
+
+        implicit none
+
+        real(wp), intent(in) :: q(:)
+        integer,  intent(in) :: iup, dir, n
+        real(wp), intent(in) :: cour
+
+        integer  :: im, ip
+        real(wp) :: sm, sp
+
+        im = iup - 1; if (im < 1) im = n
+        ip = iup + 1; if (ip > n) ip = 1
+
+        ! One-sided differences oriented along the flow: sm is the upwind-side
+        ! slope, sp the downwind-side.
+        if (dir > 0) then
+            sm = q(iup) - q(im)
+            sp = q(ip)  - q(iup)
         else
-            fair = dp_r*vel
-            fq   = qm_r*vel
+            sm = q(iup) - q(ip)
+            sp = q(im)  - q(iup)
+        end if
+
+        qf = q(iup) + 0.5_wp*(1.0_wp - cour)*vanleer(sm, sp)
+
+        return
+
+    end function vl_face
+
+    real(wp) function vl_face_bounded(q, jup, dir, cour, n) result(qf)
+        ! As vl_face but for the bounded meridional direction: the outer slope
+        ! is dropped (set to zero, giving upwind) at the first and last rows,
+        ! where there is no cell to form it from.
+
+        implicit none
+
+        real(wp), intent(in) :: q(:)
+        integer,  intent(in) :: jup, dir, n
+        real(wp), intent(in) :: cour
+
+        real(wp) :: sm, sp
+
+        if (dir > 0) then
+            if (jup <= 1 .or. jup >= n) then
+                qf = q(jup); return
+            end if
+            sm = q(jup) - q(jup-1)
+            sp = q(jup+1) - q(jup)
+        else
+            if (jup <= 1 .or. jup >= n) then
+                qf = q(jup); return
+            end if
+            sm = q(jup) - q(jup+1)
+            sp = q(jup-1) - q(jup)
+        end if
+
+        qf = q(jup) + 0.5_wp*(1.0_wp - cour)*vanleer(sm, sp)
+
+        return
+
+    end function vl_face_bounded
+
+    real(wp) function vanleer(a, b) result(s)
+        ! Van Leer limited slope: the harmonic mean of the two one-sided
+        ! differences when they agree in sign, zero at an extremum. Monotone,
+        ! second-order where the field is smooth, and it is what guarantees the
+        ! reconstruction introduces no new maximum or minimum -- hence
+        ! positivity of q under the Courant limit.
+
+        implicit none
+
+        real(wp), intent(in) :: a, b
+
+        if (a*b > 0.0_wp) then
+            s = 2.0_wp*a*b/(a + b)
+        else
+            s = 0.0_wp
         end if
 
         return
 
-    end subroutine face_upwind
+    end function vanleer
 
     real(wp) function vflux_q(qm, dp_lev, i, j, k, mfl, nlev) result(fq)
         ! Donor-cell vertical tracer flux at interface k, [Pa/s].
