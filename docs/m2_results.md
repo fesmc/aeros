@@ -544,3 +544,107 @@ water budget still closes to the FV-vs-spectral gap (§8), unchanged in characte
 Convective precip is smaller than the condensation total — the finite-τ
 relaxation warms and dries gradually and large-scale condensation mops up the
 rest — but it is unambiguously firing.
+
+## 13. Radiation and a surface budget — operators done, RCE not (M2.4)
+
+The big M2 piece: get away from Held–Suarez's artificial thermal forcing and
+onto a real energy budget, so the moist line can eventually be validated against
+climate rather than conservation. The **operators** landed and are tested; the
+**coupled radiative–convective equilibrium** did not close, and that is the open
+item carried to the next session.
+
+### 13.1 The shortwave/longwave scheme (M2.4a–b)
+
+Ported from CLIMBER-X/SESAM's broadband transmissivity–emissivity scheme
+(`src/atm/{lwr,swr}.f90`; PIK report 81), design.md §5's pragmatic option. What
+is taken is the *band physics* — the σT⁴ source, the H₂O/CO₂/O₃ absorber paths,
+the empirical `d_vap`/`d_co2`/`d_o3` (LW) and two-exponential near-IR (SW)
+transmission fits with the 1.66 diffusivity. What is discarded is SESAM's
+statistical-dynamical *driver*, which reconstructs an analytic column from
+lapse-rate descriptors and only ever wants boundary fluxes; aeros has a resolved
+T/q/p column and needs a heating **profile**, so the kernel is driven with the
+actual layer fields. On a resolved grid this is, structurally, design.md §5's
+CCM3-style option 2 with SESAM's validated coefficients; ecCKD (option 1) slots
+behind the same `scheme` selector later.
+
+Two deliberate deviations: fluxes are staggered to the half levels so the layer
+heating is a genuine flux divergence (SESAM co-locates them, wanting only
+boundaries), and the water-vapour path is the exact hydrostatic `q dp/g` rather
+than the exp-profile integral.
+
+Offline single-column checks (`test_radiation`, a midlatitude column):
+
+| quantity | value | sanity |
+|---|---|---|
+| OLR | 256 W/m² | clear-sky midlat, < σTs⁴ = 390 (greenhouse) |
+| surface down-LW | 287 W/m² | physical (dry column, 12 kg/m²) |
+| peak tropospheric cooling | −4.3 K/day | clear-sky range |
+| flux-divergence identity | exact | conservative |
+| CO₂ 280→560 forcing | +2.8 W/m² | canonical clear-sky TOA ~2.6–3 |
+| planetary albedo (dark ocean) | 0.117 | physical |
+| column SW absorption | 72 W/m² | ~ observed clear-sky |
+
+The CO₂ forcing landing in the right pocket is the payoff over grey radiation —
+the thing a one-band scheme cannot do.
+
+**Insolation** is a present-day, circular-orbit, obliquity-only daily-mean
+routine (declination + sunset hour angle → daily-mean TOA flux and
+daylight-weighted airmass cosine zenith). Daily-mean, no diurnal cycle: matches
+the multi-hour radiation cadence, and there is no surface heat store to lag yet.
+Validated by the two textbook identities — equator-equinox = S₀/π = 433,
+annual-global = S₀/4 = 340, polar night zero. A stopgap for the Laskar-2004
+`insol` forcing (design.md §8).
+
+### 13.2 Grid seam and surface budget (M2.4c–d)
+
+Radiation is applied at the grid seam like the other physics: the full transfer
+is recomputed every `interval` seconds (3 h default) and cached, the heating
+held fixed between (design.md §5). Skin temperature is the surface module's
+prescribed SST; ozone is the analytic profile of §13.3.
+
+The **surface budget** (`aeros_surface`) is what closes the atmosphere's energy
+once Held–Suarez is gone: a prescribed SST (APE control profile, 27 °C equator
+to freezing poleward of 60°) drives bulk aerodynamic sensible and latent fluxes
+into the lowest layer. Prescribed SST, not a slab — an infinite reservoir the
+atmosphere equilibrates to, no surface energy balance to solve (design.md §6.1
+for the slab later). No boundary-layer diffusion: convection carries the surface
+fluxes up the column, the standard idealized-RCE closure. Unit-tested for flux
+signs, exact flux/tendency bookkeeping, no-flux-at-equilibrium, and the q ≥ 0
+guard under deposition.
+
+### 13.3 Why the coupled run would not stay up (M2.4e–f)
+
+`test_rce` — the full stack with Held–Suarez off — is stable and every part
+active over a few hundred steps (OLR ~210 W/m², albedo ~0.11, surface fluxes and
+precip firing, winds bounded). **But it is not an equilibrium test, because a
+long integration does not stay stable.** The confirming long run (a scratch
+driver, ~167 days) exposed a sequence of instabilities, each fix pushing the
+failure out:
+
+| configuration | blows up at | mechanism |
+|---|---|---|
+| radiation on centered path | ~day 9 | model top over-cools; sharp heating excites the computational mode |
+| + forward-split radiation + ozone | ~day 20 | top still over-cools |
+| + forward-split surface sensible heat | ~day 55 | top cools to 198 K, thermal wind runs away |
+| + model-top sponge (C1+C2) | ~day 37 | top controlled; **lowest layer** develops a grid-scale hot spot (→375 K) instead |
+
+Three fixes were correct and necessary and are kept:
+
+1. **Forward-split heating.** Radiation and the surface sensible flux are large
+   and vertically sharp (a cooling lid, a single-layer flux); on the centered
+   leapfrog they excite the computational mode, exactly as convection does.
+   Moved onto the forward-split `wrk%dt_phys` path — the handoff anticipated
+   this ("dtdt is simplest unless it turns out large and stiff").
+2. **Prescribed ozone**, with its shortwave heating deposited in the
+   stratosphere (by ozone amount), so the model top gets a balancing heating.
+   Too weak alone (~1 K/day vs the LW cooling), but part of the picture.
+3. **Model-top sponge** (C1 Rayleigh drag + C2 Newtonian relaxation toward
+   216 K, ramped over the top layers) — the cap Held–Suarez's `T_eq` floor used
+   to provide. It controls the top over-cooling.
+
+**The open item** is the surface-layer hot spot: with the top controlled, a
+grid-scale hot spot grows in the **lowest** layer (level 12) and the run NaNs
+after ~1–2 model months. It is a surface-flux / moist-physics interaction,
+distinct from the model-top problem the sponge solves, and it needs the next
+session (m2_handoff.md). Reaching a validated RCE — the prerequisite for the
+ERA5 climate validation — waits on that.
