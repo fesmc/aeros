@@ -449,7 +449,98 @@ model surfaced two real problems, neither a bug in the operator:
    finite relaxation timescale — which is, not coincidentally, the Betts–Miller
    direction.
 
-So `convect = .FALSE.` ships; the dry benchmark and the condensation-coupled
-moist run are unaffected and all fourteen tests pass. The two items above are
-the next session's work, and both are design decisions (multi-layer adjustment;
-how physics couples to the leapfrog) rather than mechanical fixes.
+So at M2.3d `convect = .FALSE.` shipped; the dry benchmark and the
+condensation-coupled moist run were unaffected. **Both problems are now solved**
+— problem 2 by the forward-split coupling, and problem 1 by switching the default
+scheme to Simplified Betts–Miller, which has no convergence-to-neutrality loop at
+all. See §12.
+
+## 12. Convection made usable coupled — Simplified Betts–Miller (M2.3e–g)
+
+Two commits of coupling and scheme work, plus the coupled test, close out §11's
+two problems. Convection now runs in the full model without blowing up — the
+first time. It is still `convect = .FALSE.` by default (validation waits on
+radiation and ERA5, §13/design §5), but the machinery is done and tested.
+
+### 12.1 Forward-split physics heating (M2.3e) — the coupling fix
+
+The instability of §11 problem 2 was never in the operator; it was in how the
+heating reached the spectral state. Physics heating rode `wrk%dtdt` through
+`aeros_tendency_spectral` and into the **centered** leapfrog (`X^{n+1} =
+X^{n-1} + 2Δt·RHS`). A term evaluated at time *n* and applied through the
+centered step feeds the 2Δt computational mode directly; convection's large,
+vertically sign-alternating heating excites it and the run NaNs in tens of
+steps. Condensation survives only because its heating is small and smooth.
+
+The fix is a proper coupling change, not a damping band-aid: moist-physics
+temperature changes are now accumulated on the grid as a forward **increment**
+in `wrk%dt_phys` [K], transformed to spectral, and added to the `n+1` state
+*after* the dynamics step (`aeros_timestep_step` step 6) — a forward Euler
+time-split, decoupled from the centered core. This is the same forward-in-time
+treatment the gridpoint humidity already gets, so T and q are now symmetric.
+Convection uses this path; condensation keeps the centered `dtdt` path (its
+heating is benign and the path is validated). The cost is one extra spectral
+analysis per level per step, only when convection is on.
+
+### 12.2 Simplified Betts–Miller (M2.3f) — the scheme
+
+`conv_scheme = "sbm"` (Frierson 2007) is now the default; Manabe stays as the
+parameter-free reference (`"manabe"`). Per column:
+
+- **Reference moist adiabat** anchored on the *actual* boundary-layer moist
+  static energy `h_b = cp T_s + Φ_s + L q_s` (the θe of the surface air) — not
+  the saturated value, which gives a reference so warm that `rh_ref·q_sat(T_ref)`
+  exceeds the environmental humidity everywhere and no column ever rains.
+  `T_ref(k)` solves `cp T_ref + Φ + L q_sat(T_ref) = h_b` by Newton — one solve
+  per level, no iteration to neutrality (so §11 problem 1 simply does not arise).
+- **Convecting band** = the layer where the parcel is buoyant in the MSE sense
+  `h_b > h*_env`. Using MSE buoyancy rather than a temperature comparison folds
+  in the LCL for free: an unsaturated boundary layer has `h*_env > h_b` at the
+  surface, so the sub-cloud layer drops out and the band is the cloud layer
+  (level of free convection to level of neutral buoyancy) — no dry-adiabat/LCL
+  bookkeeping.
+- **Reference humidity** `q_ref = rh_ref·q_sat(T_ref)`, `rh_ref = 0.7`.
+- **Energy closure** (Frierson): with `Pq = ∫(q−q_ref)dp` and
+  `Pt = ∫cp(T_ref−T)dp` over the band — the *deep* branch (`Pq > 0`) shifts
+  `T_ref` by the constant that makes `∫cp(T_ref−T)dp = L·Pq`, so heating balances
+  the latent heat of the precipitation, then relaxes T and q. The *shallow*
+  branch (`Pq ≤ 0`, too dry to rain) does a zero-net-heating **temperature-only**
+  relaxation, leaving humidity untouched — non-precipitating and `q ≥ 0` by
+  construction. (This is a deliberate simplification of Betts–Miller's
+  moisture-redistributing shallow branch: an additive `q_ref` shift can drive a
+  very dry column's humidity negative, and there is nothing to tune the shallow
+  reference against until there is radiation and observations. Revisit then.)
+- **Implicit relaxation** over one physics step: `a = (Δt/τ)/(1+Δt/τ)`,
+  `X ← X + a(X_ref − X)`, unconditionally stable in τ (`τ = 7200 s`).
+
+Both branches conserve `∫(cp T + L q)dp` to machine precision (heating = latent
+heat of the water removed) and give precip = column drying exactly. Namelist:
+`conv_scheme`, `conv_tau`, `conv_rhref`.
+
+`tests/test_convection` (rewritten) pins all of it: SBM deep (|ΔMSE|/MSE
+1.3×10⁻¹⁶, precip = drying 6×10⁻¹⁶, no supersaturation, free troposphere warms),
+SBM shallow (non-precipitating, moisture untouched, heat redistributed, q ≥ 0),
+60-step convergence (energy conserved every step, precip decays as the column
+neutralizes, no NaN), stable-column-untouched, and the Manabe moist and dry
+branches retained under their explicit scheme.
+
+### 12.3 Coupled result (M2.3g)
+
+`tests/test_moist_run` now runs dynamics + transport + **convection** +
+condensation together, 200 steps at T21L12, from a warm, humid, conditionally-
+unstable initial state so the columns actually deep-convect:
+
+| quantity | value |
+|---|---|
+| NaN over 200 steps | none |
+| max \|u\| at the end | 9.2 m s⁻¹ (bounded) |
+| convective precipitation | 1.3×10¹⁴ kg (positive — convection is active) |
+| q < 0 ever | no |
+| water-budget closure \|resid\|/W | 1.2×10⁻³ |
+
+The stability is the whole point: the same convective heating through the
+centered leapfrog NaNs in tens of steps; forward-split, it is stable and the
+water budget still closes to the FV-vs-spectral gap (§8), unchanged in character.
+Convective precip is smaller than the condensation total — the finite-τ
+relaxation warms and dries gradually and large-scale condensation mops up the
+rest — but it is unambiguously firing.

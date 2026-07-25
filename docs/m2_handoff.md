@@ -1,81 +1,67 @@
 # M2 handoff — where to pick up
 
-Written at the end of the session that built M2.1–M2.3d. `origin/main` is at the
-merge of `m2/convection`. `make all openmp=1` is clean; all **14** acceptance
-tests pass. Full detail for everything below is in [`m2_results.md`](m2_results.md);
-this is the orientation and the next step.
+Written at the end of the session that made convection usable coupled (M2.3e–g).
+`origin/main` is at the merge of `m2/sbm`. `make all openmp=1` is clean; all
+**14** acceptance tests pass. Full detail for everything below is in
+[`m2_results.md`](m2_results.md); this is the orientation and the next step.
 
-## What landed this session
+## What landed this session (M2.3e–g)
 
-- **M2.1 mass fixer** — global `p_s` rescaling, exact, off by default, on in
-  Held–Suarez. Drives the §5.3 leak to machine zero. `p_s`-vs-`ln p_s` left open.
-- **M2.2 correction framework** — `aeros_correction`, the §3.7/§3.8 pluggable
-  additive tendency correction, at the **spectral** seam (it is linear, so
-  unlike physics it need not go on the grid). No-op term, `ΔF=0` twin bit-exact.
-- **M2.3a transport** — humidity is now a **gridpoint** prognostic (`spec%qv`
-  removed), advected by positive-definite finite-volume transport off the
-  spectral core. Conservation/positivity/constancy all machine-precision.
-- **M2.3b condensation** — saturation adjustment, grid seam, drying to `qv_g`
-  and latent heating to the spectral `T` tendency; column MSE closed by
-  construction.
-- **M2.3c van Leer limiter** — second-order horizontal transport (91.7% peak
-  retention vs ~40% upwind). Corrected a wrong claim: the limiter does **not**
-  shrink the moist water closure (that is the FV-vs-spectral air-mass gap, which
-  scales with resolution, not tracer accuracy).
-- **M2.3d convection** — Manabe operator, correct and unit-tested, but **off by
-  default** because it is not yet usable coupled (see the next step).
+The immediate next step from the previous handoff — *make convection usable
+coupled* — is **done**. Both blockers (`m2_results.md` §11) are closed:
 
-Also measured on the running core: the thread cliff does **not** reproduce
-locally (§1), T63 costs 3.27× T42/yr (§2), precision (dp) and the batched
-transform (don't build) are closed (§3–4).
+- **M2.3e forward-split heating** — moist-physics temperature changes are now a
+  forward increment in `wrk%dt_phys`, applied to the `n+1` state after the
+  dynamics step (decoupled from the centered leapfrog), the same forward
+  treatment gridpoint humidity gets. This is what killed the computational-mode
+  instability. Convection uses it; condensation keeps the centered `dtdt` path.
+- **M2.3f Simplified Betts–Miller** — Frierson (2007), now the **default**
+  scheme (`conv_scheme = "sbm"`); Manabe retained as `"manabe"`. Reference moist
+  adiabat on the actual boundary-layer θe, MSE-buoyancy band (folds in the LCL),
+  Frierson energy closure, implicit finite-τ relaxation. One Newton solve per
+  level, no iteration. Conserves ∫(cp T + L q)dp to machine precision; precip =
+  drying exactly. Knobs `conv_tau` (7200 s), `conv_rhref` (0.7).
+- **M2.3g coupled** — `test_moist_run` runs convection + condensation together,
+  200 steps, stable (no NaN, |u|≈9 m/s), convection actively raining, q≥0, water
+  closing to 1.2×10⁻³.
 
-## The immediate next step: make convection usable coupled
+Convection is still **off by default** (`convect = .FALSE.`): it is validated by
+*conservation and stability*, not yet by *climate*. That waits on radiation.
 
-`aeros_convection` is correct in isolation (`test_convection` passes: MSE
-9.4×10⁻¹⁶, precip = water removed, neutralizes, dry branch exact, q≥0) but
-`convect=.FALSE.` ships because enabling it has **two** problems, both design
-decisions, detailed in `m2_results.md` §11 and the module header:
+## The immediate next step: radiation + ERA5
 
-1. **Slow convergence for deep convection.** Pairwise Manabe propagates
-   instability one layer per sweep (`MAXSWEEP=80` gives ~0.015 K residual;
-   machine-neutral needs ~400). A cold-start moist column convects deeply in
-   most columns → large cost. **Fix: multi-layer segment adjustment** —
-   neutralize a whole connected unstable saturated segment at once. The algebra
-   is in the header: `h_ref = (C0 + ΣΦ_i dp_i)/Σdp_i`, then a 1-D solve per
-   layer `cp T_i + L q_sat(T_i) = h_ref − Φ_i`. Converges in a few passes.
+This is the big remaining M2 piece and the gate on validating everything in the
+moist line (condensation, transport, convection) against observations rather than
+against conservation laws. AR said ERA5 data is coming.
 
-2. **The coupled leapfrog goes unstable.** The convective heating is large and
-   sign-alternating in the vertical; through the centered leapfrog RHS it
-   excites the computational mode and the run NaNs in tens of steps (condensation
-   doesn't — its heating is small/smooth). **Fix: change how moist physics
-   couples** — apply the tendency as a forward adjustment on the `n+1` state
-   (decoupled from the centered step), or give convection a finite relaxation
-   timescale. The latter is literally the Betts–Miller direction, so this
-   decision interacts with the BM-vs-Manabe question.
-
-Recommended order: do (2) first (it blocks *any* coupled convection and also
-matters for how strong a condensation heating the model can take), then (1).
-When both are done, enable `convect` in `test_moist_run` (the coupled smoke test
-already has the hook, currently commented) and add a coupled-convection stability
-assertion.
-
-**A design question to settle first (ask AR):** whether to fix Manabe's coupling
-as above, or take (2)'s relaxation-timescale fix as the cue to implement
-Betts–Miller now (the `scheme` selector and the whole seam are already built for
-it — it is a second branch in `adjust_column` plus a reference-profile routine).
-AR chose Manabe-first explicitly, so confirm before pivoting.
+- **Design** is `design.md` §5: a bespoke ecCKD gas-optics table is preferred; the
+  SESAM scheme is the pragmatic fallback. Call radiation every 1–3 h with
+  per-step surface-flux rescaling (§6 budget is ample).
+- **Why it unblocks convection:** with radiative cooling driving the instability
+  and ERA5 to compare against, `convect` can be turned on and SBM's `τ` and
+  `rh_ref` tuned (they are namelist knobs precisely so they can be). Until then
+  turning convection on is untested against climate — the machinery works, the
+  parameters are Frierson's defaults, unvalidated for this model.
+- **Suggested order:** radiation operator (grid seam, like the other physics) →
+  ERA5 ingestion for boundary/validation → turn on the moist physics stack and
+  tune against ERA5.
 
 ## Other open M2 items (not blocking)
 
-- **Radiation + ERA5 validation.** The whole moist line has been validated by
-  *conservation*, not climate — by design, until there is radiation and ERA5.
-  AR said ERA5 data is coming. This is the big remaining M2 piece (design §5:
-  bespoke ecCKD gas-optics table preferred; SESAM scheme is the pragmatic
-  fallback). Call radiation every 1–3 h with per-step surface-flux rescaling.
-- **Water closure characterization.** The FV-vs-spectral air-mass gap is
-  ~2–3×10⁻³ at T21L12 (§8–9). It should be checked at T42 to confirm it shrinks
-  with resolution as claimed, and checked over a long run to confirm it does not
-  accumulate secularly (the way the mass leak did).
+- **Shallow convection is temperature-only.** SBM's shallow branch (dry columns,
+  `Pq ≤ 0`) currently does a non-precipitating heat redistribution and leaves
+  humidity untouched — a deliberate simplification, because the additive `q_ref`
+  shift of full Betts–Miller can drive a very dry column's humidity negative.
+  Restore the moisture-redistributing shallow branch when there is something to
+  tune its reference against (i.e. with radiation/ERA5). `m2_results.md` §12.2.
+- **Manabe multi-layer adjustment** — now lower priority since SBM is the
+  default and has no convergence loop, but if Manabe is ever used seriously its
+  pairwise sweep is still O(tens of passes) on a cold start. The multi-layer fix
+  is described in the `aeros_convection` header. `m2_results.md` §11 problem 1.
+- **Water closure characterization.** The FV-vs-spectral air-mass gap is ~1–3×10⁻³
+  at T21 (§8–9, §12.3). Check at T42 to confirm it shrinks with resolution, and
+  over a long run to confirm it does not accumulate secularly (the way the mass
+  leak did).
 - **Transport accuracy leftovers** (§10): vertical van Leer (horizontal is done),
   and per-row polar sub-cycling instead of global (a cost optimization).
 - **Carried from M1:** `tau_diff`/∇⁶-vs-∇⁴ retune (jets run ~10% strong);
@@ -84,18 +70,29 @@ AR chose Manabe-first explicitly, so confirm before pivoting.
 
 ## Gotchas the next session will want
 
-- **Worktree discipline** (CLAUDE.md): use `git -C <worktree>` and absolute
-  paths; a bare `git status` reports main, not the worktree.
-- **Generated `Makefile` is gitignored**; `config/Makefile` is the configme
-  template. After merging a branch that added a test target, refresh main's
-  `Makefile` from the template (or copy the worktree's) or the new test won't
-  build on a fresh checkout. This bit twice already.
+- **Physics seam, now two coupling paths.** HS forcing and condensation add to
+  `wrk%dtdt` (grid) and ride the centered leapfrog. **Convection** adds a forward
+  increment to `wrk%dt_phys` (grid), applied to the `n+1` spectral state in
+  `aeros_timestep_step` step 6 — forward, off the centered step. New radiation
+  heating is smooth and can use either; `dtdt` is simplest unless it turns out
+  large and stiff. Humidity (`qv_g`) is gridpoint and advected in step 8.
+- **Worktree build needs the `fesm-utils` symlink.** A fresh worktree lacks it
+  (`fesm-utils` is a symlink to `/Users/alrobi001/models/fesm-utils` in main).
+  Before `make` in a worktree: `ln -sf /Users/alrobi001/models/fesm-utils
+  <worktree>/fesm-utils`, and copy a generated `Makefile` in (it is gitignored;
+  `config/Makefile` is the configme template). The `Bash` tool's cwd *persists*
+  between calls here, but use `git -C <worktree>` for git regardless.
+- **Generated `Makefile` is gitignored.** After merging a branch that adds a
+  *new* test target, refresh main's `Makefile` from the template or the new test
+  won't build on a fresh checkout. This session only modified existing targets,
+  so no refresh was needed — but it has bitten before.
 - **`timeout` is not on macOS** (it's `gtimeout`); don't wrap test runs in it.
-- **Physics seam**: HS forcing, convection, condensation all act at the grid
-  seam between `aeros_tendency_grid` and `aeros_tendency_spectral`, adding to
-  `wrk%dtdt`; the correction acts at the spectral seam after
-  `aeros_tendency_spectral`. Humidity (`qv_g`) is gridpoint and advected in step
-  7 of `aeros_timestep_step`, using the time-`n` winds still in `wrk`.
 - **Moist IC trap**: seeding humidity as a fraction of `q_sat` against an
   isothermal-warm column injects absurd values aloft (`q_sat` explodes at low
-  `p`); use a realistic lapse-rate profile. Cost a debugging cycle already.
+  `p`); use a realistic lapse-rate profile. Both moist-run initial states here
+  follow that rule.
+- **SBM test columns are SBM-specific.** A "saturated but cold" column that
+  looks conditionally unstable to Manabe reads as *shallow* to SBM (its absolute
+  humidity is below 70% of the warm reference adiabat's saturation, so nothing
+  rains). Deep convection needs a *warm, humid* unstable column; shallow needs a
+  *moist boundary layer under a dry free troposphere*. See `test_convection`.
