@@ -404,3 +404,52 @@ closure rises. The number improves with resolution, not with a better tracer
 scheme. This is worth stating plainly because it was a wrong prediction in §9,
 now corrected there: accuracy of the field and closure of the budget are
 different axes, and the limiter is on the first.
+
+## 11. Moist convective adjustment — operator done, coupling not (M2.3d)
+
+Large-scale condensation only removes gridbox-mean supersaturation; without
+convection a column heated from below saturates layer by layer and rains
+stratiform everywhere. `aeros_convection` adds the Manabe (1965) moist
+convective adjustment: sweep the column for unstable adjacent pairs and relax
+each to neutrality — dry pairs mix potential temperature (conserving enthalpy),
+saturated moist-unstable pairs relax to a moist adiabat (conserving
+∫(cp T + L q) dp, both saturated) and precipitate. Manabe was chosen over
+Betts–Miller because it conserves by construction — no timescale, no reference
+RH, no energy-closure correction — and the module carries a `scheme` selector so
+Betts–Miller is a second branch, not a rewrite.
+
+**The operator is correct and unit-tested** (`tests/test_convection.f90`, all
+passing): moist static energy conserved 9.4×10⁻¹⁶, precipitation equals the
+water removed 5.5×10⁻¹⁵, the column is moist-stable afterward, the dry branch
+conserves enthalpy exactly and moves no water, q stays ≥ 0, and a stable column
+is left untouched.
+
+**It is OFF by default and not yet usable coupled.** Enabling it in the full
+model surfaced two real problems, neither a bug in the operator:
+
+1. *Convergence is slow for deep convection.* Pairwise Manabe propagates
+   instability one layer per sweep, so a deep cold-start column converges only
+   geometrically — machine-neutral needs ~400 sweeps at L20, and even the
+   physically-neutral ~0.015 K takes 80. In a running model each step's
+   instability is a small increment (a handful of sweeps), but a cold-start
+   moist atmosphere convects deeply in most columns and the cost is large. The
+   fix is a **multi-layer adjustment** — neutralize a whole connected unstable
+   segment at once (h* = const across it, conserving segment MSE, which reduces
+   to one reference value plus a 1-D solve per layer), converging in a few
+   passes. Documented in the module header.
+
+2. *The coupled leapfrog goes unstable.* The convective heating is large and
+   sign-alternating in the vertical (cool low, warm high), and pushing it
+   through the centered leapfrog RHS every step excites the leapfrog
+   computational mode — the run NaNs within tens of steps. Condensation does not
+   do this because its heating is small and smooth. This is the textbook
+   difficulty of stiff physics through leapfrog, and the fix is a physics-
+   coupling change: apply the moist-physics tendency to the n+1 state as a
+   forward adjustment (decoupled from the centered step), or give convection a
+   finite relaxation timescale — which is, not coincidentally, the Betts–Miller
+   direction.
+
+So `convect = .FALSE.` ships; the dry benchmark and the condensation-coupled
+moist run are unaffected and all fourteen tests pass. The two items above are
+the next session's work, and both are design decisions (multi-layer adjustment;
+how physics couples to the leapfrog) rather than mechanical fixes.
