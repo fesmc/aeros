@@ -131,6 +131,14 @@ $(objdir)/aeros_convection.o: $(physdir)/aeros_convection.f90 \
 							$(objdir)/aeros_condensation.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M2.4: radiation (section 5). Ported SESAM broadband LW band kernel on the
+# resolved column. A column process like the others; needs the vertical
+# coordinate for the layer pressures and the grid for its geometry.
+$(objdir)/aeros_radiation.o: $(physdir)/aeros_radiation.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o \
+							$(objdir)/aeros_grid.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 ## aeros core #################################
 #
 # IO and the public facade. These sit above everything else and must be
@@ -183,7 +191,8 @@ aeros_dynamics = $(objdir)/aeros_vertical.o \
 
 aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_condensation.o \
-                 $(objdir)/aeros_convection.o
+                 $(objdir)/aeros_convection.o \
+                 $(objdir)/aeros_radiation.o
 
 # aeros_timestep sits above the physics as well as the dynamics -- it is what
 # calls the forcing -- so it is archived after both.
