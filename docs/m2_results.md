@@ -648,3 +648,63 @@ after ~1–2 model months. It is a surface-flux / moist-physics interaction,
 distinct from the model-top problem the sponge solves, and it needs the next
 session (m2_handoff.md). Reaching a validated RCE — the prerequisite for the
 ERA5 climate validation — waits on that.
+
+## 14. ERA5 clear-sky radiation validation (M2.5a)
+
+The clear-sky operators finally meet observations. Because the column kernels
+(`aeros_lw_clearsky_column`, `aeros_sw_clearsky_column`) are grid-agnostic in
+the vertical — they take an arbitrary `nlev` column of T, q, o3, `dp` and
+interface height — they can be driven on **ERA5's own native pressure levels**
+rather than on the model sigma grid. That is the deliberate choice here: no
+regrid, so a transfer error is never confounded with an interpolation error,
+and the radiative transfer is the only thing under test. This does not depend
+on a stable RCE (§13.3) and so ran first.
+
+`drivers/validate_era5.f90` reads the ERA5 1991–2020 monthly climatology
+(`cdo ymonmean`, 2.5°, 144×73, 37 levels), averages the 12 months to an annual
+mean, and for each 2.5° cell builds a column top→surface from the valid
+(above-ground, non-fill) pressure levels — interfaces at level midpoints, base
+at the ERA5 surface pressure, heights from the ERA5 geopotential — and runs
+both operators. Shortwave is driven by ERA5 `tisr` for the TOA insolation (so
+the stopgap insolation of §13.1 is not a confounder) and the annual-mean
+insolation-weighted airmass; surface albedo is ERA5 `fal`; CO₂ is 380 ppm (the
+period mean). ERA5 flux diagnostics are daily accumulations [J m⁻²], divided by
+86400, and net fluxes are downward-positive, so `OLR = −ttrc`, etc. The output
+is lat×lon maps of model, ERA5 and bias for six clear-sky fluxes
+(`docs/figures/era5_rad_validation.png`, plotted by
+`scripts/plot_era5_validation.jl`).
+
+Area-weighted global-mean clear-sky biases (model − ERA5), annual mean:
+
+| flux | model | ERA5 | bias |
+|---|---|---|---|
+| OLR (TOA up) | 248.2 | 264.1 | **−15.9** |
+| surface down LW | 321.3 | 314.9 | +6.4 |
+| surface net LW | −76.3 | −82.4 | +6.1 |
+| TOA net SW | 283.7 | 288.8 | −5.1 |
+| surface down SW | 258.2 | 242.3 | +15.9 |
+| surface net SW | 222.6 | 212.2 | +10.3 |
+
+The **spatial patterns match ERA5 closely** for all six fields; the biases are
+modest and physically interpretable, not random:
+
+- **OLR is ~16 W/m² too low, concentrated in the warm, moist tropics** — the
+  broadband water-vapour band is slightly too opaque where the vapour path is
+  largest. This is the one real tuning target the maps expose.
+- **Downward/net surface LW is ~6 W/m² too high over deserts and high terrain**
+  (Sahara, Arabia, Tibet, Antarctica) — too much down-LW in dry columns, the
+  same band bias seen from below.
+- **Surface SW (down and net) is uniformly too high (+16 / +10 W/m²)** — the
+  clean-sky scheme carries no aerosol, so more shortwave reaches the surface
+  than in ERA5's clear sky. The sign is exactly as expected; closing it needs an
+  aerosol path, not a fit change.
+- **TOA net SW bias is small (−5 W/m²)** with terrain/albedo-edge speckle.
+
+The high-terrain speckle in the LW bias maps is the column-truncation and
+crude interface-height construction over elevated surfaces (low surface
+pressure, few levels), not a transfer error — cosmetic for this clear-sky check.
+
+This is Tier 1 of the ERA5 spec (m2_handoff.md). Tier 2 (cloud fraction/water,
+RH, u, v for the moist stack) is absent from the delivered data, so only
+clear-sky is validated here; the cloudy-sky branch and the moist-line tuning
+still wait on those fields and on a stable RCE.

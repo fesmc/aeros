@@ -220,6 +220,11 @@ tests : defs grid spectral vertical vordiv tendency semiimp timestep correction 
 # Driver executables
 drivers : run bench held-suarez
 
+validate-era5 : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/validate_era5.x $(drvdir)/validate_era5.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    validate_era5.x is ready."
+
 all : drivers tests
 
 .PHONY : usage
