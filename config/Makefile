@@ -174,13 +174,28 @@ correction : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_correction.x is ready."
 
+moisture : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_moisture.x $(testdir)/test_moisture.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_moisture.x is ready."
+
+condensation : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_condensation.x $(testdir)/test_condensation.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_condensation.x is ready."
+
+moist-run : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_moist_run.x $(testdir)/test_moist_run.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_moist_run.x is ready."
+
 held-suarez-test : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_held_suarez.x $(testdir)/test_held_suarez.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_held_suarez.x is ready."
 
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency semiimp timestep correction held-suarez-test
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation moist-run held-suarez-test
 
 # Driver executables
 drivers : run bench held-suarez

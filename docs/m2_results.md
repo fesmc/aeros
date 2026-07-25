@@ -253,3 +253,117 @@ only mode that moves the global mean of `ln p_s` — but a complete statement
 needs the grid-space integral `∫ p_s ∂(ln p_s)/∂t dA`, because mass is a
 nonlinear functional of the prognostic. That is the same nonlinearity §6 above
 is about, and it belongs with the first real `ΔF`.
+
+## 8. Prognostic humidity: positive-definite transport (M2.3a)
+
+`qv` was allocated and carried since M1 but never evolved. It now is — and the
+first decision it forced was structural: **humidity is a gridpoint prognostic,
+off the spectral core entirely.** `spec%qv` is gone. Advecting a positive field
+spectrally is not positive — truncating the exp-shaped gradients at fronts and
+the ITCZ produces Gibbs ringing and negative water (design.md §4.2) — so q is
+carried in `now%qv_g` and advected by a finite-volume scheme on the Gaussian
+grid that never touches the transform.
+
+**The scheme** (`src/dynamics/aeros_moisture.f90`) is flux-form, first-order
+upwind, forward in time, with its own finite-volume air-mass budget — the
+"option (ii)" chosen over leapfrogging q with a water mass-fixer. It advances
+the tracer mass `q·Δp` and a finite-volume air mass by the *same* face fluxes
+and divides (Lin–Rood), which is what makes the three required properties hold
+as machine-precision facts rather than approximations. `tests/test_moisture.f90`
+measures each:
+
+| property | measured | why it matters |
+|---|---|---|
+| constancy (q≡const preserved, divergent wind) | 2.6×10⁻¹⁵ | the first thing a tracer scheme breaks; needs air and tracer on identical fluxes |
+| conservation (total water, 100 steps) | 3.0×10⁻¹⁵ | flux form + single-valued faces; poles carry zero flux since cos(lat)=0 |
+| positivity (sharp blob, 200 steps) | min q ≥ 0 | the property spectral advection cannot deliver |
+| polar sub-step fires + still conserves | 11 sub-steps, 1.2×10⁻¹⁵ | the Gaussian grid's zonal Courant blows up at the poles |
+
+**Mass consistency — the price of positivity on a spectral core.** The scheme's
+FV air mass differs from the spectral air mass by O(truncation), because one
+divergence is a grid finite-difference and the other a spectral derivative. This
+is not a leak: the layer masses are re-diagnosed from the true (spectral)
+surface pressure every step, so it is a bounded per-step consistency error, and
+the max-principle division keeps q bounded regardless. It is diagnosable, and
+the unit conservation test isolates it — a conservation check with a *fixed* ps
+and a wind that is divergent against it fails by ~10⁻², precisely that gap, so
+the machine-precision checks use a uniform ps where FV and spectral air mass
+coincide. The interaction with an evolving ps is an integration-level check, for
+when condensation and a moist Held–Suarez run exist.
+
+**The polar Courant problem.** A spectral core has no grid CFL; a grid transport
+does, and on a Gaussian grid the zonal cell width collapses toward the poles
+while the wind does not, so the zonal Courant number reaches ~9 at T21. The fix
+is to sub-step the whole transport, `nsub` set from the largest Courant on the
+grid — *not* a Fourier/polar filter, which is the classical spectral remedy and
+is exactly what must not be used, since filtering a positive field in wavenumber
+space makes it negative. Sub-stepping preserves every invariant; it only costs
+arithmetic, and transport is grid-local and cheap against the transforms.
+
+**Deliberately deferred, and said so in the module header:**
+
+- *Accuracy.* The fluxes are first-order upwind — the correct-and-provable
+  baseline, whose conservation/positivity/constancy are unconditional, but too
+  diffusive for a real humidity field. A van Leer / MC limiter drops into
+  `face_upwind` without touching the invariants (they depend on monotonicity,
+  not order). Next accuracy commit.
+- *The dry path.* A dry run still sub-steps the transport of identically-zero
+  humidity every step — correct (0 stays 0) but wasted work. A moisture-active
+  switch belongs with condensation, where there is a natural place for it.
+- *Per-row sub-cycling.* Global sub-stepping makes the whole grid sub-step at
+  the polar rate; a per-row zonal sub-cycle would confine the extra work to the
+  rows that need it. An optimization, not a correctness item.
+
+Condensation — supersaturation removal, latent heating, precipitation — is the
+next commit.
+
+## 9. Large-scale condensation (M2.3b)
+
+The first moist physics: where the air is supersaturated, the excess vapour
+condenses, the latent heat warms the air, and the condensate rains out. No
+stored cloud water, no re-evaporation, no convection (next), no ice phase
+(condensate is liquid, L_v, everywhere) — the minimum that closes a moist energy
+and water budget, built to be exactly that.
+
+**Two seams, kept consistent.** Condensation couples the *gridpoint* humidity to
+the *spectral* temperature, so it acts at both at once. The drying is applied
+straight to `qv_g`; the heating, `L_v/cp_d · dq_c/dt`, is added to the
+temperature tendency `wrk%dtdt` at the same grid seam as the Held–Suarez
+forcing, so it rides the same transform and the same leapfrog as the dynamical
+heating. Both come from the same condensed amount `dq_c`, so column moist static
+energy is conserved by construction — dry static energy gains `L_v dq_c`, latent
+energy loses it. `tests/test_condensation.f90` checks this as an equality, per
+cell, at 1.5×10⁻¹⁵ (relative), alongside: subsaturated columns untouched
+exactly, condensing columns brought to saturation (3×10⁻¹³), vapour removed =
+precipitation (1.9×10⁻¹⁶), q ≥ 0. The saturation adjustment is three Newton
+iterations of the implicit equation `dq_c = (q − q_sat(T))/(1 + (L_v/cp_d)
+dq_sat/dT)`; `q_sat` is Tetens with the full `p − (1−ε)e_s` denominator (14.66
+g/kg at 20 °C, 1000 hPa).
+
+**The coupled run holds together** (`tests/test_moist_run.f90`, a 200-step moist
+Held–Suarez at T21L12): 200 steps, no NaN, q ≥ 0 throughout, wind bounded, 3.3%
+of the vapour rained out. This is the test the two operator unit tests cannot be
+— that the latent heating actually reaches the spectral temperature and the
+system stays stable — and it caught two real things in the building:
+
+1. *Condensation off, the water closure is 2.4×10⁻⁴* over 200 steps — the
+   finite-volume transport's O(truncation) dispersion against the spectral
+   surface pressure, measured on a running model for the first time (§8
+   predicted it; here it is).
+2. *Condensation on, it rises to 2.1×10⁻³.* Not a leak: condensation sharpens
+   the humidity field, and the transport's dispersive error scales with the
+   field's roughness. The van Leer limiter (the deferred accuracy commit) is
+   what shrinks it, since it is the transport error that dominates. It is a
+   number to characterize and reduce, not machine precision — the design does
+   not permit machine-precision water conservation on a spectral core with
+   positive-definite transport, which is the trade §8 already named.
+
+**The two seams are on different time discretizations** — the drying is a
+forward step on `qv_g`, the heating goes through the 2 dt leapfrog and its
+filter — so over a run they track to the filter's accuracy rather than exactly.
+That is the same small inconsistency every leapfrog spectral model carries
+between grid physics and spectral dynamics; it is inside the 2.1×10⁻³ above,
+not separately asserted.
+
+Convection — the moist adjustment that keeps the tropics from grid-scale
+saturating — is the next commit.

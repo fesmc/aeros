@@ -83,6 +83,13 @@ $(objdir)/aeros_correction.o: $(dyndir)/aeros_correction.f90 \
 							$(objdir)/aeros_tendency.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M2.3: prognostic humidity, transported on the grid by a positive-definite
+# finite-volume scheme. Off the spectral core entirely -- it needs only the
+# vertical coordinate (to diagnose layer masses) and the grid geometry.
+$(objdir)/aeros_moisture.o: $(dyndir)/aeros_moisture.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 # M1.4: the leapfrog itself -- time levels, RAW filter, hyperdiffusion. Sits on
 # top of every other dynamics module and is the only place a prognostic
 # variable changes value.
@@ -91,7 +98,8 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_state.o $(objdir)/aeros_vertical.o \
 							$(objdir)/aeros_vordiv.o $(objdir)/aeros_tendency.o \
 							$(objdir)/aeros_semiimp.o $(objdir)/aeros_held_suarez.o \
-							$(objdir)/aeros_correction.o
+							$(objdir)/aeros_correction.o $(objdir)/aeros_moisture.o \
+							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
@@ -106,6 +114,13 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 $(objdir)/aeros_held_suarez.o: $(physdir)/aeros_held_suarez.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
 							$(objdir)/aeros_vertical.o $(objdir)/aeros_tendency.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
+# M2.3b: large-scale condensation. A column process -- it needs the vertical
+# coordinate for the layer pressures and nothing spectral -- applied at the
+# grid seam like the Held-Suarez forcing.
+$(objdir)/aeros_condensation.o: $(physdir)/aeros_condensation.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros core #################################
@@ -155,9 +170,11 @@ aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_vordiv.o \
                  $(objdir)/aeros_tendency.o \
                  $(objdir)/aeros_correction.o \
+                 $(objdir)/aeros_moisture.o \
                  $(objdir)/aeros_semiimp.o
 
-aeros_physics =  $(objdir)/aeros_held_suarez.o
+aeros_physics =  $(objdir)/aeros_held_suarez.o \
+                 $(objdir)/aeros_condensation.o
 
 # aeros_timestep sits above the physics as well as the dynamics -- it is what
 # calls the forcing -- so it is archived after both.

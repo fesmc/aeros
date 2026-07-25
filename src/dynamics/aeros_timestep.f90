@@ -154,6 +154,12 @@ module aeros_timestep
     use aeros_correction, only : aeros_correction_class, aeros_correction_init, &
                                 aeros_correction_load, aeros_correction_end, &
                                 aeros_correction_apply, aeros_correction_report
+    use aeros_moisture, only : aeros_moist_class, aeros_moisture_init, &
+                                aeros_moisture_end, aeros_moisture_transport, &
+                                aeros_moisture_report
+    use aeros_condensation, only : aeros_cond_class, aeros_condensation_init, &
+                                aeros_condensation_load, aeros_condensation_end, &
+                                aeros_condensation_apply, aeros_condensation_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
 
@@ -192,6 +198,16 @@ module aeros_timestep
         ! so every test and every driver that does not ask for it gets the
         ! uncorrected model bit for bit.
         type(aeros_correction_class) :: cor
+
+        ! Prognostic humidity transport (aeros_moisture). q is a gridpoint
+        ! field carried in now%qv_g and advected here, off the spectral core.
+        ! Always allocated; it transports whatever is in qv_g, which for a dry
+        ! run is zero and stays zero.
+        type(aeros_moist_class) :: mst
+
+        ! Large-scale condensation (aeros_condensation), at the grid seam. Off
+        ! unless a namelist turns it on; a dry run never enters it.
+        type(aeros_cond_class) :: cnd
 
         ! [ l(l+1) / lmax(lmax+1) ]^(ndiff/2), precomputed per degree. The
         ! step-dependent part is one multiply, so this never needs rebuilding.
@@ -322,6 +338,14 @@ contains
             call aeros_correction_init(ts%cor, pool%sht(1), vg%nlev)
         end if
 
+        call aeros_moisture_init(ts%mst, grd, vg%nlev)
+
+        if (present(filename)) then
+            call aeros_condensation_load(ts%cnd, filename, grd)
+        else
+            call aeros_condensation_init(ts%cnd, grd, .FALSE.)
+        end if
+
         allocate(ts%dratio(0:lmax))
         lref = real(lmax*(lmax+1), wp)
         do l = 0, lmax
@@ -373,6 +397,8 @@ contains
         call aeros_semiimp_end(ts%si)
         call aeros_hs_end(ts%hs)
         call aeros_correction_end(ts%cor)
+        call aeros_moisture_end(ts%mst)
+        call aeros_condensation_end(ts%cnd)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
         if (allocated(ts%ps_fix)) deallocate(ts%ps_fix)
@@ -430,6 +456,14 @@ contains
 
         if (ts%hs%enabled) call aeros_hs_apply(ts%hs, vg, ts%wrk)
 
+        ! Large-scale condensation, at the same grid seam and for the same
+        ! reason: it dries the gridpoint humidity in place and adds its latent
+        ! heating to wrk%dtdt, so the heating rides the transform and the
+        ! leapfrog with the dynamical temperature tendency. Returns at once when
+        ! dry. See aeros_condensation.
+        call aeros_condensation_apply(ts%cnd, vg, ts%wrk%t_g, now%qv_g, &
+                                        ts%wrk%lnps_g, ts%wrk%dtdt, ts%dt)
+
         call aeros_tendency_spectral(pool, vg, ts%wrk, ts%tnd)
 
         ! The additive correction, on the assembled spectral tendency. Not at
@@ -466,10 +500,6 @@ contains
             end do
         end if
 
-        ! Humidity is not prognostic until M2; carry it so `new` never holds
-        ! stale data from two steps ago.
-        ts%new%qv = ts%old%qv
-
         ! === 3. Horizontal diffusion, implicit ===============================
         call diffuse(ts, s, h)
 
@@ -487,6 +517,14 @@ contains
         ! about to receive -- and after the filter, so nothing follows it that
         ! could reintroduce what it just removed.
         if (ts%mass_fixer) call mass_fix(ts, s, now%spec)
+
+        ! === 7. Humidity transport ===========================================
+        ! On the grid, forward in time, using the winds and surface pressure at
+        ! the time level just stepped from -- which are still in ts%wrk, filled
+        ! by aeros_tendency_grid and untouched since. q (now%qv_g) persists
+        ! across steps; nothing here is spectral. See aeros_moisture.
+        call aeros_moisture_transport(ts%mst, vg, ts%wrk%u, ts%wrk%v, &
+                                        ts%wrk%lnps_g, now%qv_g, ts%dt)
 
         ts%nstep = ts%nstep + 1
 
@@ -724,9 +762,12 @@ contains
             call aeros_uv_from_vordiv(s, now%spec%vor(:,k), now%spec%div(:,k), &
                                         now%u(:,:,k), now%v(:,:,k))
             call aeros_sht_synthesis(s, now%spec%temp(:,k), now%temp_g(:,:,k))
-            call aeros_sht_synthesis(s, now%spec%qv(:,k),   now%qv_g(:,:,k))
         end do
         !$omp end parallel do
+
+        ! Humidity is NOT synthesized here. now%qv_g is a prognostic in its own
+        ! right, advanced on the grid by aeros_moisture, and persists across
+        ! steps -- there is no spectral qv to rebuild it from.
 
         return
 
@@ -767,6 +808,8 @@ contains
         call aeros_semiimp_print(ts%si, iou)
         call aeros_hs_print(ts%hs, iou)
         call aeros_correction_report(ts%cor, iou)
+        call aeros_moisture_report(ts%mst, iou)
+        call aeros_condensation_report(ts%cnd, iou)
 
         return
 

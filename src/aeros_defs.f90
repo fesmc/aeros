@@ -250,8 +250,13 @@ module aeros_defs
         complex(wp_sh), allocatable :: vor(:,:)   ! relative vorticity [s-1]
         complex(wp_sh), allocatable :: div(:,:)   ! divergence [s-1]
         complex(wp_sh), allocatable :: temp(:,:)  ! temperature [K]
-        complex(wp_sh), allocatable :: qv(:,:)    ! specific humidity [kg kg-1]
         complex(wp_sh), allocatable :: lnps(:)    ! ln(surface pressure) [-], (nlm)
+
+        ! Humidity is NOT here. It is a gridpoint prognostic (now%qv_g),
+        ! advected by a positive-definite finite-volume scheme
+        ! (src/dynamics/aeros_moisture.f90), and never transformed to spectral
+        ! space -- truncating a positive field makes it negative, which is the
+        ! whole reason moisture is off the spectral core.
     end type aeros_spec_class
 
     type aeros_state_class
