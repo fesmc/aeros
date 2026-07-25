@@ -44,6 +44,7 @@ program rce_long
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
     logical  :: l_rad = .TRUE., l_sponge = .TRUE., l_vdiff = .FALSE.
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
+    real(wp) :: seed_asym = 0.0_wp    ! zonal-asymmetry seed amplitude [K-ish]
 
     type(aeros_sht_pool_class), target :: pool
     type(aeros_grid_class)     :: grd
@@ -55,7 +56,7 @@ program rce_long
     real(wp), allocatable :: phis2(:,:)
     real(wp) :: qs, dqsdt, tval
     real(wp) :: phalf(0:64), pfull(64), dpc(64)
-    integer  :: i, j, k, n
+    integer  :: i, j, k, n, m
     logical  :: blew_up
 
     nmlfile = "rce.nml"
@@ -111,6 +112,21 @@ program rce_long
     now%spec%lnps(aeros_sht_lm(pool%sht(1),0,0)) = &
             cmplx(log(real(p0,dp))*sqrt(16.0_dp*atan(1.0_dp)), 0.0_dp, wp_sh)
     now%spec%temp(aeros_sht_lm(pool%sht(1),2,0),:) = cmplx(-5.0_dp, 0.0_dp, wp_sh)
+
+    ! Optional zonal-asymmetry seed: a small perturbation in a few m>0 modes so
+    ! baroclinic instability can grow eddies. Without it the run is trapped in
+    ! the axisymmetric (m=0) manifold -- with zonally symmetric forcing and an
+    ! m=0-only start, the nonlinear terms never populate m>0, so there are no
+    ! eddies to flux heat meridionally. Tests whether the residual subtropical
+    ! warming is that artifact.
+    if (seed_asym > 0.0_wp) then
+        do k = 1, nlev
+            do m = 1, 6
+                now%spec%temp(aeros_sht_lm(pool%sht(1), m+2, m), k) = &
+                    cmplx(real(seed_asym,dp), real(seed_asym,dp), wp_sh)
+            end do
+        end do
+    end if
 
     call aeros_timestep_diagnose(ts, pool, vg, grd, now)
     do j = 1, grd%nlat
@@ -176,6 +192,7 @@ contains
         call nml_read(nmlfile, "rce", "l_vdiff", l_vdiff)
         call nml_read(nmlfile, "rce", "vdiff_k0", vdiff_k0)
         call nml_read(nmlfile, "rce", "vdiff_sigma", vdiff_sigma)
+        call nml_read(nmlfile, "rce", "seed_asym", seed_asym)
         return
     end subroutine read_config
 
