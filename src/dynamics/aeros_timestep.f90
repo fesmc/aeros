@@ -536,13 +536,15 @@ contains
 
         if (ts%hs%enabled) call aeros_hs_apply(ts%hs, vg, ts%wrk)
 
-        ! Forward-split physics accumulator. Surface fluxes, convection and
-        ! radiation all add a forward temperature increment here, applied to the
-        ! n+1 state in step 6 -- off the centered leapfrog, which their large,
-        ! vertically sharp heating (a single-layer flux, an overturning column,
-        ! a cooling model top) would otherwise drive computational-mode
-        ! unstable. Zero it once if any is on.
-        if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled) &
+        ! Forward-split physics accumulator. Surface fluxes, convection,
+        ! condensation and radiation all add a forward temperature increment
+        ! here, applied to the n+1 state in step 6 -- off the centered leapfrog,
+        ! which their large, vertically sharp heating (a single-layer flux, an
+        ! overturning column, a lowest-layer latent release, a cooling model top)
+        ! would otherwise drive computational-mode unstable. Zero it once if any
+        ! is on.
+        if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled &
+            .or. ts%cnd%enabled) &
             ts%wrk%dt_phys = 0.0_wp
 
         ! Surface turbulent fluxes, before convection: sensible heat warms the
@@ -565,13 +567,13 @@ contains
                                             ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
 
         ! Large-scale condensation, at the same grid seam: it dries the
-        ! gridpoint humidity in place and adds its latent heating to wrk%dtdt, so
-        ! the heating rides the transform and the leapfrog with the dynamical
-        ! temperature tendency. Its heating is small and smooth, so unlike
-        ! convection and radiation it stays on the centered path. Returns at once
-        ! when dry. See aeros_condensation.
+        ! gridpoint humidity in place and adds its latent heating to wrk%dt_phys,
+        ! the forward-split path -- symmetric with the forward drying, and off the
+        ! centered leapfrog, whose computational mode the latent release excites
+        ! once it is large in the coupled RCE (aeros_condensation header). Returns
+        ! at once when dry.
         call aeros_condensation_apply(ts%cnd, vg, ts%wrk%t_g, now%qv_g, &
-                                        ts%wrk%lnps_g, ts%wrk%dtdt, ts%dt)
+                                        ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
 
         ! Radiation, at the same grid seam: clear-sky LW+SW heating, recomputed
         ! on a multi-hour cadence and cached, accumulated into wrk%dt_phys as a
@@ -644,15 +646,17 @@ contains
         call aeros_spec_swap(now%spec, ts%new)
 
         ! === 6. Forward-split physics heating ================================
-        ! Convective AND radiative heating were accumulated on the grid in
-        ! wrk%dt_phys as an increment [K]. Apply it FORWARD onto the n+1 state
-        ! now -- transform per level and add to now%temp -- decoupled from the
-        ! centered leapfrog, which would otherwise turn their large, vertically
-        ! sharp heating into a computational-mode instability. This mirrors the
-        ! forward treatment of gridpoint humidity in step 8. (Large-scale
-        ! condensation still rides the centered dtdt path: its heating is small
-        ! and smooth. See aeros_convection.)
-        if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled) &
+        ! Surface, convective, condensational AND radiative heating were
+        ! accumulated on the grid in wrk%dt_phys as an increment [K]. Apply it
+        ! FORWARD onto the n+1 state now -- transform per level and add to
+        ! now%temp -- decoupled from the centered leapfrog, which would otherwise
+        ! turn their large, vertically sharp heating into a computational-mode
+        ! instability. This mirrors the forward treatment of gridpoint humidity
+        ! in step 8, so for condensation the drying and heating now share one
+        ! discretization. (Boundary-layer vertical diffusion is separate: it is a
+        ! diffusion operator, applied implicitly in step 3c.)
+        if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled &
+            .or. ts%cnd%enabled) &
             call apply_phys_heating(s, now%spec, ts%wrk%dt_phys, vg%nlev)
 
         ! === 7. Mass fixer ===================================================

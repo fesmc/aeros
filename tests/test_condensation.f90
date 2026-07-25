@@ -50,7 +50,7 @@ program test_condensation
     type(aeros_vgrid_class) :: vg
     type(aeros_cond_class)  :: cnd
 
-    real(wp), allocatable :: t_g(:,:,:), qv(:,:,:), qv0(:,:,:), dtdt(:,:,:), lnps(:,:)
+    real(wp), allocatable :: t_g(:,:,:), qv(:,:,:), qv0(:,:,:), dt_phys(:,:,:), lnps(:,:)
     integer :: nlon, nlat, nfail
 
     nfail = 0
@@ -66,7 +66,7 @@ program test_condensation
                                         "  grid ", nlon, "x", nlat
 
     allocate(t_g(nlon,nlat,nlev), qv(nlon,nlat,nlev), qv0(nlon,nlat,nlev), &
-                dtdt(nlon,nlat,nlev), lnps(nlon,nlat))
+                dt_phys(nlon,nlat,nlev), lnps(nlon,nlat))
 
     lnps = log(real(p0,wp))
 
@@ -139,12 +139,12 @@ contains
         call set_temperature(t_g)
         qv  = 1.0e-4_wp        ! 0.1 g/kg: well below saturation everywhere warm
         qv0 = qv
-        dtdt = 0.0_wp
+        dt_phys = 0.0_wp
 
-        call aeros_condensation_apply(cnd, vg, t_g, qv, lnps, dtdt, 1800.0_wp)
+        call aeros_condensation_apply(cnd, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
 
         dq  = maxval(abs(qv - qv0))
-        dh  = maxval(abs(dtdt))
+        dh  = maxval(abs(dt_phys))
         dpr = maxval(cnd%precip)
 
         write(*,"(a40,es12.3)") "   max |dq|                       ", dq
@@ -183,9 +183,9 @@ contains
             qv(:,:,k) = 1.15_wp*qs
         end do
         qv0  = qv
-        dtdt = 0.0_wp
+        dt_phys = 0.0_wp
 
-        call aeros_condensation_apply(cnd, vg, t_g, qv, lnps, dtdt, 1800.0_wp)
+        call aeros_condensation_apply(cnd, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
 
         ! Per-cell energy-water closure and saturation, worst case over the grid.
         worst_sat = 0.0_wp
@@ -196,12 +196,13 @@ contains
                 do k = 1, nlev
                     dqc = qv0(i,j,k) - qv(i,j,k)
 
-                    ! energy-water: cp * (heating*dt) == L * dqc, relative to
-                    ! the latent heat itself (which is ~1e4, so an absolute
-                    ! bound would just be measuring its roundoff).
+                    ! energy-water: cp * heating_increment == L * dqc, relative
+                    ! to the latent heat itself (which is ~1e4, so an absolute
+                    ! bound would just be measuring its roundoff). dt_phys is the
+                    ! forward [K] increment, so no dt factor here.
                     if (dqc > 0.0_wp) &
                         worst_en = max(worst_en, &
-                                abs(real(cp_d,wp)*dtdt(i,j,k)*1800.0_wp - real(L_v,wp)*dqc) &
+                                abs(real(cp_d,wp)*dt_phys(i,j,k) - real(L_v,wp)*dqc) &
                                     /(real(L_v,wp)*dqc))
 
                     ! saturation: where it condensed, q sits at q_sat(T + heating)

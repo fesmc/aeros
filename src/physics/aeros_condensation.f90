@@ -18,25 +18,28 @@ module aeros_condensation
     !   DRYING is applied straight to the gridpoint humidity (qv_g): the vapour
     !   that condenses is removed from the cell it condensed in. No transform.
     !
-    !   HEATING is added to the temperature TENDENCY on the grid (wrk%dtdt),
-    !   exactly where the Held-Suarez forcing is added, so it rides the same
-    !   transform back to spectral space and the same semi-implicit leapfrog as
-    !   the dynamical heating. It is a rate, L_v/cp_d * dq_c / dt, so that one
-    !   step's worth of it warms the air by L_v/cp_d * dq_c -- the latent heat of
-    !   exactly the water that left.
+    !   HEATING is added to the forward-split increment on the grid (wrk%dt_phys,
+    !   [K]), the same path convection, radiation and the surface fluxes use: it
+    !   is applied to the n+1 state after the dynamics step, forward in time,
+    !   decoupled from the centered leapfrog. It is an increment L_v/cp_d * dq_c
+    !   -- one step's warming from the latent heat of exactly the water that left.
+    !
+    !   This was originally on the centered dtdt path, on the argument that
+    !   condensation's heating is small and smooth. In the coupled RCE that
+    !   assumption breaks: at the hot subtropical latitude the heating reaches
+    !   ~100 K/day in the lowest layer and, on the centered leapfrog, excites the
+    !   computational mode -- the same failure convection had before it was moved
+    !   forward-split (M2.3e/section 12.1). So the heating now rides the same
+    !   forward path, symmetric with the forward drying of qv_g. See
+    !   docs/m2_results.md and m2_handoff.md (RCE level-12 instability).
     !
     ! Because both come from the SAME condensed amount dq_c, the column moist
     ! static energy is conserved by construction: the dry static energy gains
     ! L_v dq_c and the latent energy loses it. The water budget closes the same
     ! way: the vapour lost equals the precipitation produced. tests/
-    ! test_condensation checks both as equalities, not tolerances.
-    !
-    ! The two seams are on different time discretizations -- the drying is a
-    ! forward step on qv_g, the heating goes through the 2 dt leapfrog and its
-    ! filter -- so over a run they track to the filter's accuracy rather than
-    ! exactly. That is the same small inconsistency every leapfrog spectral model
-    ! carries between its grid physics and its spectral dynamics; it is measured
-    ! at the integration level, not asserted away here.
+    ! test_condensation checks both as equalities, not tolerances. Drying and
+    ! heating now share the SAME forward discretization, so they track exactly
+    ! rather than to the filter's accuracy as when the heating was centered.
     !
     ! === The saturation adjustment ==========================================
     !
@@ -164,14 +167,15 @@ contains
 
     end subroutine aeros_condensation_end
 
-    subroutine aeros_condensation_apply(cnd, vg, t_g, qv_g, lnps_g, dtdt, dt)
+    subroutine aeros_condensation_apply(cnd, vg, t_g, qv_g, lnps_g, dt_phys, dt)
         ! Condense the supersaturation: dry qv_g, add the latent heating to the
-        ! temperature tendency dtdt, and record the column precipitation.
+        ! forward-split increment dt_phys, and record the column precipitation.
         !
         ! t_g and lnps_g are the current gridpoint temperature and log surface
         ! pressure (aeros_tendency's wrk); qv_g is the gridpoint humidity, dried
-        ! in place; dtdt is the grid-space temperature tendency the heating is
-        ! added to, before it is transformed with the dynamics.
+        ! in place; dt_phys is the forward-split grid temperature increment [K]
+        ! the heating is added to, applied to the n+1 state after the dynamics
+        ! step (NOT the centered leapfrog -- see the module header).
 
         implicit none
 
@@ -180,7 +184,7 @@ contains
         real(wp), intent(in)    :: t_g(:,:,:)     ! (nlon,nlat,nlev) [K]
         real(wp), intent(inout) :: qv_g(:,:,:)    ! (nlon,nlat,nlev) [kg kg-1]
         real(wp), intent(in)    :: lnps_g(:,:)    ! (nlon,nlat)      ln[Pa]
-        real(wp), intent(inout) :: dtdt(:,:,:)    ! (nlon,nlat,nlev) [K s-1]
+        real(wp), intent(inout) :: dt_phys(:,:,:) ! (nlon,nlat,nlev) [K] increment
         real(wp), intent(in)    :: dt             ! [s]
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
@@ -217,9 +221,9 @@ contains
                     dqc = max(0.0_wp, min(dqc, qv_g(i,j,k)))
 
                     if (dqc > 0.0_wp) then
-                        qv_g(i,j,k) = qv_g(i,j,k) - dqc
-                        dtdt(i,j,k) = dtdt(i,j,k) + hcp*dqc/dt
-                        pcol        = pcol + dqc*dpc(k)
+                        qv_g(i,j,k)    = qv_g(i,j,k) - dqc
+                        dt_phys(i,j,k) = dt_phys(i,j,k) + hcp*dqc   ! [K] increment
+                        pcol           = pcol + dqc*dpc(k)
                     end if
                 end do
 
