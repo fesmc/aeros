@@ -77,6 +77,7 @@ program test_moisture
     call test_conservation(nfail)
     call test_positivity(nfail)
     call test_polar_substep(nfail)
+    call test_accuracy(nfail)
 
     call aeros_moisture_end(mst)
     call aeros_vgrid_end(vg)
@@ -310,6 +311,77 @@ contains
         call check(qmin_ever >= 0.0_wp, "and q is still positive through it", nfail)
         return
     end subroutine test_polar_substep
+
+    ! === 5. Accuracy: the limiter is second order, not upwind ================
+
+    subroutine test_accuracy(nfail)
+        ! Advect a broad, smooth, well-resolved bell one full solid-body
+        ! rotation and measure how much of its peak amplitude survives. A full
+        ! rotation returns the exact field to its start, so any loss is
+        ! numerical diffusion. First-order upwind smears a bell like this well
+        ! below half amplitude over a rotation; the van Leer limiter must keep
+        ! most of it -- that difference is the whole point of the limiter, and
+        ! the reason the moist water budget (m2_results.md §9) improves with it.
+
+        implicit none
+        integer, intent(inout) :: nfail
+
+        real(wp) :: u0, peak0, peak1, retain
+        integer  :: nrot, n
+
+        write(*,*) ""
+        write(*,*) " -- accuracy: peak retention over one full rotation of a smooth bell"
+
+        lnps = log(real(p0,wp))
+        u0 = 60.0_wp
+        call solid_body(grd, u, v, u0)
+        call smooth_bell(grd, q)
+
+        peak0 = maxval(q)
+
+        ! One full rotation: angular velocity u0/a, period 2*pi*a/u0.
+        nrot = nint(2.0_wp*real(pi,wp)*real(6.371e6_wp,wp)/u0/1800.0_wp)
+        do n = 1, nrot
+            call aeros_moisture_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
+        end do
+
+        peak1  = maxval(q)
+        retain = peak1/peak0
+
+        write(*,"(a40,i8)")     "   steps per rotation             ", nrot
+        write(*,"(a40,f10.3)")  "   peak amplitude retained        ", retain
+
+        call check(retain > 0.70_wp, &
+                    "van Leer keeps most of the peak (upwind would not)", nfail)
+        call check(minval(q) >= 0.0_wp, "and stays positive", nfail)
+        return
+    end subroutine test_accuracy
+
+    subroutine smooth_bell(grd, q)
+        ! A broad cosine-squared bell centred on the equator, wide enough to be
+        ! well resolved at T21 -- so the loss measured is the scheme's, not the
+        ! grid's inability to represent the shape.
+        implicit none
+        type(aeros_grid_class), intent(in)  :: grd
+        real(wp),               intent(out) :: q(:,:,:)
+        real(wp) :: lon, lat, r
+        integer  :: i, j, k
+        do k = 1, nlev
+            do j = 1, grd%nlat
+                lat = grd%lat(j)*degrees_to_radians
+                do i = 1, grd%nlon
+                    lon = grd%lon(i)*degrees_to_radians
+                    r = sqrt((lon - pi)**2 + lat**2)
+                    if (r < 1.2_wp) then
+                        q(i,j,k) = 0.01_wp*cos(r/1.2_wp*0.5_wp*pi)**2
+                    else
+                        q(i,j,k) = 0.0_wp
+                    end if
+                end do
+            end do
+        end do
+        return
+    end subroutine smooth_bell
 
     subroutine check(ok, label, nfail)
         implicit none
