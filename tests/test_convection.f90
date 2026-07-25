@@ -49,7 +49,7 @@ program test_convection
     type(aeros_vgrid_class) :: vg
     type(aeros_conv_class)  :: cnv
 
-    real(wp), allocatable :: t_g(:,:,:), qv(:,:,:), qv0(:,:,:), dtdt(:,:,:), lnps(:,:)
+    real(wp), allocatable :: t_g(:,:,:), qv(:,:,:), qv0(:,:,:), dt_phys(:,:,:), lnps(:,:)
     real(wp) :: pf(nlev), ph(0:nlev), dpc(nlev)
     integer :: nlon, nlat, nfail
 
@@ -67,7 +67,7 @@ program test_convection
                                         "  grid ", nlon, "x", nlat
 
     allocate(t_g(nlon,nlat,nlev), qv(nlon,nlat,nlev), qv0(nlon,nlat,nlev), &
-                dtdt(nlon,nlat,nlev), lnps(nlon,nlat))
+                dt_phys(nlon,nlat,nlev), lnps(nlon,nlat))
     lnps = log(real(p0,wp))
 
     call test_stable_untouched(nfail)
@@ -156,11 +156,11 @@ contains
             call aeros_qsat(t_g(1,1,k), pf(k), qs, d)
             qv(:,:,k) = 0.5_wp*qs
         end do
-        qv0 = qv; dtdt = 0.0_wp
+        qv0 = qv; dt_phys = 0.0_wp
 
-        call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dtdt, 1800.0_wp)
+        call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
 
-        dtmax = maxval(abs(dtdt))*1800.0_wp
+        dtmax = maxval(abs(dt_phys))
         dqmax = maxval(abs(qv - qv0))
         write(*,"(a40,es12.3)") "   max |dT|                       ", dtmax
         write(*,"(a40,es12.3)") "   max |dq|                       ", dqmax
@@ -192,7 +192,7 @@ contains
             call aeros_qsat(t_g(1,1,k), pf(k), qs, d)
             qv(:,:,k) = qs                      ! saturated
         end do
-        qv0 = qv; dtdt = 0.0_wp
+        qv0 = qv; dt_phys = 0.0_wp
 
         ! MSE before (one representative column; every column is identical here).
         do k = 1, nlev
@@ -200,11 +200,11 @@ contains
         end do
         h0 = col_mse(tcol, qcol, dpc)
 
-        call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dtdt, 1800.0_wp)
+        call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
 
-        ! MSE after: reconstruct the adjusted T from the heating rate.
+        ! MSE after: reconstruct the adjusted T from the physics increment.
         do k = 1, nlev
-            tcol(k) = t_g(1,1,k) + dtdt(1,1,k)*1800.0_wp
+            tcol(k) = t_g(1,1,k) + dt_phys(1,1,k)
             qcol(k) = qv(1,1,k)
         end do
         h1 = col_mse(tcol, qcol, dpc)
@@ -228,7 +228,7 @@ contains
         write(*,"(a40,es12.3)")   "   |water removed - precip|/water", &
                                     abs(water_removed - precip_water)/water_removed
         write(*,"(a40,es12.3)")   "   surface warming dT             ", &
-                                    dtdt(1,1,nlev)*1800.0_wp
+                                    dt_phys(1,1,nlev)
         write(*,"(a40,l4)")       "   column moist-stable after     ", all_stable
         write(*,"(a40,es12.3)")   "   min q                         ", qminv
 
@@ -262,17 +262,17 @@ contains
             call aeros_qsat(t_g(1,1,k), pf(k), qs, d)
             qv(:,:,k) = 0.05_wp*qs                 ! very dry
         end do
-        qv0 = qv; dtdt = 0.0_wp
+        qv0 = qv; dt_phys = 0.0_wp
 
         do k = 1, nlev
             tcol(k) = t_g(1,1,k)
         end do
         e0 = col_enthalpy(tcol, dpc)
 
-        call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dtdt, 1800.0_wp)
+        call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
 
         do k = 1, nlev
-            tcol(k) = t_g(1,1,k) + dtdt(1,1,k)*1800.0_wp
+            tcol(k) = t_g(1,1,k) + dt_phys(1,1,k)
             th(k)   = tcol(k)*(real(p0,wp)/pf(k))**real(kappa,wp)
         end do
         e1 = col_enthalpy(tcol, dpc)

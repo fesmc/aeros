@@ -469,9 +469,15 @@ contains
         ! Moist convective adjustment, before condensation: it overturns the
         ! column and precipitates, and large-scale condensation then removes
         ! whatever gridbox-mean supersaturation it left. Both act on the
-        ! time-level-n gridpoint T and q and add to wrk%dtdt.
-        call aeros_convection_apply(ts%cnv, vg, ts%wrk%t_g, now%qv_g, &
-                                        ts%wrk%lnps_g, ts%wrk%dtdt, ts%dt)
+        ! time-level-n gridpoint T and q. Convection's temperature change is a
+        ! forward increment in wrk%dt_phys, applied to the n+1 state in step 6
+        ! (NOT the centered leapfrog -- see aeros_convection); zero the
+        ! accumulator first. Its humidity change is applied to now%qv_g.
+        if (ts%cnv%enabled) then
+            ts%wrk%dt_phys = 0.0_wp
+            call aeros_convection_apply(ts%cnv, vg, ts%wrk%t_g, now%qv_g, &
+                                            ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
+        end if
 
         ! Large-scale condensation, at the same grid seam and for the same
         ! reason: it dries the gridpoint humidity in place and adds its latent
@@ -529,13 +535,24 @@ contains
         call aeros_spec_swap(ts%old, now%spec)
         call aeros_spec_swap(now%spec, ts%new)
 
-        ! === 6. Mass fixer ===================================================
+        ! === 6. Forward-split physics heating ================================
+        ! Convective heating was accumulated on the grid in wrk%dt_phys as an
+        ! increment [K]. Apply it FORWARD onto the n+1 state now -- transform
+        ! per level and add to now%temp -- decoupled from the centered leapfrog,
+        ! which would otherwise turn convection's large, vertically
+        ! sign-alternating heating into a computational-mode instability. This
+        ! mirrors the forward treatment of gridpoint humidity in step 8.
+        ! (Large-scale condensation still rides the centered dtdt path: its
+        ! heating is small and smooth. See aeros_convection.)
+        if (ts%cnv%enabled) call apply_phys_heating(s, now%spec, ts%wrk%dt_phys, vg%nlev)
+
+        ! === 7. Mass fixer ===================================================
         ! After the swap, so it acts on X^(n+1) -- the state the caller is
         ! about to receive -- and after the filter, so nothing follows it that
         ! could reintroduce what it just removed.
         if (ts%mass_fixer) call mass_fix(ts, s, now%spec)
 
-        ! === 7. Humidity transport ===========================================
+        ! === 8. Humidity transport ===========================================
         ! On the grid, forward in time, using the winds and surface pressure at
         ! the time level just stepped from -- which are still in ts%wrk, filled
         ! by aeros_tendency_grid and untouched since. q (now%qv_g) persists
@@ -548,6 +565,34 @@ contains
         return
 
     end subroutine aeros_timestep_step
+
+    subroutine apply_phys_heating(s, spec, dt_phys, nlev)
+        ! Add the forward-split physics temperature increment -- accumulated on
+        ! the grid in [K] -- to the spectral temperature of the n+1 state, one
+        ! analysis per level. The grid field is consumed (analysis overwrites
+        ! its input). See step 6 of aeros_timestep_step for why the convective
+        ! heating is applied here, forward, rather than through the centered RHS.
+
+        implicit none
+
+        type(aeros_sht_class),  intent(in)    :: s
+        type(aeros_spec_class), intent(inout) :: spec
+        real(wp),               intent(inout) :: dt_phys(:,:,:)
+        integer,                intent(in)    :: nlev
+
+        complex(wp_sh) :: tlm(s%nlm)
+        integer :: k, lm
+
+        do k = 1, nlev
+            call aeros_sht_analysis(s, dt_phys(:,:,k), tlm)
+            do lm = 1, s%nlm
+                spec%temp(lm,k) = spec%temp(lm,k) + tlm(lm)
+            end do
+        end do
+
+        return
+
+    end subroutine apply_phys_heating
 
     subroutine mass_fix(ts, sht, spec)
         ! Restore the global mass by the one rescaling of p_s that does it

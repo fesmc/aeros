@@ -47,15 +47,21 @@ module aeros_convection
     ! branch and a reference-profile routine -- the apply loop, the tendency
     ! plumbing, the precipitation accounting and the tests do not change.
     !
-    ! === Coupling: same two seams as condensation ===========================
+    ! === Coupling: forward-split, NOT through the centered leapfrog =========
     !
     ! Convection changes temperature (up AND down -- it is a redistribution) and
-    ! humidity. Like condensation it acts at the grid seam: the temperature
-    ! change enters wrk%dtdt as a rate so it rides the transform and the
-    ! leapfrog, the humidity change is applied to the gridpoint qv_g, and both
-    ! come from the same adjustment so the column budget closes. It runs BEFORE
-    ! large-scale condensation, which then mops up whatever supersaturation the
-    ! convection did not remove.
+    ! humidity. It acts at the grid seam, but unlike condensation it does NOT
+    ! feed its heating through wrk%dtdt and the centered leapfrog: convective
+    ! heating is large and sign-alternating in the vertical, and a term
+    ! evaluated at time n and applied through the centered 2 dt step excites the
+    ! leapfrog computational mode (the run NaNs in tens of steps). Instead the
+    ! temperature change is written as a forward INCREMENT into wrk%dt_phys and
+    ! applied to the n+1 state after the dynamics step (aeros_timestep_step),
+    ! decoupled from the centered core -- the same forward-in-time treatment the
+    ! gridpoint humidity already gets. The humidity change is applied to qv_g,
+    ! and both come from the same adjustment so the column budget closes. It runs
+    ! BEFORE large-scale condensation, which then mops up whatever
+    ! gridbox-mean supersaturation the convection did not remove.
 
     use aeros_defs,       only : dp, wp, io_unit_err, R_d, cp_d, grav, L_v, &
                                     kappa, p0, aeros_grid_class
@@ -182,9 +188,10 @@ contains
 
     end subroutine aeros_convection_end
 
-    subroutine aeros_convection_apply(cnv, vg, t_g, qv_g, lnps_g, dtdt, dt)
+    subroutine aeros_convection_apply(cnv, vg, t_g, qv_g, lnps_g, dt_phys, dt)
         ! Adjust each column for moist (and dry) convective instability: dry
-        ! qv_g, add the temperature change to dtdt as a rate, record precip.
+        ! qv_g, add the temperature change to the forward-split physics increment
+        ! dt_phys (NOT the centered-leapfrog rate dtdt), record precip.
 
         implicit none
 
@@ -193,7 +200,7 @@ contains
         real(wp), intent(in)    :: t_g(:,:,:)     ! (nlon,nlat,nlev) [K]
         real(wp), intent(inout) :: qv_g(:,:,:)    ! (nlon,nlat,nlev) [kg kg-1]
         real(wp), intent(in)    :: lnps_g(:,:)    ! (nlon,nlat)      ln[Pa]
-        real(wp), intent(inout) :: dtdt(:,:,:)    ! (nlon,nlat,nlev) [K s-1]
+        real(wp), intent(inout) :: dt_phys(:,:,:) ! (nlon,nlat,nlev) [K]
         real(wp), intent(in)    :: dt             ! [s]
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
@@ -218,13 +225,13 @@ contains
 
                 call adjust_column(cnv%scheme, tcol, qcol, pfull, dpc, nlev)
 
-                ! Heating as a rate; humidity set to the adjusted profile;
-                ! precip is the column water removed.
+                ! Temperature change as a forward increment [K]; humidity set to
+                ! the adjusted profile; precip is the column water removed.
                 pcol = 0.0_wp
                 do k = 1, nlev
-                    dtdt(i,j,k) = dtdt(i,j,k) + (tcol(k) - t0(k))/dt
-                    qv_g(i,j,k) = qcol(k)
-                    pcol        = pcol + (q0(k) - qcol(k))*dpc(k)
+                    dt_phys(i,j,k) = dt_phys(i,j,k) + (tcol(k) - t0(k))
+                    qv_g(i,j,k)    = qcol(k)
+                    pcol           = pcol + (q0(k) - qcol(k))*dpc(k)
                 end do
                 cnv%precip(i,j) = pcol/(real(grav, wp)*dt)
             end do
