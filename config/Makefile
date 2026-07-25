@@ -204,13 +204,18 @@ surface : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_surface.x is ready."
 
+rce : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_rce.x $(testdir)/test_rce.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_rce.x is ready."
+
 held-suarez-test : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_held_suarez.x $(testdir)/test_held_suarez.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_held_suarez.x is ready."
 
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation surface held-suarez-test
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation surface rce held-suarez-test
 
 # Driver executables
 drivers : run bench held-suarez
