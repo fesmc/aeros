@@ -113,6 +113,20 @@ module aeros_convection
         real(wp) :: tau    = 7200.0_wp   ! [s] ~ 2 h
         real(wp) :: rh_ref = 0.7_wp      ! [-]
 
+        ! Dry convective adjustment, run BEFORE the moist scheme. A moist scheme
+        ! (SBM here) will not touch a hot, dry, super-adiabatic layer: once the
+        ! boundary layer dries, its moist buoyancy (h_b) drops below the warm
+        ! environment above and the convecting band detaches, leaving the surface
+        ! heat un-ventilated -- the M2 RCE runaway. Dry adjustment is a separate,
+        ! orthogonal process (it removes dT/dz super-adiabats, conserving enthalpy)
+        ! and belongs on regardless of which moist closure runs. Off by default:
+        ! it is correct physics and ventilates the surface layer, but it does not
+        ! by itself bound the axisymmetric RCE (whose terminal event is a
+        ! model-top thermal-wind blow-up, not surface trapping), so it stays an
+        ! opt-in until that is resolved -- and off keeps every existing run and
+        ! test bit-unchanged.
+        logical :: dry_adjust = .FALSE.
+
         integer :: nlon = 0, nlat = 0
 
         ! Precipitation rate from the last apply, [kg m-2 s-1].
@@ -256,6 +270,15 @@ contains
                     t0(k)   = t_g(i,j,k);  tcol(k) = t_g(i,j,k)
                     q0(k)   = qv_g(i,j,k); qcol(k) = qv_g(i,j,k)
                 end do
+
+                ! Dry convective adjustment first: ventilate any dry-unstable
+                ! (super-adiabatic) layers the moist scheme below will not touch.
+                ! Enthalpy-conserving (redistributes heat, adds none); q untouched.
+                ! Relaxed over tau like the moist scheme -- a full instantaneous
+                ! mix is a forward-split vertical-transport kick the leapfrog turns
+                ! computational-mode unstable (the reason vdiff is implicit).
+                if (cnv%dry_adjust) &
+                    call dry_adjust_column(tcol, pfull, dpc, nlev, cnv%tau, dt)
 
                 call adjust_column(cnv%scheme, tcol, qcol, pfull, dpc, nlev, &
                                         cnv%tau, cnv%rh_ref, dt)
@@ -531,6 +554,63 @@ contains
         return
 
     end subroutine manabe_adjust
+
+    subroutine dry_adjust_column(t, pfull, dp, nlev, tau, dt)
+        ! Standalone dry convective adjustment, run before the moist scheme:
+        ! remove dry static instability (potential temperature decreasing upward)
+        ! by mixing adjacent unstable pairs to a common theta, swept to stability.
+        ! Reuses dry_pair (enthalpy-conserving); humidity is untouched -- this is
+        ! a dry process. Without it a hot, dry, super-adiabatic boundary layer is
+        ! invisible to the moist buoyancy test and never ventilates (the M2 RCE
+        ! runaway).
+        !
+        ! The full dry-neutral profile is built in a scratch copy, then the actual
+        ! T is RELAXED toward it over tau, exactly as the moist scheme relaxes:
+        !   a = (dt/tau)/(1 + dt/tau),  T <- T + a (T_neutral - T).
+        ! A full instantaneous mix is a large forward-split vertical-transport
+        ! increment, and vertical transport applied forward-split on the leapfrog
+        ! is computational-mode unstable (the reason vdiff is implicit). Relaxing
+        ! keeps the increment small and stable, and conserves enthalpy because the
+        ! neutral profile does (int cp T dp is preserved by dry_pair).
+
+        implicit none
+
+        real(wp), intent(inout) :: t(:)
+        real(wp), intent(in)    :: pfull(:), dp(:)
+        integer,  intent(in)    :: nlev
+        real(wp), intent(in)    :: tau, dt
+
+        real(wp) :: tn(nlev), th_k, th_k1, p0w, kap, a
+        logical  :: changed
+        integer  :: k, sweep
+
+        p0w = real(p0, wp); kap = real(kappa, wp)
+
+        do k = 1, nlev
+            tn(k) = t(k)
+        end do
+
+        do sweep = 1, MAXSWEEP
+            changed = .FALSE.
+            do k = 1, nlev - 1
+                th_k  = tn(k)  *(p0w/pfull(k))**kap
+                th_k1 = tn(k+1)*(p0w/pfull(k+1))**kap
+                if (th_k < th_k1 - 1.0e-6_wp) then    ! theta decreasing upward
+                    call dry_pair(tn, pfull, dp, k)
+                    changed = .TRUE.
+                end if
+            end do
+            if (.not. changed) exit
+        end do
+
+        a = (dt/tau)/(1.0_wp + dt/tau)
+        do k = 1, nlev
+            t(k) = t(k) + a*(tn(k) - t(k))
+        end do
+
+        return
+
+    end subroutine dry_adjust_column
 
     subroutine dry_pair(t, pfull, dp, k)
         ! Mix a dry-unstable pair to a common potential temperature, conserving

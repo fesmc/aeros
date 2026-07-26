@@ -45,6 +45,7 @@ program rce_long
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
     logical  :: l_rad = .TRUE., l_sponge = .TRUE., l_vdiff = .FALSE.
     logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
+    logical  :: l_dry_adjust = .TRUE. ! dry convective adjustment before the moist scheme
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
     real(wp) :: seed_asym = 0.0_wp    ! zonal-asymmetry seed amplitude [K-ish]
     real(wp) :: albedo = 0.06_wp      ! surface broadband albedo (cloud proxy knob)
@@ -97,6 +98,7 @@ program rce_long
     ts%cnd%rh_crit = 1.0_wp
     ts%cnv%enabled = l_cnv
     ts%cnv%tau = conv_tau
+    ts%cnv%dry_adjust = l_dry_adjust
     ts%surf%enabled = l_surf
     ts%surf%c_h = c_h; ts%surf%c_e = c_e; ts%surf%u_min = u_min
     ts%rad%enabled  = l_rad
@@ -203,6 +205,7 @@ contains
         call nml_read(nmlfile, "rce", "print_every", print_every)
         call nml_read(nmlfile, "rce", "l_surf", l_surf)
         call nml_read(nmlfile, "rce", "l_cnv", l_cnv)
+        call nml_read(nmlfile, "rce", "l_dry_adjust", l_dry_adjust)
         call nml_read(nmlfile, "rce", "l_cnd", l_cnd)
         call nml_read(nmlfile, "rce", "l_rad", l_rad)
         call nml_read(nmlfile, "rce", "l_sponge", l_sponge)
