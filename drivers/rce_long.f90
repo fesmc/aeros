@@ -294,6 +294,7 @@ contains
         end do
         call hotspot_split(nlev)
         call eddy_diag()
+        call baroclinicity_diag()
         if (l_diag) call term_table()
         call energy_balance()
         return
@@ -391,6 +392,32 @@ contains
         m = sum(f(:,j,k))/real(grd%nlon, wp)
         return
     end function zmean_at
+
+    subroutine baroclinicity_diag()
+        ! Vertical structure of the baroclinicity: per level, the meridional
+        ! temperature contrast (max-min of the zonal mean over latitude) and the
+        ! peak zonal-mean zonal wind |[u]|. If both pile up at the lowest level
+        ! and fall off aloft, the baroclinicity is SURFACE-TRAPPED -- shallow,
+        ! small-scale unstable modes that T21 resolves poorly and that feed the
+        ! low-level jet; then higher resolution is the fix. If they grow upward
+        ! (a deep, upper-level jet as on Earth), the eddies should organise and
+        ! the issue is the seed/forcing, not resolution.
+        integer  :: j, k
+        real(wp) :: tzm, uzm, tmax, tmin, upk
+        write(*,"(a)") "   baroclinicity  lev   dT_merid[K]   peak|[u]|[m/s]"
+        do k = 1, nlev
+            tmax = -1.0e30_wp; tmin = 1.0e30_wp; upk = 0.0_wp
+            do j = 1, grd%nlat
+                tzm = sum(now%temp_g(:,j,k))/real(grd%nlon, wp)
+                uzm = sum(now%u(:,j,k))/real(grd%nlon, wp)
+                if (tzm > tmax) tmax = tzm
+                if (tzm < tmin) tmin = tzm
+                if (abs(uzm) > upk) upk = abs(uzm)
+            end do
+            write(*,"(a,i6,f13.2,f16.2)") "   ", k, tmax - tmin, upk
+        end do
+        return
+    end subroutine baroclinicity_diag
 
     subroutine eddy_diag()
         ! Do baroclinic eddies grow (m>0), i.e. is there anything to flux heat
