@@ -46,6 +46,7 @@ program rce_long
     logical  :: l_rad = .TRUE., l_sponge = .TRUE., l_vdiff = .FALSE.
     logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
     logical  :: l_dry_adjust = .TRUE. ! dry convective adjustment before the moist scheme
+    logical  :: l_uniform_insol = .FALSE. ! flatten insolation to its global mean (no meridional gradient)
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
     ! Model-top sponge knobs (defaults match aeros_timestep_class). Exposed to
     ! test the top thermal-wind blow-up: a stronger/deeper sponge that delays or
@@ -124,6 +125,29 @@ program rce_long
     ! and separate the vertical-advective (ventilation) part of the dynamical
     ! heating -- reported zonal-mean at the hot latitude by term_table below.
     if (l_diag) call aeros_timestep_enable_diag(ts)
+
+    ! Uniform-insolation test: flatten sw_toa and coszen to their area-weighted
+    ! global means, removing the equator-pole gradient (hence the Hadley jet and
+    ! thermal wind) while keeping the global energy input (~S0/4). If the RCE
+    ! bounds only here, the runaway is the axisymmetric meridional dynamics, not
+    ! the column physics.
+    if (l_uniform_insol) then
+        block
+            real(wp) :: sw_m, cz_m, wsum, w
+            integer  :: jj
+            sw_m = 0.0_wp; cz_m = 0.0_wp; wsum = 0.0_wp
+            do jj = 1, grd%nlat
+                w = sum(grd%area(:,jj))
+                sw_m = sw_m + ts%rad%sw_toa(jj)*w
+                cz_m = cz_m + ts%rad%coszen(jj)*w
+                wsum = wsum + w
+            end do
+            ts%rad%sw_toa(:)  = sw_m/wsum
+            ts%rad%coszen(:)  = cz_m/wsum
+            write(*,"(a,f7.2,a,f6.3)") " rce_long:: uniform insolation SWin ", &
+                sw_m/wsum, " W/m2  coszen ", cz_m/wsum
+        end block
+    end if
 
     allocate(phis2(grd%nlon, grd%nlat)); phis2 = 0.0_wp
     call aeros_timestep_set_phis(ts, phis2)
@@ -213,6 +237,7 @@ contains
         call nml_read(nmlfile, "rce", "l_surf", l_surf)
         call nml_read(nmlfile, "rce", "l_cnv", l_cnv)
         call nml_read(nmlfile, "rce", "l_dry_adjust", l_dry_adjust)
+        call nml_read(nmlfile, "rce", "l_uniform_insol", l_uniform_insol)
         call nml_read(nmlfile, "rce", "sponge_kr", sponge_kr)
         call nml_read(nmlfile, "rce", "sponge_kt", sponge_kt)
         call nml_read(nmlfile, "rce", "sponge_sigma", sponge_sigma)
