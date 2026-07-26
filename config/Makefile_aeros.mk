@@ -101,7 +101,8 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_correction.o $(objdir)/aeros_moisture.o \
 							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o \
 							$(objdir)/aeros_convection.o $(objdir)/aeros_surface.o \
-							$(objdir)/aeros_radiation.o $(objdir)/aeros_vdiff.o
+							$(objdir)/aeros_radiation.o $(objdir)/aeros_vdiff.o \
+							$(objdir)/aeros_ocean.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
@@ -152,6 +153,12 @@ $(objdir)/aeros_surface.o: $(physdir)/aeros_surface.f90 \
 # the layer pressures and heights and nothing spectral.
 $(objdir)/aeros_vdiff.o: $(physdir)/aeros_vdiff.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
+# M2.5d: the sea surface (slab ocean). Owns the SST; a column/point process,
+# needs only the grid geometry and constants.
+$(objdir)/aeros_ocean.o: $(physdir)/aeros_ocean.f90 \
+							$(objdir)/aeros_defs.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros core #################################
@@ -209,7 +216,8 @@ aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_convection.o \
                  $(objdir)/aeros_radiation.o \
                  $(objdir)/aeros_surface.o \
-                 $(objdir)/aeros_vdiff.o
+                 $(objdir)/aeros_vdiff.o \
+                 $(objdir)/aeros_ocean.o
 
 # aeros_timestep sits above the physics as well as the dynamics -- it is what
 # calls the forcing -- so it is archived after both.

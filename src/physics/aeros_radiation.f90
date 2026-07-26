@@ -169,6 +169,7 @@ module aeros_radiation
         real(wp), allocatable :: olr(:,:)        ! outgoing LW at TOA
         real(wp), allocatable :: lw_dw_sur(:,:)  ! surface downward LW
         real(wp), allocatable :: sw_dw_sur(:,:)  ! surface downward SW
+        real(wp), allocatable :: sw_net_sur(:,:) ! surface net absorbed SW
         real(wp), allocatable :: sw_up_toa(:,:)  ! reflected SW at TOA
     end type aeros_rad_class
 
@@ -206,8 +207,9 @@ contains
         allocate(rad%sw_toa(grd%nlat), rad%coszen(grd%nlat))
         allocate(rad%olr(grd%nlon, grd%nlat), rad%lw_dw_sur(grd%nlon, grd%nlat))
         allocate(rad%sw_dw_sur(grd%nlon, grd%nlat), rad%sw_up_toa(grd%nlon, grd%nlat))
+        allocate(rad%sw_net_sur(grd%nlon, grd%nlat))
         rad%olr = 0.0_wp; rad%lw_dw_sur = 0.0_wp
-        rad%sw_dw_sur = 0.0_wp; rad%sw_up_toa = 0.0_wp
+        rad%sw_dw_sur = 0.0_wp; rad%sw_up_toa = 0.0_wp; rad%sw_net_sur = 0.0_wp
 
         ! Annual-mean insolation per latitude: the daily-mean averaged over the
         ! year, with the airmass cosine zenith insolation-weighted. In seasonal
@@ -288,6 +290,7 @@ contains
         if (allocated(rad%olr))       deallocate(rad%olr)
         if (allocated(rad%lw_dw_sur)) deallocate(rad%lw_dw_sur)
         if (allocated(rad%sw_dw_sur)) deallocate(rad%sw_dw_sur)
+        if (allocated(rad%sw_net_sur)) deallocate(rad%sw_net_sur)
         if (allocated(rad%sw_up_toa)) deallocate(rad%sw_up_toa)
         rad%enabled = .FALSE.
         rad%nlon = 0; rad%nlat = 0
@@ -751,10 +754,11 @@ contains
 
                     rad%heat(i,j,:) = heat_lw + heat_sw
 
-                    rad%olr(i,j)       = olr
-                    rad%lw_dw_sur(i,j) = fdw_lw
-                    rad%sw_dw_sur(i,j) = sw_dw
-                    rad%sw_up_toa(i,j) = sw_up
+                    rad%olr(i,j)        = olr
+                    rad%lw_dw_sur(i,j)  = fdw_lw
+                    rad%sw_dw_sur(i,j)  = sw_dw
+                    rad%sw_net_sur(i,j) = sw_net
+                    rad%sw_up_toa(i,j)  = sw_up
                 end do
             end do
             !$omp end parallel do

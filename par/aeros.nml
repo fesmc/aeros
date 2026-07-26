@@ -224,8 +224,20 @@
     c_h     = 1.5e-3
     c_e     = 1.5e-3
     u_min   = 1.0
-    sst_eq  = 27.0
-    sst_lat = 60.0
+/
+
+&ocean
+    ! The sea surface temperature (src/physics/aeros_ocean.f90) the surface
+    ! fluxes and radiation run against. mode=0 prescribed (fixed APE SST, the
+    ! aquaplanet control and default), mode=1 slab (SST evolves from the net
+    ! surface energy flux). depth is the slab mixed-layer depth [m]; freeze_floor
+    ! clamps SST >= 273.15 K (no sea ice). sst_eq/sst_lat set the APE profile:
+    ! sst_eq K above freezing at the equator, frozen poleward of sst_lat degrees.
+    mode         = 0
+    depth        = 10.0
+    freeze_floor = .TRUE.
+    sst_eq       = 27.0
+    sst_lat      = 60.0
 /
 
 &radiation

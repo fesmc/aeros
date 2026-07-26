@@ -172,6 +172,9 @@ module aeros_timestep
     use aeros_vdiff,      only : aeros_vdiff_class, aeros_vdiff_init, &
                                 aeros_vdiff_load, aeros_vdiff_end, &
                                 aeros_vdiff_apply, aeros_vdiff_report
+    use aeros_ocean,      only : aeros_ocean_class, aeros_ocean_init, &
+                                aeros_ocean_load, aeros_ocean_end, &
+                                aeros_ocean_step, aeros_ocean_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
 
@@ -237,6 +240,12 @@ module aeros_timestep
         ! Uses the surface module's prescribed SST as the skin temperature. Off
         ! unless a namelist turns it on.
         type(aeros_rad_class) :: rad
+
+        ! Sea surface temperature (aeros_ocean): prescribed or a slab. Owns the
+        ! SST that the surface fluxes and radiation are evaluated against; in slab
+        ! mode it closes the surface energy balance. Always initialized (radiation
+        ! needs a skin temperature even when the surface fluxes are off).
+        type(aeros_ocean_class) :: ocn
 
         ! Boundary-layer vertical diffusion (aeros_vdiff): mixes the surface
         ! source (aeros_surface) up the column, BETWEEN the surface fluxes and
@@ -404,12 +413,14 @@ contains
             call aeros_condensation_load(ts%cnd, filename, grd)
             call aeros_convection_load(ts%cnv, filename, grd)
             call aeros_surface_load(ts%surf, filename, grd)
+            call aeros_ocean_load(ts%ocn, filename, grd)
             call aeros_radiation_load(ts%rad, filename, grd)
             call aeros_vdiff_load(ts%vd, filename, grd)
         else
             call aeros_condensation_init(ts%cnd, grd, .FALSE.)
             call aeros_convection_init(ts%cnv, grd, .FALSE.)
             call aeros_surface_init(ts%surf, grd, .FALSE.)
+            call aeros_ocean_init(ts%ocn, grd)
             call aeros_radiation_init(ts%rad, grd, .FALSE.)
             call aeros_vdiff_init(ts%vd, grd, .FALSE.)
         end if
@@ -475,6 +486,7 @@ contains
         call aeros_condensation_end(ts%cnd)
         call aeros_convection_end(ts%cnv)
         call aeros_surface_end(ts%surf)
+        call aeros_ocean_end(ts%ocn)
         call aeros_radiation_end(ts%rad)
         call aeros_vdiff_end(ts%vd)
 
@@ -553,7 +565,7 @@ contains
         ! boundary-layer source that vertical diffusion then mixes up the column.
         ! Off unless enabled.
         if (ts%surf%enabled) &
-            call aeros_surface_apply(ts%surf, vg, ts%wrk%t_g, now%qv_g, &
+            call aeros_surface_apply(ts%surf, vg, ts%ocn%sst, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
                                         ts%wrk%dt_phys, ts%dt)
 
@@ -578,13 +590,22 @@ contains
         ! Radiation, at the same grid seam: clear-sky LW+SW heating, recomputed
         ! on a multi-hour cadence and cached, accumulated into wrk%dt_phys as a
         ! forward increment (NOT the centered path -- its top-of-atmosphere
-        ! cooling is sharp and stiff). Uses the surface module's prescribed SST
-        ! as the skin temperature (allocated even when the surface fluxes are
-        ! off). Off unless enabled.
+        ! cooling is sharp and stiff). Uses the ocean's SST as the skin
+        ! temperature (always allocated, even when the surface fluxes are off).
+        ! Off unless enabled.
         if (ts%rad%enabled) &
             call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
-                                        ts%wrk%lnps_g, ts%surf%t_s, ts%nstep, &
+                                        ts%wrk%lnps_g, ts%ocn%sst, ts%nstep, &
                                         ts%dt, ts%wrk%dt_phys)
+
+        ! Slab ocean: step the SST from the net surface energy flux just computed
+        ! (surface turbulent fluxes + surface radiative fluxes against this SST).
+        ! A no-op in prescribed mode, so the aquaplanet control is unchanged. This
+        ! is what makes the surface flux self-limiting -- the fix for the local
+        ! subtropical runaway a fixed SST cannot bound (aeros_ocean header).
+        ! A no-op in prescribed mode (guarded inside).
+        call aeros_ocean_step(ts%ocn, ts%rad%sw_net_sur, ts%rad%lw_dw_sur, &
+                                ts%surf%shf, ts%surf%lhf, ts%dt)
 
         call aeros_tendency_spectral(pool, vg, ts%wrk, ts%tnd)
 
@@ -1073,6 +1094,7 @@ contains
         call aeros_convection_report(ts%cnv, iou)
         call aeros_condensation_report(ts%cnd, iou)
         call aeros_surface_report(ts%surf, iou)
+        call aeros_ocean_report(ts%ocn, iou)
         call aeros_radiation_report(ts%rad, iou)
         call aeros_vdiff_report(ts%vd, iou)
 

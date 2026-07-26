@@ -30,6 +30,7 @@ program rce_long
     use aeros_vertical
     use aeros_condensation, only : aeros_qsat
     use aeros_timestep
+    use aeros_ocean,    only : aeros_ocean_init
     use nml,            only : nml_read
 
     implicit none
@@ -47,6 +48,8 @@ program rce_long
     real(wp) :: seed_asym = 0.0_wp    ! zonal-asymmetry seed amplitude [K-ish]
     real(wp) :: albedo = 0.06_wp      ! surface broadband albedo (cloud proxy knob)
     real(wp) :: co2_ppm = 280.0_wp
+    integer  :: ocean_mode = 0       ! 0 prescribed SST, 1 slab
+    real(wp) :: ocean_depth = 10.0_wp
 
     type(aeros_sht_pool_class), target :: pool
     type(aeros_grid_class)     :: grd
@@ -102,6 +105,9 @@ program rce_long
     ts%vd%sigma     = vdiff_sigma
     ts%rad%albedo   = albedo
     ts%rad%co2_ppm  = co2_ppm
+    ts%ocn%mode     = ocean_mode
+    ts%ocn%depth    = ocean_depth
+    call aeros_ocean_init(ts%ocn, grd)   ! recompute C for the chosen depth/mode
 
     allocate(phis2(grd%nlon, grd%nlat)); phis2 = 0.0_wp
     call aeros_timestep_set_phis(ts, phis2)
@@ -199,6 +205,8 @@ contains
         call nml_read(nmlfile, "rce", "seed_asym", seed_asym)
         call nml_read(nmlfile, "rce", "albedo", albedo)
         call nml_read(nmlfile, "rce", "co2_ppm", co2_ppm)
+        call nml_read(nmlfile, "rce", "ocean_mode", ocean_mode)
+        call nml_read(nmlfile, "rce", "ocean_depth", ocean_depth)
         return
     end subroutine read_config
 
