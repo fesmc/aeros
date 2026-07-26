@@ -235,6 +235,11 @@ rce-long : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    rce_long.x is ready."
 
+probe-lw : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/probe_lw.x $(drvdir)/probe_lw.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    probe_lw.x is ready."
+
 all : drivers tests
 
 .PHONY : usage
