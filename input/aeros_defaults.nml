@@ -224,6 +224,9 @@
     c_h     = 1.5e-3
     c_e     = 1.5e-3
     u_min   = 1.0
+    ! Momentum drag coefficient. Bulk stress tau = rho c_d |u| u, imposed
+    ! implicitly as the momentum bottom BC in vdiff. 0 = no surface drag.
+    c_d     = 0.0
 /
 
 &ocean

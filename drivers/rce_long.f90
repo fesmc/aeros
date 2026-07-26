@@ -42,6 +42,7 @@ program rce_long
     real(wp) :: dt = 1800.0_wp, tau_diff = 6.0_wp
     real(wp) :: eps_filter = 0.06_wp, raw_alpha = 0.53_wp
     real(wp) :: conv_tau = 7200.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp, u_min = 1.0_wp
+    real(wp) :: c_d = 1.5e-3_wp       ! surface momentum drag (0 = off; brakes the low-level jet)
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
     logical  :: l_rad = .TRUE., l_sponge = .TRUE., l_vdiff = .FALSE.
     logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
@@ -115,6 +116,7 @@ program rce_long
     ts%cnv%dry_adjust = l_dry_adjust
     ts%surf%enabled = l_surf
     ts%surf%c_h = c_h; ts%surf%c_e = c_e; ts%surf%u_min = u_min
+    ts%surf%c_d = c_d
     ts%rad%enabled  = l_rad
     ts%sponge_on    = l_sponge
     call aeros_timestep_set_sponge(ts, vg, sponge_kr, sponge_kt, sponge_sigma)
@@ -244,6 +246,7 @@ contains
         call nml_read(nmlfile, "rce", "conv_tau", conv_tau)
         call nml_read(nmlfile, "rce", "c_h", c_h)
         call nml_read(nmlfile, "rce", "c_e", c_e)
+        call nml_read(nmlfile, "rce", "c_d", c_d)
         call nml_read(nmlfile, "rce", "u_min", u_min)
         call nml_read(nmlfile, "rce", "print_every", print_every)
         call nml_read(nmlfile, "rce", "l_surf", l_surf)

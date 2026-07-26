@@ -845,7 +845,8 @@ contains
         ! temperature and difference below. [K/step], like the forward-split terms.
         if (ts%wrk%diag) ts%wrk%dt_vdiff = t3
 
-        call aeros_vdiff_apply(ts%vd, vg, t3, now%qv_g, u3, v3, lnps2, ts%dt)
+        call aeros_vdiff_apply(ts%vd, vg, t3, now%qv_g, u3, v3, lnps2, ts%dt, &
+                                ts%surf%c_d, ts%surf%u_min)
 
         if (ts%wrk%diag) ts%wrk%dt_vdiff = t3 - ts%wrk%dt_vdiff
 

@@ -55,6 +55,14 @@ module aeros_surface
         real(wp) :: c_h   = 1.5e-3_wp      ! sensible-heat exchange coefficient
         real(wp) :: c_e   = 1.5e-3_wp      ! moisture exchange coefficient
         real(wp) :: u_min = 1.0_wp         ! wind floor / gustiness [m s-1]
+        ! Surface momentum drag coefficient. The bulk stress tau = rho C_d |u| u
+        ! is the boundary-layer momentum sink; without it a surface-trapped jet
+        ! (the RCE's low-level jet) spins up unbraked. Applied IMPLICITLY as the
+        ! momentum bottom boundary condition of the vertical diffusion (forward-
+        ! splitting momentum on the leapfrog is unstable), so the coefficient is
+        ! carried here but the stress is imposed in aeros_vdiff. Zero = no drag
+        ! (bit-unchanged default); ~1.5e-3 to enable, like c_h/c_e.
+        real(wp) :: c_d   = 0.0_wp         ! momentum drag coefficient
 
         ! The sea surface temperature the fluxes are evaluated against is owned by
         ! aeros_ocean and passed to aeros_surface_apply -- prescribed or a slab.
@@ -106,17 +114,18 @@ contains
         type(aeros_grid_class), intent(in)    :: grd
 
         logical  :: enabled
-        real(wp) :: c_h, c_e, u_min
+        real(wp) :: c_h, c_e, u_min, c_d
 
         enabled = surf%enabled
-        c_h = surf%c_h; c_e = surf%c_e; u_min = surf%u_min
+        c_h = surf%c_h; c_e = surf%c_e; u_min = surf%u_min; c_d = surf%c_d
 
         call nml_read(filename, "surface", "enabled", enabled, defaults_file=defaults_file)
         call nml_read(filename, "surface", "c_h",     c_h, defaults_file=defaults_file)
         call nml_read(filename, "surface", "c_e",     c_e, defaults_file=defaults_file)
         call nml_read(filename, "surface", "u_min",   u_min, defaults_file=defaults_file)
+        call nml_read(filename, "surface", "c_d",     c_d, defaults_file=defaults_file)
 
-        surf%c_h = c_h; surf%c_e = c_e; surf%u_min = u_min
+        surf%c_h = c_h; surf%c_e = c_e; surf%u_min = u_min; surf%c_d = c_d
 
         call aeros_surface_init(surf, grd, enabled)
 

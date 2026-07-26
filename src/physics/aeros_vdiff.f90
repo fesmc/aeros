@@ -131,7 +131,7 @@ contains
         return
     end subroutine aeros_vdiff_end
 
-    subroutine aeros_vdiff_apply(vd, vg, t, qv, u, v, lnps_g, dt)
+    subroutine aeros_vdiff_apply(vd, vg, t, qv, u, v, lnps_g, dt, cd_surf, u_min)
         ! One implicit vertical-diffusion sweep over every column, diffusing
         ! temperature, humidity and both wind components IN PLACE.
         !
@@ -154,13 +154,16 @@ contains
         real(wp), intent(inout) :: v(:,:,:)
         real(wp), intent(in)    :: lnps_g(:,:)    ! (nlon,nlat) ln[Pa]
         real(wp), intent(in)    :: dt             ! [s]
+        real(wp), intent(in)    :: cd_surf        ! surface drag coeff (0 = off)
+        real(wp), intent(in)    :: u_min          ! wind floor for the drag [m/s]
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: phi_full(vg%nlev), phi_half(0:vg%nlev), zf(vg%nlev)
         real(wp) :: cface(vg%nlev)              ! C_{k+1/2}, k=1..nlev-1
         real(wp) :: sub(vg%nlev), dia(vg%nlev), sup(vg%nlev)
-        real(wp) :: col(vg%nlev), out(vg%nlev)
+        real(wp) :: diam(vg%nlev), col(vg%nlev), out(vg%nlev)
         real(wp) :: ps, rmk, rhof, thalf, dz, ramp, kface
+        real(wp) :: rho_s, wind, drag
         integer  :: i, j, k, nlev
 
         if (.not. vd%enabled) return
@@ -169,7 +172,8 @@ contains
 
         !$omp parallel do collapse(2) schedule(static) &
         !$omp   private(i,j,k,phalf,pfull,dpc,phi_full,phi_half,zf,cface, &
-        !$omp           sub,dia,sup,col,out,ps,rmk,rhof,thalf,dz,ramp,kface)
+        !$omp           sub,dia,sup,diam,col,out,ps,rmk,rhof,thalf,dz,ramp,kface, &
+        !$omp           rho_s,wind,drag)
         do j = 1, vd%nlat
             do i = 1, vd%nlon
                 ps = exp(lnps_g(i,j))
@@ -214,13 +218,28 @@ contains
                     dia(k) = 1.0_wp - sub(k) - sup(k)
                 end do
 
+                ! Heat and moisture: zero-flux surface, the shared matrix.
                 col = t(i,j,:);  call tridiag(sub, dia, sup, col, out, nlev)
                 t(i,j,:)  = out
                 col = qv(i,j,:); call tridiag(sub, dia, sup, col, out, nlev)
                 qv(i,j,:) = out          ! positivity-preserving for this M-matrix
-                col = u(i,j,:);  call tridiag(sub, dia, sup, col, out, nlev)
+
+                ! Momentum: same matrix, but the surface is NOT zero-flux -- a
+                ! bulk stress tau = rho c_d |u| u drains the lowest layer. As an
+                ! implicit (backward-Euler) sink, tau = rho c_d |u^n| u^{n+1}, it
+                ! adds rmk_surf rho_s c_d |u^n| to the k=nlev diagonal (|u| lagged,
+                ! isotropic so u and v share it). Unconditionally stable, and it is
+                ! the momentum boundary flux the heat/moisture fluxes already have.
+                diam = dia
+                if (cd_surf > 0.0_wp) then
+                    wind  = max(u_min, sqrt(u(i,j,nlev)**2 + v(i,j,nlev)**2))
+                    rho_s = phalf(nlev)/(R_d*t(i,j,nlev))
+                    drag  = (dt*grav/dpc(nlev))*rho_s*cd_surf*wind
+                    diam(nlev) = dia(nlev) + drag
+                end if
+                col = u(i,j,:);  call tridiag(sub, diam, sup, col, out, nlev)
                 u(i,j,:)  = out
-                col = v(i,j,:);  call tridiag(sub, dia, sup, col, out, nlev)
+                col = v(i,j,:);  call tridiag(sub, diam, sup, col, out, nlev)
                 v(i,j,:)  = out
             end do
         end do
