@@ -119,12 +119,13 @@ contains
         return
     end subroutine aeros_ocean_init
 
-    subroutine aeros_ocean_load(ocn, filename, grd)
+    subroutine aeros_ocean_load(ocn, filename, grd, defaults_file)
         ! Read the `ocean` namelist group, then init.
 
         implicit none
         type(aeros_ocean_class), intent(inout) :: ocn
         character(len=*),        intent(in)    :: filename
+        character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class),  intent(in)    :: grd
 
         integer  :: mode
@@ -134,11 +135,11 @@ contains
         mode = ocn%mode; depth = ocn%depth; freeze_floor = ocn%freeze_floor
         sst_eq = ocn%sst_eq; sst_lat = ocn%sst_lat
 
-        call nml_read(filename, "ocean", "mode",         mode)
-        call nml_read(filename, "ocean", "depth",        depth)
-        call nml_read(filename, "ocean", "freeze_floor", freeze_floor)
-        call nml_read(filename, "ocean", "sst_eq",       sst_eq)
-        call nml_read(filename, "ocean", "sst_lat",      sst_lat)
+        call nml_read(filename, "ocean", "mode",         mode, defaults_file=defaults_file)
+        call nml_read(filename, "ocean", "depth",        depth, defaults_file=defaults_file)
+        call nml_read(filename, "ocean", "freeze_floor", freeze_floor, defaults_file=defaults_file)
+        call nml_read(filename, "ocean", "sst_eq",       sst_eq, defaults_file=defaults_file)
+        call nml_read(filename, "ocean", "sst_lat",      sst_lat, defaults_file=defaults_file)
 
         ocn%mode = mode; ocn%depth = depth; ocn%freeze_floor = freeze_floor
         ocn%sst_eq = sst_eq; ocn%sst_lat = sst_lat

@@ -96,12 +96,13 @@ contains
         return
     end subroutine aeros_surface_init
 
-    subroutine aeros_surface_load(surf, filename, grd)
+    subroutine aeros_surface_load(surf, filename, grd, defaults_file)
         ! Configure from the `surface` namelist group, then init.
 
         implicit none
         type(aeros_surf_class), intent(inout) :: surf
         character(len=*),       intent(in)    :: filename
+        character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class), intent(in)    :: grd
 
         logical  :: enabled
@@ -110,10 +111,10 @@ contains
         enabled = surf%enabled
         c_h = surf%c_h; c_e = surf%c_e; u_min = surf%u_min
 
-        call nml_read(filename, "surface", "enabled", enabled)
-        call nml_read(filename, "surface", "c_h",     c_h)
-        call nml_read(filename, "surface", "c_e",     c_e)
-        call nml_read(filename, "surface", "u_min",   u_min)
+        call nml_read(filename, "surface", "enabled", enabled, defaults_file=defaults_file)
+        call nml_read(filename, "surface", "c_h",     c_h, defaults_file=defaults_file)
+        call nml_read(filename, "surface", "c_e",     c_e, defaults_file=defaults_file)
+        call nml_read(filename, "surface", "u_min",   u_min, defaults_file=defaults_file)
 
         surf%c_h = c_h; surf%c_e = c_e; surf%u_min = u_min
 

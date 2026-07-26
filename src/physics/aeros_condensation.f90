@@ -123,13 +123,14 @@ contains
 
     end subroutine aeros_condensation_init
 
-    subroutine aeros_condensation_load(cnd, filename, grd)
+    subroutine aeros_condensation_load(cnd, filename, grd, defaults_file)
         ! Configure from the `aeros_moisture` namelist group.
 
         implicit none
 
         type(aeros_cond_class), intent(inout) :: cnd
         character(len=*),       intent(in)    :: filename
+        character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class), intent(in)    :: grd
 
         logical  :: moist
@@ -137,8 +138,8 @@ contains
 
         moist   = .FALSE.
         rh_crit = 1.0_wp
-        call nml_read(filename, "aeros_moisture", "moist",   moist)
-        call nml_read(filename, "aeros_moisture", "rh_crit", rh_crit)
+        call nml_read(filename, "aeros_moisture", "moist",   moist, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "rh_crit", rh_crit, defaults_file=defaults_file)
 
         call aeros_condensation_init(cnd, grd, moist)
 

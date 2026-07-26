@@ -71,8 +71,13 @@ module aeros
 
 contains
 
-    subroutine aeros_init(ams, filename, group, time_init)
+    subroutine aeros_init(ams, filename, group, time_init, defaults_file)
         ! Configure the transform pool, the grids, the state and the integrator.
+        !
+        ! `defaults_file`, when given, is a namelist holding the full parameter
+        ! schema: every read takes its value from there and `filename` need only
+        ! carry the overrides for this case (see nml_read's defaults_file). Absent,
+        ! the legacy behaviour holds and `filename` must be complete.
 
         implicit none
 
@@ -80,8 +85,9 @@ contains
         character(len=*),  intent(in)    :: filename
         character(len=*),  intent(in), optional :: group
         real(wp),          intent(in), optional :: time_init
+        character(len=*),  intent(in), optional :: defaults_file
 
-        call aeros_par_load(ams%par, filename, group)
+        call aeros_par_load(ams%par, filename, group, defaults_file=defaults_file)
 
         ! One SHTns config per thread; see aeros_sht_pool_class for why aeros
         ! threads the level loop rather than letting SHTns thread a transform.
@@ -94,11 +100,12 @@ contains
 
         call aeros_grid_init(ams%grd, ams%pool%sht(1))
 
-        call aeros_vgrid_load(ams%vgrid, ams%par%nlev, filename)
+        call aeros_vgrid_load(ams%vgrid, ams%par%nlev, filename, defaults_file=defaults_file)
 
         call aeros_state_alloc(ams%now, ams%grd, ams%pool%sht(1)%nlm, ams%par%nlev)
 
-        call aeros_timestep_init(ams%ts, ams%par, ams%pool, ams%grd, ams%vgrid, filename)
+        call aeros_timestep_init(ams%ts, ams%par, ams%pool, ams%grd, ams%vgrid, filename, &
+                                    defaults_file=defaults_file)
 
         ! Initial condition. A resting isothermal atmosphere over a flat
         ! surface -- the only state the dry core can be started from at M1

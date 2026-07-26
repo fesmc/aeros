@@ -153,7 +153,7 @@ contains
 
     end subroutine aeros_convection_init
 
-    subroutine aeros_convection_load(cnv, filename, grd)
+    subroutine aeros_convection_load(cnv, filename, grd, defaults_file)
         ! Configure from the `aeros_moisture` namelist group. `convect` turns it
         ! on; `conv_scheme` selects ("sbm" or "manabe"); `conv_tau` and
         ! `conv_rhref` are the Simplified Betts-Miller knobs. An unknown scheme
@@ -164,6 +164,7 @@ contains
 
         type(aeros_conv_class), intent(inout) :: cnv
         character(len=*),       intent(in)    :: filename
+        character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class), intent(in)    :: grd
 
         logical            :: convect
@@ -174,10 +175,10 @@ contains
         conv_scheme = "sbm"
         conv_tau    = 7200.0_wp
         conv_rhref  = 0.7_wp
-        call nml_read(filename, "aeros_moisture", "convect",     convect)
-        call nml_read(filename, "aeros_moisture", "conv_scheme", conv_scheme)
-        call nml_read(filename, "aeros_moisture", "conv_tau",    conv_tau)
-        call nml_read(filename, "aeros_moisture", "conv_rhref",  conv_rhref)
+        call nml_read(filename, "aeros_moisture", "convect",     convect, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "conv_scheme", conv_scheme, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "conv_tau",    conv_tau, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "conv_rhref",  conv_rhref, defaults_file=defaults_file)
 
         call aeros_convection_init(cnv, grd, convect)
 

@@ -76,8 +76,19 @@ program held_suarez
     end if
 
     ! === Initialize ==========================================================
-
-    call aeros_init(ams, path_par, group="aeros", time_init=0.0_wp)
+    ! The shared parameter schema fills anything the case file omits; the "hs"
+    ! group above is driver-specific and stays wholly in the case file.
+    block
+        character(len=*), parameter :: defaults_file = "input/aeros_defaults.nml"
+        logical :: have_defaults
+        inquire(file=defaults_file, exist=have_defaults)
+        if (.not. have_defaults) then
+            write(io_unit_err,*) "held_suarez:: error: defaults file not found: ", defaults_file
+            stop 1
+        end if
+        call aeros_init(ams, path_par, group="aeros", time_init=0.0_wp, &
+                        defaults_file=defaults_file)
+    end block
 
     if (.not. ams%par%held_suarez) then
         write(io_unit_err,*) "held_suarez:: error: `held_suarez` is .FALSE. in the `aeros` "// &

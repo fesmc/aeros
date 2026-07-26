@@ -234,12 +234,13 @@ contains
         return
     end subroutine aeros_radiation_init
 
-    subroutine aeros_radiation_load(rad, filename, grd)
+    subroutine aeros_radiation_load(rad, filename, grd, defaults_file)
         ! Read the `radiation` namelist group, then finish init.
 
         implicit none
         type(aeros_rad_class),   intent(inout) :: rad
         character(len=*),        intent(in)    :: filename
+        character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class),  intent(in)    :: grd
 
         logical  :: enabled, seasonal
@@ -257,15 +258,15 @@ contains
         interval = rad%interval
         doy0     = rad%doy0
 
-        call nml_read(filename, "radiation", "enabled",  enabled)
-        call nml_read(filename, "radiation", "scheme",   scheme)
-        call nml_read(filename, "radiation", "co2_ppm",  co2_ppm)
-        call nml_read(filename, "radiation", "l_o3",     l_o3)
-        call nml_read(filename, "radiation", "albedo",   albedo)
-        call nml_read(filename, "radiation", "tsi",      tsi)
-        call nml_read(filename, "radiation", "seasonal", seasonal)
-        call nml_read(filename, "radiation", "interval", interval)
-        call nml_read(filename, "radiation", "doy0",     doy0)
+        call nml_read(filename, "radiation", "enabled",  enabled, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "scheme",   scheme, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "co2_ppm",  co2_ppm, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "l_o3",     l_o3, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "albedo",   albedo, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "tsi",      tsi, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "seasonal", seasonal, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "interval", interval, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "doy0",     doy0, defaults_file=defaults_file)
 
         rad%scheme   = scheme
         rad%co2_ppm  = co2_ppm

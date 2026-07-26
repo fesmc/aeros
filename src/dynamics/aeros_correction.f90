@@ -166,7 +166,7 @@ contains
 
     end subroutine aeros_correction_init
 
-    subroutine aeros_correction_load(cor, filename, sht, nlev)
+    subroutine aeros_correction_load(cor, filename, sht, nlev, defaults_file)
         ! Configure from the `aeros_correction` namelist group.
         !
         ! The namelist decides which terms exist, what they act on and at what
@@ -179,6 +179,7 @@ contains
 
         type(aeros_correction_class), intent(inout) :: cor
         character(len=*),             intent(in)    :: filename
+        character(len=*), intent(in), optional :: defaults_file
         type(aeros_sht_class),        intent(in)    :: sht
         integer,                      intent(in)    :: nlev
 
@@ -190,15 +191,15 @@ contains
 
         call aeros_correction_init(cor, sht, nlev)
 
-        call nml_read(filename, "aeros_correction", "correction",   cor%enabled)
-        call nml_read(filename, "aeros_correction", "nterm",        nterm)
-        call nml_read(filename, "aeros_correction", "term_name",    names)
-        call nml_read(filename, "aeros_correction", "term_enabled", enab)
-        call nml_read(filename, "aeros_correction", "term_on_vor",  ovor)
-        call nml_read(filename, "aeros_correction", "term_on_div",  odiv)
-        call nml_read(filename, "aeros_correction", "term_on_temp", otemp)
-        call nml_read(filename, "aeros_correction", "term_on_lnps", olnps)
-        call nml_read(filename, "aeros_correction", "term_lcut",    lcut)
+        call nml_read(filename, "aeros_correction", "correction",   cor%enabled, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_correction", "nterm",        nterm, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_correction", "term_name",    names, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_correction", "term_enabled", enab, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_correction", "term_on_vor",  ovor, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_correction", "term_on_div",  odiv, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_correction", "term_on_temp", otemp, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_correction", "term_on_lnps", olnps, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_correction", "term_lcut",    lcut, defaults_file=defaults_file)
 
         if (nterm < 0 .or. nterm > NTERM_MAX) then
             write(io_unit_err,*) "aeros_correction_load:: error: nterm must be in [0,", &

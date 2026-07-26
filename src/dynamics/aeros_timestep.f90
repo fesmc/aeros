@@ -324,7 +324,7 @@ module aeros_timestep
 
 contains
 
-    subroutine aeros_timestep_init(ts, par, pool, grd, vg, filename)
+    subroutine aeros_timestep_init(ts, par, pool, grd, vg, filename, defaults_file)
         ! Allocate the time levels and the scratch, and build the solve.
         !
         ! `filename` is optional and only the correction layer needs it: its
@@ -342,6 +342,7 @@ contains
         type(aeros_grid_class),     intent(in)    :: grd
         type(aeros_vgrid_class),    intent(in)    :: vg
         character(len=*), intent(in), optional    :: filename
+        character(len=*), intent(in), optional    :: defaults_file
 
         integer  :: nlm, lmax, l, k
         real(wp) :: lref, ramp
@@ -402,7 +403,8 @@ contains
         call aeros_hs_init(ts%hs, grd, par%held_suarez)
 
         if (present(filename)) then
-            call aeros_correction_load(ts%cor, filename, pool%sht(1), vg%nlev)
+            call aeros_correction_load(ts%cor, filename, pool%sht(1), vg%nlev, &
+                                        defaults_file=defaults_file)
         else
             call aeros_correction_init(ts%cor, pool%sht(1), vg%nlev)
         end if
@@ -410,12 +412,12 @@ contains
         call aeros_moisture_init(ts%mst, grd, vg%nlev)
 
         if (present(filename)) then
-            call aeros_condensation_load(ts%cnd, filename, grd)
-            call aeros_convection_load(ts%cnv, filename, grd)
-            call aeros_surface_load(ts%surf, filename, grd)
-            call aeros_ocean_load(ts%ocn, filename, grd)
-            call aeros_radiation_load(ts%rad, filename, grd)
-            call aeros_vdiff_load(ts%vd, filename, grd)
+            call aeros_condensation_load(ts%cnd, filename, grd, defaults_file=defaults_file)
+            call aeros_convection_load(ts%cnv, filename, grd, defaults_file=defaults_file)
+            call aeros_surface_load(ts%surf, filename, grd, defaults_file=defaults_file)
+            call aeros_ocean_load(ts%ocn, filename, grd, defaults_file=defaults_file)
+            call aeros_radiation_load(ts%rad, filename, grd, defaults_file=defaults_file)
+            call aeros_vdiff_load(ts%vd, filename, grd, defaults_file=defaults_file)
         else
             call aeros_condensation_init(ts%cnd, grd, .FALSE.)
             call aeros_convection_init(ts%cnv, grd, .FALSE.)

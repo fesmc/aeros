@@ -1,0 +1,269 @@
+&ctrl
+    ! Times in YEARS. aeros_update converts to the dynamics timestep itself and
+    ! derives the step count from the absolute elapsed time, so an output
+    ! interval that is not a whole number of steps is fine and does not drift.
+    !
+    ! 0.1 yr at dt = 1800 s is ~1750 steps -- a smoke test rather than a
+    ! simulation. There is no forcing until M1.5, so a run from the shipped
+    ! initial condition (a resting isothermal atmosphere) should stay exactly
+    ! where it started; that IS the check this default performs.
+    time_init  = 0.0
+    time_end   = 0.1
+    dt_out     = 0.02
+    file_out   = "aeros.nc"
+/
+
+&aeros
+    ! Triangular truncation T.
+    !   T21 ->  64x32   (ruled out for production: fails both NH ice sheets)
+    !   T31 ->  96x48
+    !   T42 -> 128x64
+    !   T85 -> 256x128  (the reference truncation for the section 3.7 correction)
+    !
+    ! DEVELOPMENT DEFAULT: T31, for speed. This is NOT the production choice.
+    !
+    ! docs/design.md section 10.3 frames T31-plus-correction vs bare T42 as the
+    ! central open question and expects the cost measurement to settle it. M0a
+    ! has now removed the COST half of that argument -- T42 measures at ~14% of
+    ! the coupled budget, not 82% (docs/m0a_results.md section 2) -- so T42 is
+    ! affordable. What remains is the accuracy half, which no benchmark can
+    ! answer: whether T42 alone builds the Eurasian ice sheet.
+    !
+    ! Decision (AR, 2026-07-24): stay at T31 for day-to-day work, test at T42
+    ! periodically, and settle the production truncation with the full model
+    ! rather than with the dynamical core. Nothing in the code may assume a
+    ! value; changing this line is the only thing required to switch.
+    trunc    = 31
+
+    ! Gaussian grid. -1 selects the smallest quadratically-unaliased grid for
+    ! `trunc`, which is what production should use. Set explicitly only to
+    ! study aliasing or to match another model's grid.
+    nlon     = -1
+    nlat     = -1
+
+    ! Vertical levels. docs/design.md section 4.1: L16-20, with 3-4 levels
+    ! below 850 hPa. Fix this before tuning anything -- level count moves the
+    ! jet latitude, and therefore the storm track, and therefore ice-sheet
+    ! precipitation.
+    nlev     = 16
+
+    ! Dynamics timestep [s]. ~30 min at T42 (section 4).
+    !
+    ! The semi-implicit solve is what makes this affordable: the explicit
+    ! gravity-wave limit is ~600 s at T31L20 and ~450 s at T42, both printed at
+    ! run start by aeros_semiimp_print. Raising dt above ~2x the ADVECTIVE CFL
+    ! is not protected by the semi-implicit scheme -- it only handles the
+    ! gravity waves.
+    dt       = 1800.0
+
+    ! Semi-implicit leapfrog (.TRUE.) or fully explicit leapfrog (.FALSE.).
+    ! Explicit is not a production configuration; it exists so the value of the
+    ! semi-implicit solve is measured rather than asserted. With it, dt must
+    ! fall below the explicit limit above or the run diverges within ~20 steps.
+    semi_implicit = .TRUE.
+
+    ! Time filter. Williams (2009) RAW: nu is the classical Robert-Asselin
+    ! coefficient and alpha splits the displacement between the two time
+    ! levels. alpha = 1.0 recovers the classical filter exactly, which is the
+    ! comparison to run if the filter is ever suspected.
+    !
+    ! nu = 0.06 is mid-range for a spectral model of this size; alpha = 0.53 is
+    ! Williams' recommended value, and buys third-order amplitude accuracy and
+    ! exact conservation of the mean -- which is what matters over 10^5 yr,
+    ! where the classical filter's mean damping is a slow drift rather than a
+    ! transient.
+    eps_filter = 0.06
+    raw_alpha  = 0.53
+
+    ! Horizontal hyperdiffusion, applied implicitly to vorticity, divergence
+    ! and temperature (never to ln p_s -- that would leak mass).
+    !
+    ! ndiff is the order: 6 = del^6, the usual choice for a T31-T85 spectral
+    ! core. Lower orders damp the resolved scales too broadly; higher ones make
+    ! the operator so scale-selective that the last wavenumber is the only one
+    ! affected at all.
+    !
+    ! tau_diff [h] is the e-folding time of the l = lmax wave. 6 h is a
+    ! conventional starting value; it is a TUNING parameter, and the right
+    ! value depends on truncation and on how vigorous the flow is. Retune it
+    ! when the truncation changes, and check it against the enstrophy spectrum
+    ! rather than against the look of a single field.
+    ndiff    = 6
+    tau_diff = 6.0
+
+    ! Held & Suarez (1994) idealized forcing -- the M1 validation benchmark
+    ! (docs/design.md section 7). .FALSE. leaves the bare adiabatic core, which
+    ! is what the conservation tests want and what this namelist's default
+    ! resting initial condition should sit still in.
+    !
+    ! Run the benchmark with par/held_suarez.nml rather than by flipping this:
+    ! the benchmark needs its own vertical grid (20 evenly spaced sigma levels)
+    ! and its own run length, and those live together in one file so a
+    ! Held-Suarez result cannot be produced from a half-converted namelist.
+    held_suarez = .FALSE.
+
+    ! Global mass fixer: rescale p_s at the end of every step so the global
+    ! mass returns to its initial value (src/dynamics/aeros_timestep.f90).
+    !
+    ! OFF here, deliberately. This namelist is the bare core, and the adiabatic
+    ! conservation tests must measure the integrator rather than the fixer --
+    ! they hold mass at 2e-16 without it. The drift the fixer exists to remove
+    ! is a property of the eddying forced state (docs/m1_results.md 5.3), so
+    ! par/held_suarez.nml is where it is switched on.
+    mass_fixer = .FALSE.
+
+    ! OpenMP threads, i.e. the size of the SHTns config pool. -1 leaves it to
+    ! OMP_NUM_THREADS. The M0a scaling sweep still has to be run at 16/32/64 on
+    ! the HPC -- see docs/m0a_results.md section 4 caveat 4.
+    nthreads = -1
+/
+
+&aeros_vert
+    ! Vertical coordinate: hybrid sigma-pressure (Simmons & Burridge 1981),
+    !     p_(k+1/2) = A_(k+1/2) + B_(k+1/2) * p_s
+    ! generated from a stretched sigma profile. See src/dynamics/aeros_vertical.f90.
+
+    ! Level placement. Spacing is proportional to stretch_a at the surface and
+    ! to stretch_a + stretch_r*(1-stretch_a) at the top, so SMALLER stretch_a
+    ! means finer resolution near the ground.
+    !
+    ! 0.4 / 2.0 gives 4 full levels below 850 hPa at L16 and 5 at L20 --
+    ! docs/design.md section 4.1 asks for 3-4, because the polar winter
+    ! boundary layer is 50-200 m deep with 10-25 K inversions -- while keeping
+    ! 3 levels above 200 hPa. Section 4.1 also warns that level count moves the jet latitude
+    ! and hence the storm track, so do not starve the upper troposphere to feed
+    ! the boundary layer.
+    !
+    ! stretch_a = 1.0 gives EVENLY SPACED sigma, the Held-Suarez configuration.
+    stretch_a = 0.4
+    stretch_r = 2.0
+
+    ! Hybrid transition: B = 0 (pure pressure) above this sigma, ramping to 1
+    ! at the surface. 0.0 gives pure sigma exactly, with A = 0 everywhere.
+    sigma_t   = 0.2
+
+    ! Model top [Pa]. Low-top is accepted (docs/design.md section 4.1: give up
+    ! on the QBO); must be > 0 for a hybrid coordinate.
+    p_top     = 1000.0
+
+    ! Reference state for the semi-implicit solve (M1.4). Isothermal, and
+    ! deliberately warm: the scheme is stable when the reference temperature is
+    ! at or above the column temperature and unstable well below it, so the
+    ! error is one-sided.
+    ps_ref    = 1.0e5
+    t_ref     = 300.0
+/
+
+&aeros_correction
+    ! The additive tendency correction (docs/design.md 3.7 and 3.8), applied
+    ! spectrally on the assembled tendency -- see src/dynamics/aeros_correction.f90
+    ! for why there rather than at the grid seam with the physics.
+    !
+    ! MASTER SWITCH. .FALSE. is section 3.8 mitigation 3's `DeltaF = 0` twin
+    ! and reproduces the uncorrected model bit for bit. Every production run
+    ! should have one; if conclusions differ qualitatively between the twin and
+    ! the corrected run, say so.
+    correction = .FALSE.
+
+    ! How many of the arrays below are read.
+    nterm = 1
+
+    ! One term per column. At M2 the only term is a no-op: registered, wired
+    ! in, exercised by tests/test_correction.f90, and identically zero. There
+    ! is nothing to put in it until M2b diagnoses a real DeltaF from a T85/T31
+    ! pair under identical boundary conditions.
+    term_name    = "noop", "", "", "", "", "", "", ""
+    term_enabled = .TRUE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE.
+
+    ! Which prognostic fields each term acts on. Section 3.7 is explicit that
+    ! a blanket correction on everything "is far more likely to destabilise and
+    ! much harder to diagnose", and mwm/B_multires found exactly that.
+    term_on_vor  = .TRUE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE.
+    term_on_div  = .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE.
+    term_on_temp = .TRUE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE.
+    term_on_lnps = .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE., .FALSE.
+
+    ! Spectral-scale selector: apply only where total wavenumber l <= this.
+    ! -1 applies at every resolved scale. The stationary-wave error section 3.7
+    ! targets lives at large scales, and restricting the correction to them is
+    ! the first mitigation mwm/B_multires/B2B_OUTCOME.md lists for the
+    ! instability its whole-field version hit.
+    term_lcut    = -1, -1, -1, -1, -1, -1, -1, -1
+/
+
+&aeros_moisture
+    ! Large-scale condensation (src/physics/aeros_condensation.f90). The
+    ! humidity transport itself is always on -- it costs nothing on a dry field
+    ! -- so this switch is condensation, the moist physics. OFF by default and
+    ! in the Held-Suarez benchmark, which is dry by construction.
+    moist   = .FALSE.
+
+    ! Critical relative humidity for condensation. 1.0 is true saturation
+    ! adjustment; a lower value stands in for sub-grid humidity variability.
+    rh_crit = 1.0
+
+    ! Moist convective adjustment (src/physics/aeros_convection.f90). OFF by
+    ! default and in the dry Held-Suarez benchmark. `conv_scheme` selects the
+    ! scheme: "sbm" (Simplified Betts-Miller, the default) or "manabe" (the
+    ! parameter-free reference). conv_tau is the SBM relaxation time [s] and
+    ! conv_rhref its reference relative humidity.
+    convect     = .FALSE.
+    conv_scheme = "sbm"
+    conv_tau    = 7200.0
+    conv_rhref  = 0.7
+/
+
+&surface
+    ! Prescribed-SST surface energy/moisture budget (src/physics/aeros_surface.f90):
+    ! bulk turbulent sensible + latent fluxes into the lowest layer, the source
+    ! that closes the atmosphere's budget once Held-Suarez is removed. OFF by
+    ! default. c_h/c_e are the exchange coefficients, u_min the gustiness floor
+    ! [m/s]; the SST is the APE control profile, sst_eq K above freezing at the
+    ! equator tapering to freezing poleward of sst_lat degrees.
+    enabled = .FALSE.
+    c_h     = 1.5e-3
+    c_e     = 1.5e-3
+    u_min   = 1.0
+/
+
+&ocean
+    ! The sea surface temperature (src/physics/aeros_ocean.f90) the surface
+    ! fluxes and radiation run against. mode=0 prescribed (fixed APE SST, the
+    ! aquaplanet control and default), mode=1 slab (SST evolves from the net
+    ! surface energy flux). depth is the slab mixed-layer depth [m]; freeze_floor
+    ! clamps SST >= 273.15 K (no sea ice). sst_eq/sst_lat set the APE profile:
+    ! sst_eq K above freezing at the equator, frozen poleward of sst_lat degrees.
+    mode         = 0
+    depth        = 10.0
+    freeze_floor = .TRUE.
+    sst_eq       = 27.0
+    sst_lat      = 60.0
+/
+
+&radiation
+    ! Clear-sky longwave + shortwave (src/physics/aeros_radiation.f90), ported
+    ! SESAM band kernel. OFF by default. scheme=1 is the SESAM kernel; co2_ppm
+    ! the CO2 volume mixing ratio; l_o3 the prescribed analytic ozone; albedo
+    ! the surface broadband albedo; tsi the solar constant [W/m2]; seasonal
+    ! toggles the daily-mean seasonal cycle (else annual-mean); interval the
+    ! recompute cadence [s]; doy0 the start day-of-year in seasonal mode.
+    enabled  = .FALSE.
+    scheme   = 1
+    co2_ppm  = 280.0
+    l_o3     = .TRUE.
+    albedo   = 0.06
+    tsi      = 1361.0
+    seasonal = .FALSE.
+    interval = 10800.0
+    doy0     = 0.0
+/
+
+&vdiff
+    ! Boundary-layer vertical diffusion (src/physics/aeros_vdiff.f90): mixes the
+    ! surface source up the column (implicit on the n+1 state). OFF by default.
+    ! k0 is the eddy diffusivity [m2/s]; sigma the boundary-layer top, K tapering
+    ! linearly from its full value at the surface to zero at sigma.
+    enabled = .FALSE.
+    k0      = 25.0
+    sigma   = 0.7
+/

@@ -92,7 +92,7 @@ module aeros_vertical
 
 contains
 
-    subroutine aeros_vgrid_load(vg, nlev, filename, group)
+    subroutine aeros_vgrid_load(vg, nlev, filename, group, defaults_file)
         ! Build the vertical grid from a namelist group (default `aeros_vert`).
 
         implicit none
@@ -100,6 +100,7 @@ contains
         type(aeros_vgrid_class), intent(inout) :: vg
         integer, intent(in) :: nlev
         character(len=*), intent(in) :: filename
+        character(len=*), intent(in), optional :: defaults_file
         character(len=*), intent(in), optional :: group
 
         character(len=56) :: nml_group
@@ -108,12 +109,12 @@ contains
         nml_group = "aeros_vert"
         if (present(group)) nml_group = trim(group)
 
-        call nml_read(filename, nml_group, "stretch_a", stretch_a)
-        call nml_read(filename, nml_group, "stretch_r", stretch_r)
-        call nml_read(filename, nml_group, "sigma_t",   sigma_t)
-        call nml_read(filename, nml_group, "p_top",     p_top)
-        call nml_read(filename, nml_group, "ps_ref",    ps_ref)
-        call nml_read(filename, nml_group, "t_ref",     t_ref)
+        call nml_read(filename, nml_group, "stretch_a", stretch_a, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "stretch_r", stretch_r, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "sigma_t",   sigma_t, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "p_top",     p_top, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "ps_ref",    ps_ref, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "t_ref",     t_ref, defaults_file=defaults_file)
 
         call aeros_vgrid_init(vg, nlev, stretch_a=stretch_a, stretch_r=stretch_r, &
                                 sigma_t=sigma_t, p_top=p_top, ps_ref=ps_ref, t_ref=t_ref)

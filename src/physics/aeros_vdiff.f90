@@ -100,10 +100,11 @@ contains
         return
     end subroutine aeros_vdiff_init
 
-    subroutine aeros_vdiff_load(vd, filename, grd)
+    subroutine aeros_vdiff_load(vd, filename, grd, defaults_file)
         implicit none
         type(aeros_vdiff_class), intent(inout) :: vd
         character(len=*),        intent(in)    :: filename
+        character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class),  intent(in)    :: grd
 
         logical  :: enabled
@@ -112,9 +113,9 @@ contains
         enabled = vd%enabled
         k0 = vd%k0; sigma = vd%sigma
 
-        call nml_read(filename, "vdiff", "enabled", enabled)
-        call nml_read(filename, "vdiff", "k0",      k0)
-        call nml_read(filename, "vdiff", "sigma",   sigma)
+        call nml_read(filename, "vdiff", "enabled", enabled, defaults_file=defaults_file)
+        call nml_read(filename, "vdiff", "k0",      k0, defaults_file=defaults_file)
+        call nml_read(filename, "vdiff", "sigma",   sigma, defaults_file=defaults_file)
 
         vd%k0 = k0; vd%sigma = sigma
 

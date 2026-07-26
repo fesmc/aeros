@@ -44,11 +44,14 @@ program test_defs
                 "degree/radian conversions are inverse", nfail)
 
     ! === Namelist ============================================================
-    call aeros_par_load(par, "par/aeros.nml", "aeros")
+    ! Read the thin case file with the defaults schema overlaid -- trunc/nlev/dt
+    ! are not in the case file, so this also checks the defaults_file fallback.
+    call aeros_par_load(par, "par/aeros.nml", "aeros", &
+                        defaults_file="input/aeros_defaults.nml")
 
-    call check(par%trunc > 0,  "trunc read", nfail)
-    call check(par%nlev  > 0,  "nlev read",  nfail)
-    call check(par%dt    > 0.0_wp, "dt read", nfail)
+    call check(par%trunc > 0,  "trunc read (from defaults)", nfail)
+    call check(par%nlev  > 0,  "nlev read (from defaults)",  nfail)
+    call check(par%dt    > 0.0_wp, "dt read (from defaults)", nfail)
 
     write(*,"(a40,i6)")   "   trunc ", par%trunc
     write(*,"(a40,i6)")   "   nlev  ", par%nlev

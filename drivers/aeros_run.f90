@@ -25,9 +25,11 @@ program aeros_run
 
     character(len=512) :: path_par
     character(len=512) :: file_out
+    character(len=*), parameter :: defaults_file = "input/aeros_defaults.nml"
 
     real(wp) :: time_init, time_end, dt_out, time
     integer  :: n, nstep
+    logical  :: have_defaults
 
     ! -- Parameter file: argv(1), or the in-tree default when run by hand.
     if (command_argument_count() >= 1) then
@@ -36,10 +38,20 @@ program aeros_run
         path_par = "par/aeros.nml"
     end if
 
-    call nml_read(path_par, "ctrl", "time_init", time_init)
-    call nml_read(path_par, "ctrl", "time_end",  time_end)
-    call nml_read(path_par, "ctrl", "dt_out",    dt_out)
-    call nml_read(path_par, "ctrl", "file_out",  file_out)
+    ! -- The defaults schema: every parameter's fallback, so the case file
+    !    (path_par) need only list its overrides. Staged next to the executable
+    !    (input/ is symlinked into a run dir); required, since the case file is
+    !    no longer expected to be complete.
+    inquire(file=defaults_file, exist=have_defaults)
+    if (.not. have_defaults) then
+        write(io_unit_err,*) "aeros_run:: error: defaults file not found: ", defaults_file
+        stop 1
+    end if
+
+    call nml_read(path_par, "ctrl", "time_init", time_init, defaults_file=defaults_file)
+    call nml_read(path_par, "ctrl", "time_end",  time_end,  defaults_file=defaults_file)
+    call nml_read(path_par, "ctrl", "dt_out",    dt_out,    defaults_file=defaults_file)
+    call nml_read(path_par, "ctrl", "file_out",  file_out,  defaults_file=defaults_file)
 
     if (dt_out <= 0.0_wp) then
         write(io_unit_err,*) "aeros_run:: error: dt_out must be > 0, got ", dt_out
@@ -47,7 +59,8 @@ program aeros_run
     end if
 
     ! -- Initialize.
-    call aeros_init(ams, path_par, group="aeros", time_init=time_init)
+    call aeros_init(ams, path_par, group="aeros", time_init=time_init, &
+                    defaults_file=defaults_file)
     call aeros_print_config(ams)
 
     call aeros_io_init(io)

@@ -289,13 +289,14 @@ module aeros_defs
 
 contains
 
-    subroutine aeros_par_load(par, filename, group)
+    subroutine aeros_par_load(par, filename, group, defaults_file)
         ! Read the model parameters from a Fortran namelist.
 
         implicit none
 
         type(aeros_param_class), intent(out) :: par
         character(len=*), intent(in) :: filename
+        character(len=*), intent(in), optional :: defaults_file
         character(len=*), intent(in), optional :: group
 
         character(len=56) :: nml_group
@@ -303,20 +304,20 @@ contains
         nml_group = "aeros"
         if (present(group)) nml_group = trim(group)
 
-        call nml_read(filename, nml_group, "trunc",    par%trunc)
-        call nml_read(filename, nml_group, "nlon",     par%nlon)
-        call nml_read(filename, nml_group, "nlat",     par%nlat)
-        call nml_read(filename, nml_group, "nlev",     par%nlev)
-        call nml_read(filename, nml_group, "dt",       par%dt)
-        call nml_read(filename, nml_group, "nthreads", par%nthreads)
+        call nml_read(filename, nml_group, "trunc",    par%trunc, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "nlon",     par%nlon, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "nlat",     par%nlat, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "nlev",     par%nlev, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "dt",       par%dt, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "nthreads", par%nthreads, defaults_file=defaults_file)
 
-        call nml_read(filename, nml_group, "eps_filter",    par%eps_filter)
-        call nml_read(filename, nml_group, "raw_alpha",     par%raw_alpha)
-        call nml_read(filename, nml_group, "tau_diff",      par%tau_diff)
-        call nml_read(filename, nml_group, "ndiff",         par%ndiff)
-        call nml_read(filename, nml_group, "semi_implicit", par%semi_implicit)
-        call nml_read(filename, nml_group, "held_suarez",   par%held_suarez)
-        call nml_read(filename, nml_group, "mass_fixer",    par%mass_fixer)
+        call nml_read(filename, nml_group, "eps_filter",    par%eps_filter, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "raw_alpha",     par%raw_alpha, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "tau_diff",      par%tau_diff, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "ndiff",         par%ndiff, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "semi_implicit", par%semi_implicit, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "held_suarez",   par%held_suarez, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "mass_fixer",    par%mass_fixer, defaults_file=defaults_file)
 
         if (par%trunc < 1) then
             write(io_unit_err,*) "aeros_par_load:: error: trunc must be >= 1, got ", par%trunc
