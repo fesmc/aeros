@@ -738,6 +738,14 @@ Two consequences worth recording now:
   millennial variability (D–O), where the atmosphere would then no longer be the
   weak link. **Flag, do not fix.** Revisit only after M5.
 
+**Interim lower boundary (AR, M2.5d).** Until that coupling exists, the sea
+surface is `aeros_ocean`: prescribed SST (the aquaplanet control) or a
+well-mixed slab that closes the surface energy balance (`C dSST/dt = SW_net +
+LW_down − σSST⁴ − SH − LH`). This is exactly the plug point CLIMBER-X's ocean
+will attach at — the atmosphere hands the module the net surface flux and reads
+back an SST, the same contract the slab already satisfies — so adopting the real
+ocean later is a module swap, not a re-plumbing.
+
 ### 6.2 10⁵–10⁶ yr is not reachable transiently
 
 At T42L19 (~227 core-s/yr), 10⁶ yr ≈ **7 core-years**. Even at target throughput

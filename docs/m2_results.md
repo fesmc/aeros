@@ -772,3 +772,51 @@ run still eventually runs away -- so the residual is a **tuning/physics** proble
 T21L12), not the axisymmetric constraint alone and not a remaining coupling bug.
 Reaching a bounded, validated RCE -- and with it the ERA5 moist-line validation
 (§14 did the clear-sky line, independent of this) -- is the next tuning step.
+
+## 16. Slab ocean and the defaults-file paradigm (M2.5d)
+
+### 16.1 A responsive lower boundary — aeros_ocean
+
+The prescribed SST is an infinite reservoir: it pumps heat into a column without
+limit, which §15.3 showed a bounded RCE cannot tolerate. `aeros_ocean` makes the
+sea surface a first-class, swappable component. It OWNS the SST (moved out of
+aeros_surface, whose header had always anticipated this) and offers two modes
+behind one interface:
+
+- **prescribed** — a fixed SST (the APE control profile), the M2.4 behaviour and
+  the default, so every existing run and test is bit-unchanged.
+- **slab** — SST is prognostic, a well-mixed layer of depth `depth` (heat
+  capacity `C = ρ_w cp_w depth`) integrated from the net surface energy balance
+  `C dSST/dt = SW_net_sfc + LW_down_sfc − σSST⁴ − SH − LH` (forward Euler; freeze
+  floor at T0, no sea ice yet). The slab makes the surface flux self-limiting.
+
+This is deliberately the plug point for a real ocean (design.md §6.1): a
+dynamical ocean replaces the module under the same contract — the atmosphere
+hands it the net surface flux, it returns the SST. aeros_surface now takes the
+SST as an argument; radiation reads it as the skin temperature and stores
+`sw_net_sur` for the balance; aeros_timestep steps the ocean after surface and
+radiation. `test_ocean` pins the APE profile, prescribed-inertness, and the slab
+sign / equilibrium / freeze-floor.
+
+**Result — necessary but not sufficient.** The slab is correct and, with a
+cloud-proxy albedo to balance TOA, does what it should locally. But it does NOT
+by itself bound the RCE: the subtropical **axisymmetric column instability of
+§15.3 survives** the slab, a balanced albedo, and an eddy seed (slab+albedo→NaN
+day 176; slab+albedo+eddies→day 88; the zonal-mean lowest layer at a subtropical
+latitude still runs to 370+ K with runaway surface fluxes). That instability is
+the real remaining blocker and is a resolution / convection-scheme / axisymmetric
+dynamics problem, not a coupling one — see the handoff.
+
+### 16.2 Defaults-file paradigm
+
+Parameter files were required to be exhaustive (`nml.f90`'s `ERROR_NO_PARAM` is
+true), which had quietly broken `aeros_run` and `held_suarez` the moment the M2
+physics groups appeared. Now `input/aeros_defaults.nml` holds the complete
+schema and case files carry only their overrides. Implemented by threading an
+optional `defaults_file` through the load chain (`aeros_init` → `par_load`,
+`vgrid_load`, `timestep_init` → each physics `*_load`), each `nml_read` passing
+it on; `nml.f90`'s own `defaults_file` overlay (value from defaults, overridden
+by the case file when present) does the rest. It is carried in the signature, not
+in module state — `nml` stays stateless and shared across models. Absent
+`defaults_file`, behaviour is exactly the legacy path, so the `_init`-only test
+and driver paths are untouched.
