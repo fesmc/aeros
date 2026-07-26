@@ -21,7 +21,7 @@ program rce_long
     ! term driving a level is visible directly. Stops at the first NaN, naming
     ! the level and step.
 
-    use aeros_defs,     only : dp, wp, wp_sh, p0, R_d, grav, S0, &
+    use aeros_defs,     only : dp, wp, wp_sh, p0, R_d, grav, S0, cp_d, L_v, &
                                 aeros_param_class, aeros_grid_class, &
                                 aeros_state_class
     use aeros_spectral
@@ -290,8 +290,44 @@ contains
                 "   hot-lat TOA: SWin ", swinj, "  SWabs ", swinj-swupj, &
                 "  OLR ", olrj, "  net ", swinj-swupj-olrj, " W/m2"
         end if
+        call buoyancy_profile(jstar)
         return
     end subroutine term_table
+
+    subroutine buoyancy_profile(jstar)
+        ! Why the surface heat is (or is not) ventilated by convection: the
+        ! boundary-layer parcel MSE h_b vs the environment saturated MSE h*_env(k)
+        ! at the hot latitude. Deep convection needs h_b > h*_env over a deep band
+        ! aloft; if the buoyancy is positive only near the surface (or nowhere),
+        ! the surface heat cannot be carried up to the radiating levels and it
+        ! traps. RH shows whether the boundary layer is drying out of buoyancy.
+        integer, intent(in) :: jstar
+        real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev), phi(nlev)
+        real(wp) :: tzm(nlev), qzm(nlev), qs, dqs, hb, hstar, rh, psj, cp, lv
+        integer  :: k
+        cp = real(cp_d, wp); lv = real(L_v, wp)
+        psj = sum(now%ps(:,jstar))/real(grd%nlon, wp)
+        call aeros_vgrid_pressure(vg, psj, phalf, pfull, dpc)
+        do k = 1, nlev
+            tzm(k) = sum(now%temp_g(:,jstar,k))/real(grd%nlon, wp)
+            qzm(k) = sum(now%qv_g(:,jstar,k))/real(grd%nlon, wp)
+        end do
+        phi(nlev) = 0.0_wp
+        do k = nlev-1, 1, -1
+            phi(k) = phi(k+1) + R_d*0.5_wp*(tzm(k)+tzm(k+1))*log(pfull(k+1)/pfull(k))
+        end do
+        hb = cp*tzm(nlev) + phi(nlev) + lv*qzm(nlev)
+        write(*,"(a,f8.1,a)") "   BL parcel h_b = ", hb/1000.0_wp, &
+            " kJ/kg;  buoyancy hb-h*_env (>0 = convecting band):"
+        write(*,"(a)") "   lev   RH[%]   h*_env[kJ/kg]   hb-h*[kJ/kg]"
+        do k = 1, nlev
+            call aeros_qsat(tzm(k), pfull(k), qs, dqs)
+            rh = qzm(k)/max(qs, 1.0e-12_wp)*100.0_wp
+            hstar = cp*tzm(k) + phi(k) + lv*qs
+            write(*,"(i6,f8.1,f15.1,f14.2)") k, rh, hstar/1000.0_wp, (hb-hstar)/1000.0_wp
+        end do
+        return
+    end subroutine buoyancy_profile
 
     real(wp) function zmean_at(f, k, j) result(m)
         ! Zonal mean of grid field f at level k, latitude row j.
