@@ -45,6 +45,8 @@ program rce_long
     logical  :: l_rad = .TRUE., l_sponge = .TRUE., l_vdiff = .FALSE.
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
     real(wp) :: seed_asym = 0.0_wp    ! zonal-asymmetry seed amplitude [K-ish]
+    real(wp) :: albedo = 0.06_wp      ! surface broadband albedo (cloud proxy knob)
+    real(wp) :: co2_ppm = 280.0_wp
 
     type(aeros_sht_pool_class), target :: pool
     type(aeros_grid_class)     :: grd
@@ -98,6 +100,8 @@ program rce_long
     ts%vd%enabled   = l_vdiff
     ts%vd%k0        = vdiff_k0
     ts%vd%sigma     = vdiff_sigma
+    ts%rad%albedo   = albedo
+    ts%rad%co2_ppm  = co2_ppm
 
     allocate(phis2(grd%nlon, grd%nlat)); phis2 = 0.0_wp
     call aeros_timestep_set_phis(ts, phis2)
@@ -193,6 +197,8 @@ contains
         call nml_read(nmlfile, "rce", "vdiff_k0", vdiff_k0)
         call nml_read(nmlfile, "rce", "vdiff_sigma", vdiff_sigma)
         call nml_read(nmlfile, "rce", "seed_asym", seed_asym)
+        call nml_read(nmlfile, "rce", "albedo", albedo)
+        call nml_read(nmlfile, "rce", "co2_ppm", co2_ppm)
         return
     end subroutine read_config
 
@@ -217,8 +223,50 @@ contains
                 k, tmean, tmx, "  (", imx, ",", jmx, ")", tmn, hphys, hcnd
         end do
         call hotspot_split(nlev)
+        call energy_balance()
         return
     end subroutine report
+
+    subroutine energy_balance()
+        ! Global-mean TOA and surface energy budget. A secular drift of the
+        ! column temperature is a TOA imbalance (absorbed SW - OLR /= 0); this
+        ! separates an energy-balance problem from a mixing/numerics one.
+        real(wp) :: olr, swup, swin, shf, lhf, wsum
+        integer  :: j
+        if (.not. (l_rad .or. l_surf)) return
+        olr = 0.0_wp; swup = 0.0_wp; swin = 0.0_wp; shf = 0.0_wp; lhf = 0.0_wp
+        if (l_rad) then
+            olr  = gmean2(ts%rad%olr)
+            swup = gmean2(ts%rad%sw_up_toa)
+            wsum = 0.0_wp
+            do j = 1, grd%nlat
+                swin = swin + ts%rad%sw_toa(j)*sum(grd%area(:,j))
+                wsum = wsum + sum(grd%area(:,j))
+            end do
+            swin = swin/wsum
+        end if
+        if (l_surf) then
+            shf = gmean2(ts%surf%shf); lhf = gmean2(ts%surf%lhf)
+        end if
+        write(*,"(a,f7.1,a,f7.1,a,f7.2,a,f7.1,a,f7.1,a)") &
+            "   TOA: SWin ", swin, "  OLR ", olr, "  net ", swin-swup-olr, &
+            " W/m2 | sfc SH ", shf, "  LH ", lhf, " W/m2"
+        return
+    end subroutine energy_balance
+
+    real(wp) function gmean2(f) result(m)
+        real(wp), intent(in) :: f(:,:)
+        real(wp) :: s, wsum
+        integer  :: i, j
+        s = 0.0_wp; wsum = 0.0_wp
+        do j = 1, grd%nlat
+            do i = 1, grd%nlon
+                s = s + f(i,j)*grd%area(i,j); wsum = wsum + grd%area(i,j)
+            end do
+        end do
+        m = s/wsum
+        return
+    end function gmean2
 
     subroutine hotspot_split(k)
         ! Distinguish an axisymmetric (zonal-mean) hot spot from a grid-point
