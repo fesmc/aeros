@@ -262,8 +262,8 @@ contains
         write(*,"(a,i0,a,f6.1,a,f7.2,a)") &
             "   per-term heating [K/day] at hot latitude j=", jstar, &
             " (lat ", grd%lat(jstar), " N, T_low ", zmax, " K):"
-        write(*,"(a)") "   lev    surf     cnv     cnd     rad   vdiff    " // &
-                       "vadv    hadv"
+        write(*,"(a)") "   lev    Tzm    qzm[g/kg]    surf     cnv     cnd" // &
+                       "     rad   vdiff    vadv    hadv"
         do k = 1, nlev
             hs  = zmean_at(ts%wrk%dt_surf,  k, jstar)/dt*86400.0_wp
             hcv = zmean_at(ts%wrk%dt_cnv,   k, jstar)/dt*86400.0_wp
@@ -272,7 +272,12 @@ contains
             hvd = zmean_at(ts%wrk%dt_vdiff, k, jstar)/dt*86400.0_wp
             hva = zmean_at(ts%wrk%dt_vadv,  k, jstar)*86400.0_wp
             hdyn= zmean_at(ts%wrk%dtdt,     k, jstar)*86400.0_wp
-            write(*,"(i6,7f8.2)") k, hs, hcv, hcd, hr, hvd, hva, hdyn - hva
+            ! Tzm/qzm: the zonal-mean T and q at j* that RADIATION sees -- a
+            ! vertical sawtooth here is the garbage-in behind the huge rad column.
+            write(*,"(i6,f8.2,f10.4,3x,7f8.2)") k, &
+                sum(now%temp_g(:,jstar,k))/real(grd%nlon,wp), &
+                sum(now%qv_g(:,jstar,k))/real(grd%nlon,wp)*1000.0_wp, &
+                hs, hcv, hcd, hr, hvd, hva, hdyn - hva
         end do
         return
     end subroutine term_table
