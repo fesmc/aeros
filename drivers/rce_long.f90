@@ -44,6 +44,7 @@ program rce_long
     real(wp) :: conv_tau = 7200.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp, u_min = 1.0_wp
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
     logical  :: l_rad = .TRUE., l_sponge = .TRUE., l_vdiff = .FALSE.
+    logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
     real(wp) :: seed_asym = 0.0_wp    ! zonal-asymmetry seed amplitude [K-ish]
     real(wp) :: albedo = 0.06_wp      ! surface broadband albedo (cloud proxy knob)
@@ -108,6 +109,12 @@ program rce_long
     ts%ocn%mode     = ocean_mode
     ts%ocn%depth    = ocean_depth
     call aeros_ocean_init(ts%ocn, grd)   ! recompute C for the chosen depth/mode
+
+    ! Per-term heating diagnostics: split the forward-split physics back into
+    ! surface/convection/condensation/radiation, capture vdiff's implicit change,
+    ! and separate the vertical-advective (ventilation) part of the dynamical
+    ! heating -- reported zonal-mean at the hot latitude by term_table below.
+    if (l_diag) call aeros_timestep_enable_diag(ts)
 
     allocate(phis2(grd%nlon, grd%nlat)); phis2 = 0.0_wp
     call aeros_timestep_set_phis(ts, phis2)
@@ -200,6 +207,7 @@ contains
         call nml_read(nmlfile, "rce", "l_rad", l_rad)
         call nml_read(nmlfile, "rce", "l_sponge", l_sponge)
         call nml_read(nmlfile, "rce", "l_vdiff", l_vdiff)
+        call nml_read(nmlfile, "rce", "l_diag", l_diag)
         call nml_read(nmlfile, "rce", "vdiff_k0", vdiff_k0)
         call nml_read(nmlfile, "rce", "vdiff_sigma", vdiff_sigma)
         call nml_read(nmlfile, "rce", "seed_asym", seed_asym)
@@ -231,9 +239,51 @@ contains
                 k, tmean, tmx, "  (", imx, ",", jmx, ")", tmn, hphys, hcnd
         end do
         call hotspot_split(nlev)
+        if (l_diag) call term_table()
         call energy_balance()
         return
     end subroutine report
+
+    subroutine term_table()
+        ! Per-term heating split, zonal-mean at the hot latitude j* (the warmest
+        ! lowest-layer zonal mean -- the runaway column). Settles the handoff
+        ! question: is the descending column being spuriously heated (large +cnv
+        ! or +cnd at depth) or simply not ventilated (surf pumping in, vadv/vdiff
+        ! not carrying it away)? All columns in K/day; hadv = total dynamical
+        ! heating minus its vertical/adiabatic part (vadv).
+        real(wp) :: zm, zmax
+        real(wp) :: hs, hcv, hcd, hr, hvd, hva, hdyn
+        integer  :: k, j, jstar
+        zmax = -1.0e30_wp; jstar = 1
+        do j = 1, grd%nlat
+            zm = sum(now%temp_g(:,j,nlev))/real(grd%nlon, wp)
+            if (zm > zmax) then; zmax = zm; jstar = j; end if
+        end do
+        write(*,"(a,i0,a,f6.1,a,f7.2,a)") &
+            "   per-term heating [K/day] at hot latitude j=", jstar, &
+            " (lat ", grd%lat(jstar), " N, T_low ", zmax, " K):"
+        write(*,"(a)") "   lev    surf     cnv     cnd     rad   vdiff    " // &
+                       "vadv    hadv"
+        do k = 1, nlev
+            hs  = zmean_at(ts%wrk%dt_surf,  k, jstar)/dt*86400.0_wp
+            hcv = zmean_at(ts%wrk%dt_cnv,   k, jstar)/dt*86400.0_wp
+            hcd = zmean_at(ts%wrk%dt_cnd,   k, jstar)/dt*86400.0_wp
+            hr  = zmean_at(ts%wrk%dt_rad,   k, jstar)/dt*86400.0_wp
+            hvd = zmean_at(ts%wrk%dt_vdiff, k, jstar)/dt*86400.0_wp
+            hva = zmean_at(ts%wrk%dt_vadv,  k, jstar)*86400.0_wp
+            hdyn= zmean_at(ts%wrk%dtdt,     k, jstar)*86400.0_wp
+            write(*,"(i6,7f8.2)") k, hs, hcv, hcd, hr, hvd, hva, hdyn - hva
+        end do
+        return
+    end subroutine term_table
+
+    real(wp) function zmean_at(f, k, j) result(m)
+        ! Zonal mean of grid field f at level k, latitude row j.
+        real(wp), intent(in) :: f(:,:,:)
+        integer,  intent(in) :: k, j
+        m = sum(f(:,j,k))/real(grd%nlon, wp)
+        return
+    end function zmean_at
 
     subroutine energy_balance()
         ! Global-mean TOA and surface energy budget. A secular drift of the
