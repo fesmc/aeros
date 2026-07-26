@@ -253,6 +253,7 @@ contains
         ! heating minus its vertical/adiabatic part (vadv).
         real(wp) :: zm, zmax
         real(wp) :: hs, hcv, hcd, hr, hvd, hva, hdyn
+        real(wp) :: olrj, swupj, swinj
         integer  :: k, j, jstar
         zmax = -1.0e30_wp; jstar = 1
         do j = 1, grd%nlat
@@ -279,6 +280,16 @@ contains
                 sum(now%qv_g(:,jstar,k))/real(grd%nlon,wp)*1000.0_wp, &
                 hs, hcv, hcd, hr, hvd, hva, hdyn - hva
         end do
+        ! LOCAL TOA at the hot latitude: does OLR rise as T_low climbs, or does it
+        ! saturate (runaway-greenhouse signature -- absorbed SW can't be shed)?
+        if (l_rad) then
+            olrj  = sum(ts%rad%olr(:,jstar))/real(grd%nlon,wp)
+            swupj = sum(ts%rad%sw_up_toa(:,jstar))/real(grd%nlon,wp)
+            swinj = ts%rad%sw_toa(jstar)
+            write(*,"(a,f7.2,a,f7.2,a,f7.2,a,f7.2,a)") &
+                "   hot-lat TOA: SWin ", swinj, "  SWabs ", swinj-swupj, &
+                "  OLR ", olrj, "  net ", swinj-swupj-olrj, " W/m2"
+        end if
         return
     end subroutine term_table
 
