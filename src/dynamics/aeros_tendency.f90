@@ -157,6 +157,23 @@ module aeros_tendency
         ! until topography arrives at M2 (and zero for Held-Suarez, which is
         ! defined over a flat surface).
         real(wp), allocatable :: phis(:,:)
+
+        ! === Per-term heating diagnostics (aeros_work_alloc_diag) =============
+        ! Off by default and unallocated -- HS and every production run are bit
+        ! unchanged. When enabled, the four forward-split physics terms are split
+        ! back out of the single dt_phys they share (dt_phys carries their sum),
+        ! vdiff's implicit grid-T change is captured, and the vertical-advective +
+        ! adiabatic part of the dynamical heating (the "ventilation" of the
+        ! lowest layer) is separated out of dtdt. Filled by aeros_timestep_step
+        ! and the tendency loop; read per-latitude by drivers/rce_long.f90 to
+        ! answer "spurious heating vs. not ventilated" at the hot latitude.
+        logical :: diag = .FALSE.
+        real(wp), allocatable :: dt_surf(:,:,:)   ! surface SH increment [K/step]
+        real(wp), allocatable :: dt_cnv(:,:,:)    ! convection increment [K/step]
+        real(wp), allocatable :: dt_cnd(:,:,:)    ! condensation increment [K/step]
+        real(wp), allocatable :: dt_rad(:,:,:)    ! radiation increment [K/step]
+        real(wp), allocatable :: dt_vdiff(:,:,:)  ! vdiff grid-T change [K/step]
+        real(wp), allocatable :: dt_vadv(:,:,:)   ! -vadv_t + kappa T omega/p [K/s]
     end type aeros_work_class
 
     public :: aeros_tend_class
@@ -164,6 +181,7 @@ module aeros_tendency
     public :: aeros_tend_alloc
     public :: aeros_tend_end
     public :: aeros_work_alloc
+    public :: aeros_work_alloc_diag
     public :: aeros_work_end
     public :: aeros_tendency_calc
     public :: aeros_tendency_grid
@@ -240,6 +258,40 @@ contains
 
     end subroutine aeros_work_alloc
 
+    subroutine aeros_work_alloc_diag(wrk)
+        ! Turn on the per-term heating diagnostics: allocate and zero the split
+        ! arrays and set the flag the step and tendency loops check. Separate from
+        ! aeros_work_alloc so a driver can enable it AFTER the timestep is
+        ! initialized (rce_long sets its physics toggles post-init), and so the
+        ! default run never carries the arrays. Idempotent.
+
+        implicit none
+
+        type(aeros_work_class), intent(inout) :: wrk
+
+        if (wrk%nlon <= 0) return   ! wrk not allocated yet -- nothing to size to
+
+        if (.not. allocated(wrk%dt_surf)) &
+            allocate(wrk%dt_surf(wrk%nlon,wrk%nlat,wrk%nlev))
+        if (.not. allocated(wrk%dt_cnv)) &
+            allocate(wrk%dt_cnv(wrk%nlon,wrk%nlat,wrk%nlev))
+        if (.not. allocated(wrk%dt_cnd)) &
+            allocate(wrk%dt_cnd(wrk%nlon,wrk%nlat,wrk%nlev))
+        if (.not. allocated(wrk%dt_rad)) &
+            allocate(wrk%dt_rad(wrk%nlon,wrk%nlat,wrk%nlev))
+        if (.not. allocated(wrk%dt_vdiff)) &
+            allocate(wrk%dt_vdiff(wrk%nlon,wrk%nlat,wrk%nlev))
+        if (.not. allocated(wrk%dt_vadv)) &
+            allocate(wrk%dt_vadv(wrk%nlon,wrk%nlat,wrk%nlev))
+
+        wrk%dt_surf  = 0.0_wp; wrk%dt_cnv = 0.0_wp; wrk%dt_cnd = 0.0_wp
+        wrk%dt_rad   = 0.0_wp; wrk%dt_vdiff = 0.0_wp; wrk%dt_vadv = 0.0_wp
+        wrk%diag = .TRUE.
+
+        return
+
+    end subroutine aeros_work_alloc_diag
+
     subroutine aeros_work_end(wrk)
 
         implicit none
@@ -265,6 +317,14 @@ contains
         if (allocated(wrk%dlnpsdy)) deallocate(wrk%dlnpsdy)
         if (allocated(wrk%dlnpsdt)) deallocate(wrk%dlnpsdt)
         if (allocated(wrk%phis))    deallocate(wrk%phis)
+
+        wrk%diag = .FALSE.
+        if (allocated(wrk%dt_surf))  deallocate(wrk%dt_surf)
+        if (allocated(wrk%dt_cnv))   deallocate(wrk%dt_cnv)
+        if (allocated(wrk%dt_cnd))   deallocate(wrk%dt_cnd)
+        if (allocated(wrk%dt_rad))   deallocate(wrk%dt_rad)
+        if (allocated(wrk%dt_vdiff)) deallocate(wrk%dt_vdiff)
+        if (allocated(wrk%dt_vadv))  deallocate(wrk%dt_vadv)
 
         return
 
@@ -515,6 +575,12 @@ contains
 
                     wrk%dtdt(i,j,k) = -(uc(k)*wrk%dtdx(i,j,k) + vc(k)*wrk%dtdy(i,j,k)) &
                                         - vadv_t + kappa*tc(k)*omga(k)
+
+                    ! Diagnostic: the non-horizontal (vertical advection +
+                    ! adiabatic) part of the dynamical heating -- the ventilation
+                    ! of the column. Horizontal advection is dtdt minus this.
+                    if (wrk%diag) &
+                        wrk%dt_vadv(i,j,k) = -vadv_t + kappa*tc(k)*omga(k)
 
                 end do
 

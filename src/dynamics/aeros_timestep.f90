@@ -146,7 +146,8 @@ module aeros_timestep
     use aeros_vordiv,   only : aeros_uv_from_vordiv, aeros_vordiv_from_uv
     use aeros_tendency, only : aeros_tend_class, aeros_work_class, &
                                 aeros_tend_alloc, aeros_tend_end, &
-                                aeros_work_alloc, aeros_work_end, &
+                                aeros_work_alloc, aeros_work_alloc_diag, &
+                                aeros_work_end, &
                                 aeros_tendency_grid, aeros_tendency_spectral
     use aeros_semiimp,  only : aeros_semiimp_class, aeros_semiimp_init, &
                                 aeros_semiimp_end, aeros_semiimp_set_step, &
@@ -320,6 +321,7 @@ module aeros_timestep
     public :: aeros_timestep_set_phis
     public :: aeros_timestep_set_mass_target
     public :: aeros_timestep_diagnose
+    public :: aeros_timestep_enable_diag
     public :: aeros_timestep_print
 
 contains
@@ -505,6 +507,22 @@ contains
 
     end subroutine aeros_timestep_end
 
+    subroutine aeros_timestep_enable_diag(ts)
+        ! Turn on the per-term heating diagnostics. Call AFTER aeros_timestep_init
+        ! and after the physics toggles are set (the work arrays are already
+        ! sized by init; this only adds the diagnostic split arrays). A no-op for
+        ! any run that does not ask, so HS and production stay bit unchanged.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+
+        call aeros_work_alloc_diag(ts%wrk)
+
+        return
+
+    end subroutine aeros_timestep_enable_diag
+
     subroutine aeros_timestep_step(ts, pool, vg, grd, now)
         ! Advance `now` by one dynamics timestep.
 
@@ -561,6 +579,10 @@ contains
             .or. ts%cnd%enabled) &
             ts%wrk%dt_phys = 0.0_wp
 
+        ! vdiff writes its diagnostic only when it runs; zero it here so a step
+        ! with vdiff off reports 0 rather than the previous step's value.
+        if (ts%wrk%diag) ts%wrk%dt_vdiff = 0.0_wp
+
         ! Surface turbulent fluxes, before convection: sensible heat warms the
         ! lowest layer (a forward increment to wrk%dt_phys) and evaporation
         ! moistens it (a forward increment to now%qv_g). This is the
@@ -570,6 +592,11 @@ contains
             call aeros_surface_apply(ts%surf, vg, ts%ocn%sst, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
                                         ts%wrk%dt_phys, ts%dt)
+        ! Diagnostic split: snapshot the CUMULATIVE dt_phys after each term (each
+        ! only adds to it), differenced back into per-term increments after
+        ! radiation. A disabled term leaves dt_phys unchanged, so its increment is
+        ! zero -- no need to guard on the physics toggle.
+        if (ts%wrk%diag) ts%wrk%dt_surf = ts%wrk%dt_phys
 
         ! Moist convective adjustment, before condensation: it overturns the
         ! column and precipitates, and large-scale condensation then removes
@@ -579,6 +606,7 @@ contains
         if (ts%cnv%enabled) &
             call aeros_convection_apply(ts%cnv, vg, ts%wrk%t_g, now%qv_g, &
                                             ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
+        if (ts%wrk%diag) ts%wrk%dt_cnv = ts%wrk%dt_phys
 
         ! Large-scale condensation, at the same grid seam: it dries the
         ! gridpoint humidity in place and adds its latent heating to wrk%dt_phys,
@@ -588,6 +616,7 @@ contains
         ! at once when dry.
         call aeros_condensation_apply(ts%cnd, vg, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
+        if (ts%wrk%diag) ts%wrk%dt_cnd = ts%wrk%dt_phys
 
         ! Radiation, at the same grid seam: clear-sky LW+SW heating, recomputed
         ! on a multi-hour cadence and cached, accumulated into wrk%dt_phys as a
@@ -599,6 +628,14 @@ contains
             call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%ocn%sst, ts%nstep, &
                                         ts%dt, ts%wrk%dt_phys)
+        ! Difference the cumulative snapshots into per-term increments [K/step].
+        ! Top-down so each subtraction still sees the earlier cumulative value;
+        ! dt_surf is already the increment (dt_phys started this step at zero).
+        if (ts%wrk%diag) then
+            ts%wrk%dt_rad = ts%wrk%dt_rad - ts%wrk%dt_cnd
+            ts%wrk%dt_cnd = ts%wrk%dt_cnd - ts%wrk%dt_cnv
+            ts%wrk%dt_cnv = ts%wrk%dt_cnv - ts%wrk%dt_surf
+        end if
 
         ! Slab ocean: step the SST from the net surface energy flux just computed
         ! (surface turbulent fluxes + surface radiative fluxes against this SST).
@@ -762,7 +799,14 @@ contains
         end do
         call aeros_sht_synthesis(s, ts%new%lnps, lnps2)
 
+        ! Diagnostic: capture vdiff's grid-T change as t3(after) - t3(before).
+        ! It rides t3 in place through aeros_vdiff_apply, so hold the pre-diffuse
+        ! temperature and difference below. [K/step], like the forward-split terms.
+        if (ts%wrk%diag) ts%wrk%dt_vdiff = t3
+
         call aeros_vdiff_apply(ts%vd, vg, t3, now%qv_g, u3, v3, lnps2, ts%dt)
+
+        if (ts%wrk%diag) ts%wrk%dt_vdiff = t3 - ts%wrk%dt_vdiff
 
         do k = 1, vg%nlev
             call aeros_sht_analysis(s, t3(:,:,k), tlm)
