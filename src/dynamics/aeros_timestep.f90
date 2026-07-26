@@ -628,6 +628,7 @@ contains
             call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%ocn%sst, ts%nstep, &
                                         ts%dt, ts%wrk%dt_phys)
+        if (ts%wrk%diag) ts%wrk%dt_rad = ts%wrk%dt_phys
         ! Difference the cumulative snapshots into per-term increments [K/step].
         ! Top-down so each subtraction still sees the earlier cumulative value;
         ! dt_surf is already the increment (dt_phys started this step at zero).
