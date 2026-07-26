@@ -47,6 +47,7 @@ program rce_long
     logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
     logical  :: l_dry_adjust = .TRUE. ! dry convective adjustment before the moist scheme
     logical  :: l_uniform_insol = .FALSE. ! flatten insolation to its global mean (no meridional gradient)
+    logical  :: l_nonrotating = .FALSE.   ! zero Coriolis (no jet organization; RCE vehicle)
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
     ! Model-top sponge knobs (defaults match aeros_timestep_class). Exposed to
     ! test the top thermal-wind blow-up: a stronger/deeper sponge that delays or
@@ -80,6 +81,12 @@ program rce_long
     call aeros_sht_pool_init(pool, trunc, quick=.TRUE.)
     call aeros_grid_init(grd, pool%sht(1))
     call aeros_vgrid_init(vg, nlev)
+
+    ! Non-rotating vehicle: with no Coriolis there is nothing to organise a
+    ! meridional asymmetry into a geostrophic/angular-momentum jet, so with
+    ! uniform insolation and a uniform IC every column runs the same RCE -- the
+    ! clean single-column validation vehicle, reusing the full physics stack.
+    if (l_nonrotating) grd%coriolis = 0.0_wp
 
     write(*,"(a,i0,a,i0,a,i0,a,i0)") " rce_long:: T", trunc, " L", nlev, &
                                        "  grid ", grd%nlon, "x", grd%nlat
@@ -161,7 +168,12 @@ program rce_long
     end do
     now%spec%lnps(aeros_sht_lm(pool%sht(1),0,0)) = &
             cmplx(log(real(p0,dp))*sqrt(16.0_dp*atan(1.0_dp)), 0.0_dp, wp_sh)
-    now%spec%temp(aeros_sht_lm(pool%sht(1),2,0),:) = cmplx(-5.0_dp, 0.0_dp, wp_sh)
+    ! Initial equator-pole gradient (l=2). Skipped under uniform insolation: with
+    ! no insolation gradient the intended state is horizontally uniform, so every
+    ! latitude runs the identical column RCE with nothing to spin up a jet -- the
+    ! clean single-column validation vehicle.
+    if (.not. l_uniform_insol) &
+        now%spec%temp(aeros_sht_lm(pool%sht(1),2,0),:) = cmplx(-5.0_dp, 0.0_dp, wp_sh)
 
     ! Optional zonal-asymmetry seed: a small perturbation in a few m>0 modes so
     ! baroclinic instability can grow eddies. Without it the run is trapped in
@@ -238,6 +250,7 @@ contains
         call nml_read(nmlfile, "rce", "l_cnv", l_cnv)
         call nml_read(nmlfile, "rce", "l_dry_adjust", l_dry_adjust)
         call nml_read(nmlfile, "rce", "l_uniform_insol", l_uniform_insol)
+        call nml_read(nmlfile, "rce", "l_nonrotating", l_nonrotating)
         call nml_read(nmlfile, "rce", "sponge_kr", sponge_kr)
         call nml_read(nmlfile, "rce", "sponge_kt", sponge_kt)
         call nml_read(nmlfile, "rce", "sponge_sigma", sponge_sigma)
