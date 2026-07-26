@@ -47,6 +47,12 @@ program rce_long
     logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
     logical  :: l_dry_adjust = .TRUE. ! dry convective adjustment before the moist scheme
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
+    ! Model-top sponge knobs (defaults match aeros_timestep_class). Exposed to
+    ! test the top thermal-wind blow-up: a stronger/deeper sponge that delays or
+    ! removes it confirms the terminal event is model-top dynamical.
+    real(wp) :: sponge_kr = 1.0_wp/43200.0_wp   ! max Rayleigh rate [s-1]
+    real(wp) :: sponge_kt = 1.0_wp/86400.0_wp   ! max Newtonian rate [s-1]
+    real(wp) :: sponge_sigma = 0.12_wp          ! sponge ramp top [sigma]
     real(wp) :: seed_asym = 0.0_wp    ! zonal-asymmetry seed amplitude [K-ish]
     real(wp) :: albedo = 0.06_wp      ! surface broadband albedo (cloud proxy knob)
     real(wp) :: co2_ppm = 280.0_wp
@@ -103,6 +109,7 @@ program rce_long
     ts%surf%c_h = c_h; ts%surf%c_e = c_e; ts%surf%u_min = u_min
     ts%rad%enabled  = l_rad
     ts%sponge_on    = l_sponge
+    call aeros_timestep_set_sponge(ts, vg, sponge_kr, sponge_kt, sponge_sigma)
     ts%vd%enabled   = l_vdiff
     ts%vd%k0        = vdiff_k0
     ts%vd%sigma     = vdiff_sigma
@@ -206,6 +213,9 @@ contains
         call nml_read(nmlfile, "rce", "l_surf", l_surf)
         call nml_read(nmlfile, "rce", "l_cnv", l_cnv)
         call nml_read(nmlfile, "rce", "l_dry_adjust", l_dry_adjust)
+        call nml_read(nmlfile, "rce", "sponge_kr", sponge_kr)
+        call nml_read(nmlfile, "rce", "sponge_kt", sponge_kt)
+        call nml_read(nmlfile, "rce", "sponge_sigma", sponge_sigma)
         call nml_read(nmlfile, "rce", "l_cnd", l_cnd)
         call nml_read(nmlfile, "rce", "l_rad", l_rad)
         call nml_read(nmlfile, "rce", "l_sponge", l_sponge)
@@ -225,12 +235,15 @@ contains
         integer, intent(in) :: n
         real(wp) :: tmx, tmn, tmean, umax
         real(wp) :: hphys, hcnd
-        integer  :: imx, jmx, imn, jmn
+        integer  :: imx, jmx, imn, jmn, kum, jum, ium
         call aeros_timestep_diagnose(ts, pool, vg, grd, now)
-        umax = maxval(abs(now%u))
+        ! max|u| with its location: if it lives at the top level and migrates
+        ! poleward as it grows, the terminal blow-up is a top thermal-wind jet.
+        call locate_umax(umax, ium, jum, kum)
         write(*,"(a)") ""
-        write(*,"(a,i0,a,f8.2,a,f7.1,a)") " -- step ", n, "  day ", &
-            real(n,wp)*dt/86400.0_wp, "   max|u| ", umax, " m/s"
+        write(*,"(a,i0,a,f8.2,a,f7.1,a,i0,a,f6.1,a)") " -- step ", n, "  day ", &
+            real(n,wp)*dt/86400.0_wp, "   max|u| ", umax, " m/s @ lev ", kum, &
+            " lat ", grd%lat(jum), " N"
         write(*,"(a)") "   lev    Tmean     Tmax  @(i,j)        Tmin    " // &
                        "Hfwd[K/d] Hcnd[K/d]"
         do k = 1, nlev
@@ -339,6 +352,25 @@ contains
         m = sum(f(:,j,k))/real(grd%nlon, wp)
         return
     end function zmean_at
+
+    subroutine locate_umax(umax, ium, jum, kum)
+        ! max|u| and its (i,j,k) -- to see whether the growing jet sits at the
+        ! model top (the thermal-wind blow-up) and where in latitude.
+        real(wp), intent(out) :: umax
+        integer,  intent(out) :: ium, jum, kum
+        real(wp) :: a
+        integer  :: i, j, k
+        umax = -1.0_wp; ium = 1; jum = 1; kum = 1
+        do k = 1, nlev
+            do j = 1, grd%nlat
+                do i = 1, grd%nlon
+                    a = abs(now%u(i,j,k))
+                    if (a > umax) then; umax = a; ium = i; jum = j; kum = k; end if
+                end do
+            end do
+        end do
+        return
+    end subroutine locate_umax
 
     subroutine energy_balance()
         ! Global-mean TOA and surface energy budget. A secular drift of the

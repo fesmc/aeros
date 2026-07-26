@@ -322,6 +322,7 @@ module aeros_timestep
     public :: aeros_timestep_set_mass_target
     public :: aeros_timestep_diagnose
     public :: aeros_timestep_enable_diag
+    public :: aeros_timestep_set_sponge
     public :: aeros_timestep_print
 
 contains
@@ -457,6 +458,25 @@ contains
         ! Per-level sponge rates: squared ramp from zero at sigma_sponge to the
         ! maximum at the model top. Nonzero only in the top layers.
         allocate(ts%sponge_kr_lev(vg%nlev), ts%sponge_kt_lev(vg%nlev))
+        call build_sponge_ramp(ts, vg)
+
+        return
+
+    end subroutine aeros_timestep_init
+
+    subroutine build_sponge_ramp(ts, vg)
+        ! (Re)build the per-level sponge rates from ts%sponge_kr/kt/sigma: a
+        ! squared ramp from zero at sigma_sponge to the maximum at the model top,
+        ! nonzero only where sigma_full < sponge_sigma. Split out of init so the
+        ! strengths can be changed after init (aeros_timestep_set_sponge).
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_vgrid_class),    intent(in)    :: vg
+        real(wp) :: ramp
+        integer  :: k
+
         ts%sponge_kr_lev = 0.0_wp
         ts%sponge_kt_lev = 0.0_wp
         do k = 1, vg%nlev
@@ -469,7 +489,27 @@ contains
 
         return
 
-    end subroutine aeros_timestep_init
+    end subroutine build_sponge_ramp
+
+    subroutine aeros_timestep_set_sponge(ts, vg, kr, kt, sigma)
+        ! Set the sponge strengths and rebuild the per-level ramp. For sweeping
+        ! the model-top damping after init without recompiling (the top
+        ! thermal-wind blow-up is the RCE's terminal event).
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_vgrid_class),    intent(in)    :: vg
+        real(wp), intent(in) :: kr, kt, sigma
+
+        ts%sponge_kr    = kr
+        ts%sponge_kt    = kt
+        ts%sponge_sigma = sigma
+        call build_sponge_ramp(ts, vg)
+
+        return
+
+    end subroutine aeros_timestep_set_sponge
 
     subroutine aeros_timestep_end(ts)
 
