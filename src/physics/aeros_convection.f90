@@ -392,6 +392,15 @@ contains
         end do
         if (kb == 0) return         ! no buoyant layer -> no convection
 
+        ! A single-layer band (ktop == kb) is not convection: there is no layer
+        ! above to overturn into, and the deep closure then anchors the reference
+        ! adiabat on the one layer itself and dumps L*precip back into it as local
+        ! heating -- a spurious positive feedback that fires when surface fluxes
+        ! push the lowest layer to saturation (h_b > h*_env there). That is
+        ! large-scale condensation's job, which runs at the same seam right after;
+        ! convection needs a genuine cloud depth. Return the column unchanged.
+        if (ktop == kb) return
+
         ! Reference profiles over the band: the moist adiabat carrying h_b, dried
         ! to rh_ref of its own saturation.
         do k = ktop, kb
