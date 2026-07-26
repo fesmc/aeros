@@ -204,7 +204,54 @@
 
     ! Moist convective adjustment (src/physics/aeros_convection.f90). OFF by
     ! default and in the dry Held-Suarez benchmark. `conv_scheme` selects the
-    ! scheme; only "manabe" is implemented (Betts-Miller is the planned second).
+    ! scheme: "sbm" (Simplified Betts-Miller, the default) or "manabe" (the
+    ! parameter-free reference). conv_tau is the SBM relaxation time [s] and
+    ! conv_rhref its reference relative humidity.
     convect     = .FALSE.
-    conv_scheme = "manabe"
+    conv_scheme = "sbm"
+    conv_tau    = 7200.0
+    conv_rhref  = 0.7
+/
+
+&surface
+    ! Prescribed-SST surface energy/moisture budget (src/physics/aeros_surface.f90):
+    ! bulk turbulent sensible + latent fluxes into the lowest layer, the source
+    ! that closes the atmosphere's budget once Held-Suarez is removed. OFF by
+    ! default. c_h/c_e are the exchange coefficients, u_min the gustiness floor
+    ! [m/s]; the SST is the APE control profile, sst_eq K above freezing at the
+    ! equator tapering to freezing poleward of sst_lat degrees.
+    enabled = .FALSE.
+    c_h     = 1.5e-3
+    c_e     = 1.5e-3
+    u_min   = 1.0
+    sst_eq  = 27.0
+    sst_lat = 60.0
+/
+
+&radiation
+    ! Clear-sky longwave + shortwave (src/physics/aeros_radiation.f90), ported
+    ! SESAM band kernel. OFF by default. scheme=1 is the SESAM kernel; co2_ppm
+    ! the CO2 volume mixing ratio; l_o3 the prescribed analytic ozone; albedo
+    ! the surface broadband albedo; tsi the solar constant [W/m2]; seasonal
+    ! toggles the daily-mean seasonal cycle (else annual-mean); interval the
+    ! recompute cadence [s]; doy0 the start day-of-year in seasonal mode.
+    enabled  = .FALSE.
+    scheme   = 1
+    co2_ppm  = 280.0
+    l_o3     = .TRUE.
+    albedo   = 0.06
+    tsi      = 1361.0
+    seasonal = .FALSE.
+    interval = 10800.0
+    doy0     = 0.0
+/
+
+&vdiff
+    ! Boundary-layer vertical diffusion (src/physics/aeros_vdiff.f90): mixes the
+    ! surface source up the column (implicit on the n+1 state). OFF by default.
+    ! k0 is the eddy diffusivity [m2/s]; sigma the boundary-layer top, K tapering
+    ! linearly from its full value at the surface to zero at sigma.
+    enabled = .FALSE.
+    k0      = 25.0
+    sigma   = 0.7
 /
