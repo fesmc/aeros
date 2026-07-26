@@ -293,6 +293,7 @@ contains
                 k, tmean, tmx, "  (", imx, ",", jmx, ")", tmn, hphys, hcnd
         end do
         call hotspot_split(nlev)
+        call eddy_diag()
         if (l_diag) call term_table()
         call energy_balance()
         return
@@ -390,6 +391,38 @@ contains
         m = sum(f(:,j,k))/real(grd%nlon, wp)
         return
     end function zmean_at
+
+    subroutine eddy_diag()
+        ! Do baroclinic eddies grow (m>0), i.e. is there anything to flux heat
+        ! and momentum meridionally? Report, at a mid-troposphere level, the RMS
+        ! eddy temperature T' = T - zonalmean and eddy KE 0.5(u'^2+v'^2), plus the
+        ! zonal-mean meridional eddy heat flux [v'T'] (the term that relaxes the
+        ! equator-pole gradient). Growing with time = baroclinic instability is
+        ! working; decaying = the seed is damped and the run stays axisymmetric.
+        integer  :: i, j, k
+        real(wp) :: tzm, uzm, vzm, tp, up, vp
+        real(wp) :: t2, ke, vt, w, wsum
+        k = max(1, nlev/2)                 ! ~mid-troposphere
+        t2 = 0.0_wp; ke = 0.0_wp; vt = 0.0_wp; wsum = 0.0_wp
+        do j = 1, grd%nlat
+            tzm = sum(now%temp_g(:,j,k))/real(grd%nlon, wp)
+            uzm = sum(now%u(:,j,k))/real(grd%nlon, wp)
+            vzm = sum(now%v(:,j,k))/real(grd%nlon, wp)
+            w   = grd%area(1,j)
+            do i = 1, grd%nlon
+                tp = now%temp_g(i,j,k) - tzm
+                up = now%u(i,j,k) - uzm
+                vp = now%v(i,j,k) - vzm
+                t2 = t2 + w*tp*tp
+                ke = ke + w*0.5_wp*(up*up + vp*vp)
+                vt = vt + w*vp*tp
+            end do
+            wsum = wsum + w*real(grd%nlon, wp)
+        end do
+        write(*,"(a,i0,a,es9.2,a,es9.2,a,es9.2)") "   eddy(lev ", k, "): RMS T'' ", &
+            sqrt(t2/wsum), " K  eddyKE ", ke/wsum, " m2/s2  [v''T''] ", vt/wsum
+        return
+    end subroutine eddy_diag
 
     subroutine locate_umax(umax, ium, jum, kum)
         ! max|u| and its (i,j,k) -- to see whether the growing jet sits at the
