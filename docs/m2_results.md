@@ -1331,3 +1331,61 @@ relations the radiation/RCE tests assert: equator ≈ S0/π, polar night = 0, gl
 mean ≈ S0/4). Unlike the extratropical circulation (§26), the seasonal cycle *is*
 fair to validate against ERA5, which has seasons — the natural next use is a
 seasonal coupled run and the SMB-relevant seasonal temperature cycle.
+
+## 28. ecCKD correlated-k radiation — the structural replacement for SESAM (M3b)
+
+The radiation endpoint design.md §5 named. The ported SESAM broadband scheme
+needed a hand-tuned vapour-opacity fudge (`LW_VAP_OPAC`, §20) to half-cancel a
+structural clear-sky OLR bias, and a single knob can't null OLR and surface-LW at
+once. A correlated-k scheme fixes that at the source. Built opt-in behind the
+existing `scheme` selector (`SCHEME_ECCKD`); **SESAM stays the default and is
+bit-for-bit unchanged** (`scheme=1`), so every prior result and all previous tests
+hold. Developed on a branch in parallel with §27 (a background agent, iterated to
+these results); merged clean.
+
+**Gas optics without a data table.** No ecCKD/CKDMIP look-up table exists offline
+and the generator needs tens of GB of line-by-line input, so the k-tables are
+built from a compact **Malkmus/Goody statistical band model**: each band's
+k-distribution is analytically the inverse-Gaussian (Wald), so its g-point
+`(k, weight)` pairs follow from Gauss–Legendre nodes through the closed-form
+inverse-Gaussian CDF — no fitting, no run-time data. Planck fraction integrated
+exactly per band per layer (the dominant T-dependence), a mild Malkmus `S(T)`, and
+a cheap `(p/p0)^κ` pressure broadening (κ a-priori Lorentz, **not** ERA5-fit — the
+vertical structure must stay predictive at non-present orbits/climates).
+
+- **10 LW g-points** (4 bands: H2O rotation, CO2 15 µm, window + O3 9.6 µm,
+  H2O vib-rotation) + **5 SW** (visible with a 3-g-point correlated-k O3, near-IR
+  reusing SESAM's validated 2-exponential H2O) = **15 total**, inside the 8–32
+  budget.
+- **Tuning discipline:** ≤2 ERA5-anchored magnitude scales per band; only a per-
+  band H2O scale and the CO2 band strength were used (LW), and **none** on the SW
+  (a-priori O3 validated as-is). Band *shape* stayed a-priori throughout.
+
+**Validation vs ERA5 1991–2020, and vs SESAM — better on every headline, fudge
+retired (`LW_VAP_OPAC = 1`):**
+
+| metric | ecCKD | SESAM (fudged) | ERA5 target |
+|---|---|---|---|
+| clear-sky OLR bias | **−5.1** | −7.1 | ~0 |
+| 2×CO2 forcing | **3.6** | 3.0 | ≈3.7 |
+| clear-sky TOA net SW bias | **−4.5** | −5.1 | small |
+| TOA LW cloud effect | +21.7 (**−0.1**) | +19.7 (−2.1) | +21.8 |
+| TOA net cloud effect | −23.3 (+0.9) | −24.7 (−0.5) | −24.3 |
+
+The clouds fold SESAM's validated grey per-layer optics into the g-point
+transmissions with **no new spectral points** (LW runs the transfer worker twice,
+clear + overcast with cloud optical depth added into every g-point at max overlap;
+SW places the two-stream cloud reflector on the ecCKD clear base). The LW CRE
+gain (−0.1 vs SESAM −2.1) is free: the accurate clear-sky OLR leaves the right
+cloud headroom (the §20 mechanism, now structural).
+
+**Cost (the fast-model constraint):** per-column LW 1.78× SESAM, SW 0.84×
+(*faster* — drops SESAM's unused paths), cloudy LW 1.77×; radiation runs on the
+1–3 h cadence, so the runtime share stays small. Energy closure (heating = flux
+divergence) is exact by construction, LW and SW.
+
+**Coverage:** a new acceptance test `tests/test_ecckd.f90` (suite 18→19) drives the
+`SCHEME_ECCKD` path and locks in energy closure, CO2 monotonicity, and the
+reduce-to-SESAM SW property. `validate_era5` gained a scheme arg (`sesam|ecckd`)
+and a CO2 arg. ecCKD is the recommended scheme going forward; SESAM is retained as
+the fast, bit-reproducible default until the switch is made deliberately.

@@ -1,7 +1,7 @@
 # M2 handoff — where to pick up
 
 Supersedes the earlier M2.5a–e handoff. `main` is pushed (`origin/main`), `make
-all openmp=1` is clean, and **all 18 acceptance tests pass**. Two blockers that
+all openmp=1` is clean, and **all 19 acceptance tests pass**. Two blockers that
 this doc used to open with are now cleared:
 
 - **The M2 RCE runaway** — diagnosed and resolved (surface momentum drag + dry
@@ -160,6 +160,11 @@ van Leer; per-row polar sub-cycling; `tau_diff`/∇⁶ retune.
   (`probe_insol`): annual-global mean = S0/4, polar day/night, live Milankovitch
   redistribution at 21 ka. All 18 tests pass. Needs the `insol` symlink (like
   `fesm-utils`) in each worktree.
-- **ecCKD radiation** behind the `scheme` selector — under development on branch
-  `ecckd-radiation` (compact Malkmus/Goody correlated-k, ~18–20 g-points, opt-in;
-  SESAM stays default). Not yet merged.
+- **ecCKD correlated-k radiation — DONE (§28), merged.** Complete clear + all-sky,
+  LW + SW, opt-in behind `SCHEME_ECCKD`; SESAM stays the bit-identical default.
+  Compact Malkmus/Goody band model (analytic inverse-Gaussian k-distribution), 15
+  g-points, no external data table. Beats SESAM on OLR (−5.1), CO2 forcing (3.6),
+  and LW CRE (−0.1) with `LW_VAP_OPAC` retired; cost 0.84–1.78× SESAM at the 1–3 h
+  cadence. New test `test_ecckd` (suite now **19**). **Recommended scheme going
+  forward — switching the default from SESAM to ecCKD is a deliberate call still to
+  be made** (it changes all results / breaks bit-reproducibility of past runs).
