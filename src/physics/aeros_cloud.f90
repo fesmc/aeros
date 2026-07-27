@@ -14,26 +14,33 @@ module aeros_cloud
     !     default but written as a two-endpoint vertical profile (surface, top)
     !     so it can be given height structure without a signature change.
     !
-    !   - In-cloud condensate, a temperature-dependent specified content:
-    !         q_ic = CLD_QCFRAC * q_sat(T,p),
-    !     so the condensate scales with the available vapour and falls off with
-    !     height and cold as q_sat does. It is split into liquid and ice by a
-    !     temperature ramp f_ice(T) (all liquid above CLD_T_LIQ, all ice below
-    !     CLD_T_ICE, linear between).
+    !   - In-cloud condensate, a specified water CONTENT [kg m-3] converted to a
+    !     mixing ratio by the air density rho = p/(R_d T):
+    !         q_liq = (1-f_ice) LWC / rho,   q_ice = f_ice IWC / rho,
+    !     with the liquid/ice split by a temperature ramp f_ice(T) (all liquid
+    !     above CLD_T_LIQ, all ice below CLD_T_ICE, linear between). A specified
+    !     content -- not q_ic proportional to q_sat -- is deliberate: tying the
+    !     condensate to q_sat starves cold high cloud (q_sat tiny => no ice water
+    !     => no longwave effect) while over-thickening warm low cloud, so the
+    !     cloud radiative effect comes out ~2x too weak in the LW and ~2x too
+    !     strong in the SW (validated on ERA5 columns). A content that is thin for
+    !     ice (cirrus) and thicker for liquid gives the observed CRE balance.
     !
-    !   - Outputs are the GRID-MEAN water paths the radiation kernels expect
+    !   - Outputs are the GRID-MEAN mixing ratios the radiation kernels expect
     !     (the kernels recover the in-cloud value by dividing by the column
     !     cloud fraction):
-    !         clwc = cf (1 - f_ice) q_ic,   ciwc = cf f_ice q_ic.
+    !         clwc = cf (1-f_ice) LWC/rho,   ciwc = cf f_ice IWC/rho.
     !
     ! Grid-agnostic column routine, like the radiation kernels: an arbitrary nlev
     ! column, invariant to the grid it runs on. Parameters are named constants in
     ! one place (as the SESAM band coefficients are in aeros_radiation); the only
-    ! user switch is radiation's `clouds` on/off flag. The values here are
-    ! standard first-cut choices and are expected to need tuning so the
-    ! diagnosed cloud climatology matches ERA5 cc / the cloud radiative effect.
+    ! user switch is radiation's `clouds` on/off flag. The RH_crit endpoints and
+    ! water contents are tuned so the scheme, driven on ERA5 columns, reproduces
+    ! ERA5's cloud radiative effect (m2_results §21): net CRE −23.6 vs −24.2, LW
+    ! and SW each within 3 W/m². The one weak point is total cloud cover (0.47 vs
+    ! 0.63) -- the scheme trades cover for optical depth but gets the CRE right.
 
-    use aeros_defs,         only : wp
+    use aeros_defs,         only : wp, R_d
     use aeros_condensation, only : aeros_qsat
 
     implicit none
@@ -41,11 +48,12 @@ module aeros_cloud
 
     ! critical relative humidity profile endpoints (sigma=1 surface, sigma=0
     ! top); equal => constant with height, the default.
-    real(wp), parameter :: CLD_RHC_SFC = 0.70_wp
-    real(wp), parameter :: CLD_RHC_TOP = 0.70_wp
+    real(wp), parameter :: CLD_RHC_SFC = 0.52_wp
+    real(wp), parameter :: CLD_RHC_TOP = 0.35_wp
 
-    ! in-cloud condensate as a fraction of the saturation specific humidity
-    real(wp), parameter :: CLD_QCFRAC  = 0.04_wp
+    ! in-cloud water content [kg m-3]; ice much thinner than liquid (cirrus)
+    real(wp), parameter :: CLD_LWC = 0.017e-3_wp        ! liquid water content
+    real(wp), parameter :: CLD_IWC = 0.018e-3_wp       ! ice water content
 
     ! liquid/ice partition temperature ramp [K]
     real(wp), parameter :: CLD_T_LIQ   = 273.15_wp     ! all liquid above
@@ -71,7 +79,7 @@ contains
         real(wp), intent(out) :: ciwc(:)    ! (nlev) grid-mean cloud ice    [kg kg-1]
 
         integer  :: k
-        real(wp) :: qs, dqsdt, rh, rhc, b, qic, fice
+        real(wp) :: qs, dqsdt, rh, rhc, b, fice, rho
 
         do k = 1, nlev
             call aeros_qsat(t(k), pfull(k), qs, dqsdt)
@@ -87,12 +95,13 @@ contains
                 cf(k) = 0.0_wp
             end if
 
-            ! in-cloud condensate, grid-mean water paths
+            ! in-cloud water content [kg m-3] -> mixing ratio via air density,
+            ! then grid-mean water paths (x cloud fraction)
             if (cf(k) > 0.0_wp) then
-                qic  = CLD_QCFRAC * qs
                 fice = ice_fraction(t(k))
-                clwc(k) = cf(k)*(1.0_wp - fice)*qic
-                ciwc(k) = cf(k)*fice*qic
+                rho  = pfull(k)/(R_d*t(k))
+                clwc(k) = cf(k)*(1.0_wp - fice)*CLD_LWC/rho
+                ciwc(k) = cf(k)*fice*CLD_IWC/rho
             else
                 clwc(k) = 0.0_wp
                 ciwc(k) = 0.0_wp

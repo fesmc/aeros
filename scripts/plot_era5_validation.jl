@@ -102,4 +102,14 @@ make_figure(cre,
     "Cloud radiative effect: aeros cloudy operators on ERA5 columns vs ERA5 (annual mean, W m⁻²)",
     joinpath(outdir, "era5_cre_validation.png"); cmap = :balance)
 
+# --- diagnosed-cloud CRE (aeros_cloud diagnosis on ERA5 columns) ----------
+dcre = [
+    ("TOA LW cloud effect",  "dcre_lw_toa_mod",  "cre_lw_toa_era",  "dcre_lw_toa_bias"),
+    ("TOA SW cloud effect",  "dcre_sw_toa_mod",  "cre_sw_toa_era",  "dcre_sw_toa_bias"),
+    ("TOA net cloud effect", "dcre_net_toa_mod", "cre_net_toa_era", "dcre_net_toa_bias"),
+]
+make_figure(dcre,
+    "Diagnosed-cloud CRE: aeros_cloud diagnosis on ERA5 columns vs ERA5 (annual mean, W m⁻²)",
+    joinpath(outdir, "era5_cre_diagnosed.png"); cmap = :balance)
+
 close(ds)

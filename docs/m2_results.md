@@ -948,10 +948,55 @@ and the balance moves the right way) but the magnitude is ~8× the realistic net
 CRE. The cause is not the kernels (the ERA5-driven validation, §18, is on target
 with *realistic* input cloud) but the diagnosis: with `RH_crit = 0.70` and
 `q_ic = 0.04 q_sat`, the model's near-saturated deep convective columns produce
-near-overcast, optically thick cloud everywhere. Tuning the diagnosis (higher
-`RH_crit`, smaller condensate fraction) against ERA5 `cc` / the §17 CRE is the
-immediate next step; the wiring, opt-in and validated end-to-end, is what lands
-here.
+near-overcast, optically thick cloud everywhere. Tuning the diagnosis against
+ERA5 is §21; the wiring, opt-in and validated end-to-end, is what lands here.
+
+## 21. Tuning the diagnostic cloud scheme against ERA5 (M2.5i)
+
+Tuning was done against ERA5's *own* columns, not the coupled model: a
+diagnosed-cloud path in `validate_era5` runs `aeros_cloud` on ERA5 T/q/p, then
+the cloudy kernels, and compares the diagnosed CRE and cloud cover to ERA5's
+(`docs/figures/era5_cre_diagnosed.png`). This makes the scheme correct *given
+correct inputs* and keeps a model humidity bias from being hidden in the cloud
+tuning.
+
+**The first-cut `q_ic = f·q_sat` was structurally wrong** and the ERA5 harness
+showed why: on realistic columns it gave the CRE ~2× too weak in the LW and ~2×
+too strong in the SW, robust to `RH_crit`. Tying condensate to `q_sat` starves
+cold high cloud (cirrus, `q_sat` tiny → negligible ice water → no LW effect) and
+over-thickens warm low cloud (large `q_sat` → bright → too much SW). **Fix
+(committed): a specified in-cloud water content** [kg m⁻³] converted to a mixing
+ratio by the air density, ice much thinner than liquid, so cirrus gets a real
+ice-water path (LW) and low cloud is not over-bright (SW). Liquid and ice are
+then independent knobs, and because LW is ice-dominated (high cloud) and SW
+liquid-dominated (low cloud), they decouple.
+
+Tuned (`RH_crit` 0.52→0.35 in σ, LWC 0.017, IWC 0.018 g m⁻³), diagnosed on ERA5:
+
+| CRE (TOA) | diagnosed | ERA5 | bias |
+|---|---|---|---|
+| LW  | +19.6 | +21.8 | −2.2 |
+| SW  | −43.2 | −46.1 | +2.9 |
+| net | −23.6 | −24.2 | **+0.7** |
+
+The net CRE is within 0.7 W/m² and LW/SW each within 3; the patterns broadly
+match (LW warming over deep convection, SW cooling over the stratocumulus decks
+and storm tracks). Two residuals: total cloud cover is low (0.47 vs 0.63 — the
+scheme trades cover for optical depth but gets the CRE right), and the spatial
+distribution has compensating errors (a little too much subtropical cloud
+effect, too little in the deep tropics — the RH diagnosis makes low/subtropical
+cloud more readily than deep-tropical high cloud).
+
+**The coupled check now cleanly separates a model humidity bias.** Re-running
+the `rce_long` TOA-balance check (clouds on) with the tuned scheme: the TOA net
+flux goes from clouds-off **+88** to clouds-on **−36 W/m²** — much improved from
+the pre-tuning −100 (overcast), but still too negative. Since the scheme is
+validated correct on ERA5's columns, this residual overcast is not the cloud
+scheme: it is the model's RCE being **too moist** (near-saturated over a deep
+layer → high `cf`), so it makes more cloud than ERA5 would. That is exactly the
+finding the ERA5-column tuning was chosen to expose (§19's decision): the cloud
+scheme is now sound, and the coupled overcast is a humidity/RCE problem to chase
+separately.
 
 ## 20. The clear-sky OLR opacity bias — a vapour-opacity correction (M2.5h)
 

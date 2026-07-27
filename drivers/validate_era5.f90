@@ -33,6 +33,7 @@ program validate_era5
     use aeros_radiation, only : aeros_lw_clearsky_column, aeros_lw_cloudy_column, &
                                 aeros_sw_clearsky_column, aeros_sw_cloudy_column, &
                                 aeros_insolation_daily
+    use aeros_cloud,     only : aeros_cloud_diagnose
     use ncio,            only : nc_create, nc_write_dim, nc_write, nc_read, nc_size
 
     implicit none
@@ -56,6 +57,7 @@ program validate_era5
     real(wp), allocatable :: ttrc(:,:), tsrc(:,:), strc(:,:), ssrc(:,:)
     real(wp), allocatable :: strdc(:,:), ssrdc(:,:), tisr(:,:)
     real(wp), allocatable :: ttr(:,:), tsr(:,:)     ! all-sky TOA thermal/solar
+    real(wp), allocatable :: tcc(:,:)               ! total cloud cover [0-1]
     real(wp), allocatable :: coszen(:)              ! annual-mean, per latitude
 
     ! Outputs (lon,lat): model, ERA5, bias for six fluxes, plus insolation.
@@ -73,6 +75,11 @@ program validate_era5
     real(wp), allocatable :: crelw_m(:,:), crelw_e(:,:)   ! TOA LW cloud effect
     real(wp), allocatable :: cresw_m(:,:), cresw_e(:,:)   ! TOA SW cloud effect
     real(wp), allocatable :: crenet_m(:,:),crenet_e(:,:)  ! TOA net cloud effect
+
+    ! Diagnosed-cloud path: the aeros_cloud scheme run on the ERA5 columns, then
+    ! the cloudy kernels -- the harness for tuning the diagnosis against ERA5.
+    real(wp), allocatable :: dcrelw_m(:,:), dcresw_m(:,:), dcrenet_m(:,:)
+    real(wp), allocatable :: dcc_m(:,:)                   ! diagnosed cloud cover
 
     real(wp) :: q_co2
 
@@ -120,6 +127,7 @@ program validate_era5
     call read_sl("tisr",  tisr)
     call read_sl("ttr",   ttr)         ! all-sky TOA net thermal
     call read_sl("tsr",   tsr)         ! all-sky TOA net solar
+    call read_sl("tcc",   tcc)         ! total cloud cover
 
     ! --- annual-mean insolation-weighted cosine zenith per latitude ----------
     ! Same construction aeros_radiation_init uses; the shortwave needs an
@@ -140,6 +148,8 @@ program validate_era5
     allocate(crelw_m(nlon,nlat), crelw_e(nlon,nlat))
     allocate(cresw_m(nlon,nlat), cresw_e(nlon,nlat))
     allocate(crenet_m(nlon,nlat),crenet_e(nlon,nlat))
+    allocate(dcrelw_m(nlon,nlat), dcresw_m(nlon,nlat), dcrenet_m(nlon,nlat))
+    allocate(dcc_m(nlon,nlat))
 
     ! --- ERA5 target fields in the operator's conventions [W m-2] ------------
     olr_e = -ttrc/ACC                    ! OLR (up) = -(top net thermal)
@@ -183,10 +193,12 @@ contains
         real(wp) :: ps, ts, alb, swin
         real(wp) :: pcol(nplev), tcol(nplev), qcol(nplev), ocol(nplev), hcol(nplev)
         real(wp) :: ccol(nplev), lcol(nplev), icol(nplev)
+        real(wp) :: cfd(nplev), lcd(nplev), icd(nplev)   ! diagnosed cloud
         real(wp) :: dpc(nplev), zhalf(0:nplev), phalf(0:nplev)
         real(wp) :: fnet(0:nplev), heat(nplev)
         real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net
         real(wp) :: olr_a, fdw_a, swup_a, swdw_a, swnet_a
+        real(wp) :: olr_d, fdw_d, swup_d, swdw_d, swnet_d, ccmax
 
         ps  = sp2(i,j)                    ! Pa
         ts  = skt2(i,j)
@@ -268,6 +280,27 @@ contains
         crelw_m(i,j)  = olr - olr_a                    ! clear - all-sky OLR
         cresw_m(i,j)  = (swin - swup_a) - (swin - sw_up)
         crenet_m(i,j) = crelw_m(i,j) + cresw_m(i,j)
+
+        ! diagnosed-cloud path: the aeros_cloud scheme on this ERA5 column, then
+        ! the same cloudy operators -- the tuning target is that this reproduce
+        ! the observed-cloud CRE above and ERA5's total cloud cover.
+        call aeros_cloud_diagnose(n, tcol(1:n), qcol(1:n), pcol(1:n), ps, &
+            cfd(1:n), lcd(1:n), icd(1:n))
+        call aeros_lw_cloudy_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
+            dpc(1:n), zhalf(0:n), ts, q_co2, .TRUE., &
+            cfd(1:n), lcd(1:n), icd(1:n), fnet(0:n), heat(1:n), olr_d, fdw_d)
+        call aeros_sw_cloudy_column(n, qcol(1:n), ocol(1:n), .TRUE., &
+            dpc(1:n), swin, coszen(j), alb, alb, &
+            cfd(1:n), lcd(1:n), icd(1:n), heat(1:n), swup_d, swdw_d, swnet_d)
+
+        ccmax = 0.0_wp
+        do kk = 1, n
+            ccmax = max(ccmax, cfd(kk))                ! max overlap, as the kernels use
+        end do
+        dcrelw_m(i,j)  = olr - olr_d
+        dcresw_m(i,j)  = (swin - swup_d) - (swin - sw_up)
+        dcrenet_m(i,j) = dcrelw_m(i,j) + dcresw_m(i,j)
+        dcc_m(i,j)     = ccmax
         return
     end subroutine one_column
 
@@ -278,6 +311,7 @@ contains
         swt_m(i,j) = mv; swd_m(i,j) = mv; swn_m(i,j) = mv; insol(i,j) = mv
         olra_m(i,j) = mv; swta_m(i,j) = mv
         crelw_m(i,j) = mv; cresw_m(i,j) = mv; crenet_m(i,j) = mv
+        dcrelw_m(i,j) = mv; dcresw_m(i,j) = mv; dcrenet_m(i,j) = mv; dcc_m(i,j) = mv
         return
     end subroutine set_missing
 
@@ -386,6 +420,12 @@ contains
         call line("TOA LW cloud effect ", crelw_m,  crelw_e)
         call line("TOA SW cloud effect ", cresw_m,  cresw_e)
         call line("TOA net cloud effect", crenet_m, crenet_e)
+        write(*,"(a)") ""
+        write(*,"(a)") "  diagnosed cloud (aeros_cloud on ERA5)  model     ERA5     bias"
+        call line("TOA LW cloud effect ", dcrelw_m,  crelw_e)
+        call line("TOA SW cloud effect ", dcresw_m,  cresw_e)
+        call line("TOA net cloud effect", dcrenet_m, crenet_e)
+        call line("total cloud cover   ", dcc_m,     tcc)
         return
     end subroutine report_global_means
 
@@ -426,6 +466,13 @@ contains
         call wbias("cre_sw_toa", cresw_m, cresw_e)
         call wmap("cre_net_toa_mod", crenet_m); call wmap("cre_net_toa_era", crenet_e)
         call wbias("cre_net_toa", crenet_m, crenet_e)
+        ! diagnosed-cloud path (aeros_cloud on ERA5 columns) vs ERA5
+        call wmap("dcre_lw_toa_mod", dcrelw_m); call wbias("dcre_lw_toa", dcrelw_m, crelw_e)
+        call wmap("dcre_sw_toa_mod", dcresw_m); call wbias("dcre_sw_toa", dcresw_m, cresw_e)
+        call wmap("dcre_net_toa_mod", dcrenet_m); call wbias("dcre_net_toa", dcrenet_m, crenet_e)
+        call nc_write(trim(fout), "tcc_mod", dcc_m, dim1="lon", dim2="lat", &
+                      units="1", missing_value=-9999.0_wp)
+        call nc_write(trim(fout), "tcc_era", tcc, dim1="lon", dim2="lat", units="1")
         return
     end subroutine write_output
 
