@@ -26,6 +26,7 @@ const ERA5_PL = "/Users/alrobi001/data/era5/monthly-pressure-levels"
 const OUTDIR  = "docs/figures"
 
 model_nc = length(ARGS) >= 1 ? ARGS[1] : "output/rce_rh_rot_cr_0.93.nc"
+outname  = length(ARGS) >= 2 ? ARGS[2] : "rce_validate_era5.png"
 plc(v) = joinpath(ERA5_PL, "era5_monthly-pressure-levels_$(v)_1991-2020_clim.nc")
 
 # --- readers (shared shape with rce_humidity_vs_era5.jl) -----------------
@@ -145,5 +146,5 @@ xsec!(4, 3, latM, pm, rE_m, "ERA5 RH (%)";             crange=(0, 100), cmap=:vi
 Label(fig[0, :], "Coupled RCE vs ERA5 — moist-line validation (zonal/annual mean)";
       fontsize = 20, font = :bold)
 
-save(joinpath(OUTDIR, "rce_validate_era5.png"), fig)
-println("\nwrote $(joinpath(OUTDIR, "rce_validate_era5.png"))")
+save(joinpath(OUTDIR, outname), fig)
+println("\nwrote $(joinpath(OUTDIR, outname))")
