@@ -93,10 +93,11 @@ New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
    moist RCE state (coupled TOA net swings +88→−100 W/m², planetary albedo
    ~0.85). Raise `RH_crit`, cut the condensate fraction, and check against ERA5
    `cc` / the §17 CRE. This is the route to physical TOA balance in the RCE.
-4. **The clear-sky OLR −16 W/m² bias** (§14): the broadband water-vapour band is
-   slightly too opaque in the warm moist tropics. It bleeds into the cloudy LW
-   CRE (§18, −3.6 residual). Retuning the LW vapour fit against ERA5 clear-sky is
-   the fix.
+4. **The clear-sky OLR bias** (§14, §20): addressed with a single documented
+   `LW_VAP_OPAC` correction (0.80) — OLR bias −15.9 → −7.1, and it improved the
+   cloudy LW CRE too (−3.6 → −2.1). A single knob can't null both OLR and
+   surface-LW (they trade off), so a residual −7 OLR remains; the structural fix
+   is ecCKD. Not a blocker.
 5. **ERA5 moist-line (Tier 2):** now fully unblocked — the bounded-RCE vehicle
    exists and the Tier-2 data is in hand. Tier 1 (clear-sky, §14) and the CRE
    validation (§17–18) are done; the moist-line (RH / moist-adiabat / u,v vs
