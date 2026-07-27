@@ -820,3 +820,46 @@ by the case file when present) does the rest. It is carried in the signature, no
 in module state — `nml` stays stateless and shared across models. Absent
 `defaults_file`, behaviour is exactly the legacy path, so the `_init`-only test
 and driver paths are untouched.
+
+## 17. ERA5 cloud radiative effect — the Tier-2 target (M2.5e)
+
+The Tier-2 ERA5 fields the earlier sessions lacked (cloud fraction/water, RH,
+u, v) are now delivered as 1991–2020 monthly climatologies on the same
+144×73×37 grid as the Tier-1 clear-sky data (`~/data/era5/monthly-pressure-
+levels`, `monthly-single-levels`). This unblocks the cloudy-sky radiation work.
+The first step is to pin the **observational target** the model's cloudy-sky
+branch (§13, still clear-sky only) must reproduce: the cloud radiative effect.
+
+ERA5 ships paired all-sky and clear-sky flux diagnostics, so the CRE follows
+directly with no model in the loop — CRE ≡ (all-sky − clear-sky) net downward
+flux, positive = clouds warm the system, at both the TOA (`ttr`/`ttrc` thermal,
+`tsr`/`tsrc` solar) and the surface (`str`/`strc`, `ssr`/`ssrc`). Fluxes are
+ERA5 daily accumulations [J m⁻²], /86400 → W m⁻², downward-positive (the §14
+convention). `scripts/plot_era5_cre.jl` reads the `_clim.nc` files, annual-means
+the 12 months, and writes `docs/figures/era5_cre.png` (six CRE maps) and
+`docs/figures/era5_moisture_clim.png` (column water vapour, total cloud cover,
+and zonal-mean RH and cloud-fraction cross-sections). It is a pure-ERA5
+diagnostic — a standalone Julia script, no Fortran driver.
+
+Area-weighted global-mean CRE (annual mean, W m⁻²):
+
+| | LW | SW | net |
+|---|---|---|---|
+| TOA | +21.8 | −46.1 | −24.2 |
+| surface | +24.6 | −48.6 | −24.0 |
+
+These sit right on the literature (CERES ≈ +26 / −47 / −21 at TOA; ERA5's own
+clear-sky reference makes the net a touch stronger-negative, as expected). The
+patterns are textbook: TOA LW warming peaks over the ITCZ and warm-pool deep
+convection; SW cooling is strongest over the marine stratocumulus decks and the
+storm tracks; net CRE cools the tropics and midlatitudes and is near-neutral
+over the subtropical deserts. TCWV (24.3 kg m⁻²) and total cloud cover (0.63)
+likewise match observations, and the zonal-mean RH shows the moist boundary
+layer / dry subtropical mid-troposphere / moist ITCZ tower structure. The only
+artifact is a cosmetic sub-surface step at the bottom-left of the cross-sections
+over the high Antarctic plateau (1000/925 hPa levels below ground) — the same
+column-truncation cosmetic noted for the §14 high-terrain speckle.
+
+This is Tier 2's target. The cloudy-sky LW/SW branch (§13, deferred) is next: it
+must reproduce this CRE, and it is also the physical route to the §14 OLR −16
+W/m² clear-sky bias' cloudy counterpart.
