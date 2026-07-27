@@ -139,13 +139,23 @@ $(objdir)/aeros_cloud.o: $(physdir)/aeros_cloud.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_condensation.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M2.6: ecCKD-style correlated-k gas optics (section 5, option 1). The opt-in
+# radiation scheme behind SCHEME_ECCKD; self-contained gas physics on the
+# resolved column, so it needs only aeros_defs. aeros_radiation dispatches to it,
+# so it is archived before aeros_radiation.
+$(objdir)/aeros_ecckd.o: $(physdir)/aeros_ecckd.f90 \
+							$(objdir)/aeros_defs.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 # M2.4: radiation (section 5). Ported SESAM broadband LW band kernel on the
 # resolved column. A column process like the others; needs the vertical
 # coordinate for the layer pressures and the grid for its geometry. The all-sky
-# path consumes the diagnostic cloud scheme.
+# path consumes the diagnostic cloud scheme. Dispatches to aeros_ecckd for the
+# opt-in correlated-k scheme (SCHEME_ECCKD).
 $(objdir)/aeros_radiation.o: $(physdir)/aeros_radiation.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o \
-							$(objdir)/aeros_grid.o $(objdir)/aeros_cloud.o
+							$(objdir)/aeros_grid.o $(objdir)/aeros_cloud.o \
+							$(objdir)/aeros_ecckd.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 # M2.4c: surface energy/moisture budget (section 6.1). Prescribed-SST
@@ -222,6 +232,7 @@ aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_condensation.o \
                  $(objdir)/aeros_convection.o \
                  $(objdir)/aeros_cloud.o \
+                 $(objdir)/aeros_ecckd.o \
                  $(objdir)/aeros_radiation.o \
                  $(objdir)/aeros_surface.o \
                  $(objdir)/aeros_vdiff.o \
