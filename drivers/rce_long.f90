@@ -29,14 +29,21 @@ program rce_long
     use aeros_state
     use aeros_vertical
     use aeros_condensation, only : aeros_qsat
+    use aeros_cloud,    only : aeros_cloud_diagnose
     use aeros_timestep
     use aeros_ocean,    only : aeros_ocean_init
     use nml,            only : nml_read
+    use ncio,           only : nc_create, nc_write_dim, nc_write
 
     implicit none
 
     ! --- namelist-configurable, with test_rce defaults -----------------------
     character(len=512) :: nmlfile
+    ! End-of-run zonal-mean RH/cf dump (arg 2; "" = off). NOT a namelist key --
+    ! kept off the namelist so it needs no entry in every rce_*.nml (nml_read is
+    ! fatal on a missing key in this driver). The comparison against ERA5 is done
+    ! offline by scripts/rce_humidity_vs_era5.jl.
+    character(len=512) :: rh_out = "output/rce_rh.nc"
     integer  :: trunc = 21, nlev = 12, nstep = 4800, ndiff = 6
     integer  :: print_every = 96          ! ~2 model days at dt=1800
     real(wp) :: dt = 1800.0_wp, tau_diff = 6.0_wp
@@ -78,6 +85,7 @@ program rce_long
 
     nmlfile = "rce.nml"
     if (command_argument_count() >= 1) call get_command_argument(1, nmlfile)
+    if (command_argument_count() >= 2) call get_command_argument(2, rh_out)
     call read_config()
 
     call aeros_sht_pool_init(pool, trunc, quick=.TRUE.)
@@ -222,6 +230,8 @@ program rce_long
 
     if (.not. blew_up) write(*,"(a)") " rce_long:: completed without NaN"
 
+    if (len_trim(rh_out) > 0) call dump_rh(trim(rh_out))
+
     call aeros_timestep_end(ts)
     call aeros_state_end(now)
     call aeros_vgrid_end(vg)
@@ -229,6 +239,81 @@ program rce_long
     call aeros_sht_pool_end(pool)
 
 contains
+
+    subroutine dump_rh(fname)
+        ! End-of-run zonal-mean state for the humidity-bias diagnosis (handoff
+        ! step 3): the model RCE overcasts (rce_long TOA clouds-on -36 W/m2) even
+        ! though the cloud scheme is validated correct on ERA5 columns (m2_results
+        ! s21), so the residual is a *model* moisture bias. This writes the model's
+        ! own zonal-mean RH(lat,sigma) and diagnosed cloud fraction so it can be
+        ! laid against the ERA5 RH climatology (scripts/rce_humidity_vs_era5.jl) to
+        ! localize where and by how much the column is too moist. Pointwise RH and
+        ! cf are zonal-averaged (both are nonlinear in T,q, so we average the
+        ! diagnostic, not the inputs). `cover` is the max-overlap total cloud cover
+        ! per latitude -- the quantity the overcast TOA reflects directly.
+        character(len=*), intent(in) :: fname
+        real(wp) :: phc(0:nlev), pfc(nlev), dpcc(nlev)
+        real(wp) :: cf(nlev), clwc(nlev), ciwc(nlev)
+        real(wp) :: qsl, dqsl, colcov, rnlon
+        real(wp), allocatable :: rh_zm(:,:), cf_zm(:,:), t_zm(:,:), q_zm(:,:), p_zm(:,:)
+        real(wp), allocatable :: cover(:), latout(:), levout(:)
+        integer :: ii, jj, kk
+
+        rnlon = real(grd%nlon, wp)
+        allocate(rh_zm(grd%nlat,nlev), cf_zm(grd%nlat,nlev), t_zm(grd%nlat,nlev), &
+                 q_zm(grd%nlat,nlev), p_zm(grd%nlat,nlev), cover(grd%nlat), &
+                 latout(grd%nlat), levout(nlev))
+        rh_zm = 0.0_wp; cf_zm = 0.0_wp; t_zm = 0.0_wp; q_zm = 0.0_wp
+        p_zm = 0.0_wp; cover = 0.0_wp
+        latout = grd%lat(1:grd%nlat)
+        levout = vg%sigma_full(1:nlev)
+
+        do jj = 1, grd%nlat
+            do ii = 1, grd%nlon
+                call aeros_vgrid_pressure(vg, now%ps(ii,jj), phc, pfc, dpcc)
+                call aeros_cloud_diagnose(nlev, now%temp_g(ii,jj,:), &
+                    now%qv_g(ii,jj,:), pfc, now%ps(ii,jj), cf, clwc, ciwc)
+                colcov = 0.0_wp
+                do kk = 1, nlev
+                    call aeros_qsat(now%temp_g(ii,jj,kk), pfc(kk), qsl, dqsl)
+                    rh_zm(jj,kk) = rh_zm(jj,kk) + &
+                        now%qv_g(ii,jj,kk)/max(qsl,1.0e-12_wp)*100.0_wp
+                    cf_zm(jj,kk) = cf_zm(jj,kk) + cf(kk)
+                    t_zm(jj,kk)  = t_zm(jj,kk)  + now%temp_g(ii,jj,kk)
+                    q_zm(jj,kk)  = q_zm(jj,kk)  + now%qv_g(ii,jj,kk)*1000.0_wp
+                    p_zm(jj,kk)  = p_zm(jj,kk)  + pfc(kk)/100.0_wp
+                    colcov = max(colcov, cf(kk))     ! max-overlap column cover
+                end do
+                cover(jj) = cover(jj) + colcov
+            end do
+            rh_zm(jj,:) = rh_zm(jj,:)/rnlon
+            cf_zm(jj,:) = cf_zm(jj,:)/rnlon
+            t_zm(jj,:)  = t_zm(jj,:)/rnlon
+            q_zm(jj,:)  = q_zm(jj,:)/rnlon
+            p_zm(jj,:)  = p_zm(jj,:)/rnlon
+            cover(jj)   = cover(jj)/rnlon
+        end do
+
+        call nc_create(fname)
+        call nc_write_dim(fname, "lat", x=latout, units="degrees_north")
+        call nc_write_dim(fname, "lev", x=levout, units="sigma")
+        call nc_write(fname, "rh",    rh_zm, dim1="lat", dim2="lev", units="%", &
+            long_name="zonal-mean relative humidity")
+        call nc_write(fname, "cf",    cf_zm, dim1="lat", dim2="lev", units="1", &
+            long_name="zonal-mean diagnosed cloud fraction")
+        call nc_write(fname, "t",     t_zm,  dim1="lat", dim2="lev", units="K", &
+            long_name="zonal-mean temperature")
+        call nc_write(fname, "q",     q_zm,  dim1="lat", dim2="lev", units="g/kg", &
+            long_name="zonal-mean specific humidity")
+        call nc_write(fname, "pfull", p_zm,  dim1="lat", dim2="lev", units="hPa", &
+            long_name="zonal-mean layer pressure")
+        call nc_write(fname, "cover", cover, dim1="lat", units="1", &
+            long_name="max-overlap total cloud cover")
+        write(*,"(a)") " rce_long:: wrote zonal-mean RH/cf dump -> "//trim(fname)
+
+        deallocate(rh_zm, cf_zm, t_zm, q_zm, p_zm, cover, latout, levout)
+        return
+    end subroutine dump_rh
 
     subroutine read_config()
         logical :: ex

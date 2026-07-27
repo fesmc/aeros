@@ -1029,3 +1029,59 @@ helps the cloudy branch: with the clear-sky OLR less biased there is more
 headroom for cloud, so the §18 TOA cloud radiative effect improves — LW CRE
 −3.6 → −2.1, net CRE −2.0 → −0.5 against ERA5. `vap_opac` is a named parameter
 (one place, documented) to be retired when ecCKD lands.
+
+## 22. The coupled-RCE humidity bias, localized against ERA5 (M2.5j)
+
+§21 left the overcast coupled TOA (`rce_long` clouds-on −36 W/m²) attributed —
+by inference — to a *model* moisture bias, since the cloud scheme is validated
+correct on ERA5 columns. This section measures it directly. `rce_long` now dumps
+its end-of-run zonal-mean RH, diagnosed cloud fraction, T, q and cover (arg 2 =
+output NetCDF; not a namelist key, so no `rce_*.nml` needs editing), and
+`scripts/rce_humidity_vs_era5.jl` lays it against the ERA5 1991–2020 RH
+climatology (`r`) — figure `docs/figures/rce_humidity_vs_era5.png`. Two vehicles
+share an identical surface boundary (prescribed SST) and differ *only* in the
+dynamics, to separate a structural (missing-subsidence) bias from a column-physics
+one: **rot** (rotating, realistic insolation) and **uni** (non-rotating, uniform
+insolation — each column ≈ a local 1-D RCE). Both 100-day, clouds on.
+
+**The bias is column-wide and enormous, not a subtropical detail.** The model is
+near-saturated (RH ~85–100%) at essentially every latitude and height; ERA5 runs
+17% aloft, ~45% in the mid-troposphere, ~78% in the boundary layer. Area-weighted
+mean RH, model top → surface:
+
+| p [hPa] | rot | uni | ERA5 | rot−ERA5 |
+|---|---|---|---|---|
+| 74  | 99.8 | 99.6 | 16.9 | **+82.9** |
+| 198 | 93.1 | 98.1 | 40.8 | +52.3 |
+| 313 | 89.2 | 88.3 | 47.7 | +41.5 |
+| 519 | 87.5 | 98.2 | 43.3 | +44.2 |
+| 693 | 96.5 | 76.2 | 48.6 | +47.9 |
+| 891 | 93.9 | 83.6 | 72.4 | +21.5 |
+| 981 | 97.3 | 87.0 | 77.1 | +20.2 |
+
+Cloud cover follows: rot 1.00, uni 0.96, ERA5 0.63 — the model is globally
+overcast, which is the −36 W/m² directly.
+
+**The decisive result: it is column physics, not missing subsidence.** Two
+signatures both point the same way. (1) The non-rotating uniform vehicle — which
+has essentially no circulation, so no dynamical subsidence anywhere — is *equally*
+saturated (uni ≈ rot). If the bias were the missing subtropical Hadley drying, it
+would appear in rot only where the subtropics ought to be dry, and uni would be
+free of it. It is in both. (2) In the rot cross-section the *only* sub-saturated
+region is the tropical upper troposphere (200–600 hPa, ±30°) — exactly where
+deep convection is actively firing. Everywhere convection is not actively
+overturning, RH pins at ~100%. So the model has **no free-tropospheric drying
+mechanism except active deep convection**: SBM relaxes q toward `rh_ref`·q_sat
+only in buoyant columns, and large-scale condensation only *caps* supersaturation
+at 100% and leaves it there — nothing ever brings a layer back below saturation.
+The classic 1-D-RCE "everything saturates without subsidence drying" attractor,
+here severe enough to overcast the planet. (Aloft, RH ~100% at 74 hPa vs ERA5's
+17% is a second, smaller issue: no tropopause cold-trap / freeze-drying and q_sat
+is tiny there, so a trace of trapped q saturates it; little condensate results,
+so it matters less for the cover than the deep 500–900 hPa moist layer.)
+
+This is the barrier to a physical coupled TOA balance, and it is now localized:
+the fix must give the non-convecting free troposphere a way to dry (a subsidence
+/ environmental-descent drying, a convective downdraft/detrainment that removes
+column water, or a re-evaporation path that can pull q below saturation), not a
+cloud-scheme knob.
