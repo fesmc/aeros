@@ -1147,3 +1147,47 @@ the residual RH bias (and the cover's flat latitudinal structure, which the RCE'
 weak circulation cannot shape into ERA5's dry-subtropic / moist-storm-track
 pattern) is deferred to a subsidence-drying treatment (§22's option C). The knob
 default stays 1.0 (bit-reproducible); 0.93 is set per-run in the RCE configs.
+
+## 24. ERA5 moist-line validation of the coupled RCE (M2.5l)
+
+The M2 validation target (`docs/design.md`): the coupled radiative-convective
+equilibrium judged against the ERA5 1991–2020 climatology in the zonal mean —
+temperature, the zonal-wind jet, and RH. This closes the loop the clear-sky line
+(§14) and the CRE (§17–23) left open: the whole moist stack run to equilibrium
+and compared to *climate*, not conservation. The `rce_long` dump now carries
+zonal-mean `u`/`v` alongside `T`/`q`/`RH`, and `scripts/rce_validate_era5.jl`
+regrids ERA5 `t`/`u`/`r` onto the model grid for the comparison. Driven on the
+balanced rotating vehicle (`cond_rh_crit = 0.93`, §23); figure
+`docs/figures/rce_validate_era5.png`.
+
+**Temperature — the mid/lower troposphere is right, two biases aloft and at the
+pole.** Area-mean |bias| < 3 K from 900 to 420 hPa; the moist-adiabatic structure
+the convection scheme builds matches ERA5 through the bulk of the troposphere.
+Two departures: (a) an **upper-tropospheric warm bias** (+8 K at 313 hPa, +12 K
+at 198 hPa), strongest in midlatitudes — the L12 upper levels span a deep layer
+and the detraining moist adiabat runs too warm there; (b) a **polar
+lower-tropospheric warm bias** (off-scale at the SH pole), a prescribed-SST
+artifact — this vehicle has no cold poles or sea ice, so the near-surface polar
+air cannot cool to ERA5 values. Near-surface is otherwise slightly cold
+(−1.4/−2.8 K at 940/981 hPa).
+
+**Jet — right position, a quarter of the strength.** The model's zonal-mean jet
+peaks at **±36°, 198 hPa** — ERA5's jet latitude and level almost exactly — but at
+only **7.4/7.5 m/s against ERA5's 27/31**. So the thermal-wind response to the
+equator–pole gradient puts the jet in the right place, but it reaches ~25% of the
+observed speed: the axisymmetric RCE has no baroclinic-eddy momentum-flux
+convergence to spin the jet up to full strength. The `u`-bias is a deep
+easterly-side deficit centered on both jet cores. This is the direct motivation
+for the eddy question (handoff step 2): whether a seeded T21 jet grows the eddies
+that would close this gap, or T42 is needed.
+
+**RH — as §23.** Realistic where deep convection dries (the tropical
+upper-troposphere minimum is reproduced), too moist elsewhere: the `cond_rh_crit`
+ceiling holds the free troposphere near 85–90% against ERA5's ~45%, the standing
+subsidence-drying limitation.
+
+**Verdict.** The coupled RCE reproduces the gross thermal structure and the jet
+*position*; every deficit is consistent and physically attributable — weak jet
+(no eddies), moist free troposphere (no subsidence drying), warm upper-troposphere
+(coarse L12 + detrainment), warm poles (prescribed SST) — none random. This is a
+credible first Tier-2 validation and a clean baseline for the next steps.

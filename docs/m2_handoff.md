@@ -105,10 +105,16 @@ New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
    cloudy LW CRE too (−3.6 → −2.1). A single knob can't null both OLR and
    surface-LW (they trade off), so a residual −7 OLR remains; the structural fix
    is ecCKD. Not a blocker.
-5. **ERA5 moist-line (Tier 2):** now fully unblocked — the bounded-RCE vehicle
-   exists and the Tier-2 data is in hand. Tier 1 (clear-sky, §14) and the CRE
-   validation (§17–18) are done; the moist-line (RH / moist-adiabat / u,v vs
-   ERA5) waits only on a balanced coupled RCE (steps 1–3).
+5. **ERA5 moist-line (Tier 2) — DONE** (§24). The coupled RCE (rotating,
+   `cond_rh_crit=0.93`) validated against ERA5 zonal-mean T/u/RH via
+   `scripts/rce_validate_era5.jl` (`docs/figures/rce_validate_era5.png`). Verdict:
+   gross thermal structure right (mid/lower-trop |T bias| < 3 K), jet at the right
+   latitude/level (±36°, 198 hPa) but only ~25% of ERA5 strength (7.4 vs 27–31
+   m/s), RH still too moist (the §23 ceiling), plus an upper-trop warm bias (+12 K
+   @ 198 hPa, coarse L12) and a polar warm bias (prescribed-SST artifact, no cold
+   poles). Every deficit is physically attributable. **Natural next: step 2** —
+   the weak jet is exactly the missing-eddy signature; seed a T21 asymmetry and
+   see if baroclinic eddies grow and spin the jet toward ERA5 strength, else T42.
 
 ## Gotchas the next session will want
 

@@ -262,15 +262,17 @@ contains
         real(wp) :: cf(nlev), clwc(nlev), ciwc(nlev)
         real(wp) :: qsl, dqsl, colcov, rnlon
         real(wp), allocatable :: rh_zm(:,:), cf_zm(:,:), t_zm(:,:), q_zm(:,:), p_zm(:,:)
+        real(wp), allocatable :: u_zm(:,:), v_zm(:,:)
         real(wp), allocatable :: cover(:), latout(:), levout(:)
         integer :: ii, jj, kk
 
         rnlon = real(grd%nlon, wp)
         allocate(rh_zm(grd%nlat,nlev), cf_zm(grd%nlat,nlev), t_zm(grd%nlat,nlev), &
-                 q_zm(grd%nlat,nlev), p_zm(grd%nlat,nlev), cover(grd%nlat), &
+                 q_zm(grd%nlat,nlev), p_zm(grd%nlat,nlev), &
+                 u_zm(grd%nlat,nlev), v_zm(grd%nlat,nlev), cover(grd%nlat), &
                  latout(grd%nlat), levout(nlev))
         rh_zm = 0.0_wp; cf_zm = 0.0_wp; t_zm = 0.0_wp; q_zm = 0.0_wp
-        p_zm = 0.0_wp; cover = 0.0_wp
+        p_zm = 0.0_wp; u_zm = 0.0_wp; v_zm = 0.0_wp; cover = 0.0_wp
         latout = grd%lat(1:grd%nlat)
         levout = vg%sigma_full(1:nlev)
 
@@ -288,6 +290,8 @@ contains
                     t_zm(jj,kk)  = t_zm(jj,kk)  + now%temp_g(ii,jj,kk)
                     q_zm(jj,kk)  = q_zm(jj,kk)  + now%qv_g(ii,jj,kk)*1000.0_wp
                     p_zm(jj,kk)  = p_zm(jj,kk)  + pfc(kk)/100.0_wp
+                    u_zm(jj,kk)  = u_zm(jj,kk)  + now%u(ii,jj,kk)
+                    v_zm(jj,kk)  = v_zm(jj,kk)  + now%v(ii,jj,kk)
                     colcov = max(colcov, cf(kk))     ! max-overlap column cover
                 end do
                 cover(jj) = cover(jj) + colcov
@@ -297,6 +301,8 @@ contains
             t_zm(jj,:)  = t_zm(jj,:)/rnlon
             q_zm(jj,:)  = q_zm(jj,:)/rnlon
             p_zm(jj,:)  = p_zm(jj,:)/rnlon
+            u_zm(jj,:)  = u_zm(jj,:)/rnlon
+            v_zm(jj,:)  = v_zm(jj,:)/rnlon
             cover(jj)   = cover(jj)/rnlon
         end do
 
@@ -313,11 +319,15 @@ contains
             long_name="zonal-mean specific humidity")
         call nc_write(fname, "pfull", p_zm,  dim1="lat", dim2="lev", units="hPa", &
             long_name="zonal-mean layer pressure")
+        call nc_write(fname, "u",     u_zm,  dim1="lat", dim2="lev", units="m/s", &
+            long_name="zonal-mean zonal wind")
+        call nc_write(fname, "v",     v_zm,  dim1="lat", dim2="lev", units="m/s", &
+            long_name="zonal-mean meridional wind")
         call nc_write(fname, "cover", cover, dim1="lat", units="1", &
             long_name="max-overlap total cloud cover")
         write(*,"(a)") " rce_long:: wrote zonal-mean RH/cf dump -> "//trim(fname)
 
-        deallocate(rh_zm, cf_zm, t_zm, q_zm, p_zm, cover, latout, levout)
+        deallocate(rh_zm, cf_zm, t_zm, q_zm, p_zm, u_zm, v_zm, cover, latout, levout)
         return
     end subroutine dump_rh
 
