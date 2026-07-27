@@ -78,6 +78,7 @@ module aeros_radiation
     use aeros_cloud,    only : aeros_cloud_diagnose
     use aeros_insolation, only : aeros_insol_class, aeros_insol_init, &
                                aeros_insol_end, aeros_insol_annual, aeros_insol_day
+    use aeros_ecckd,    only : aeros_ecckd_lw_clearsky_column
     use nml,            only : nml_read
 
     implicit none
@@ -1099,9 +1100,20 @@ contains
                             rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
                             rad%albedo, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
                     else
-                        call aeros_lw_clearsky_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
-                            o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
-                            fnet, heat_lw, olr, fdw_lw)
+                        ! Clear-sky longwave: dispatch on the scheme selector.
+                        ! SESAM is the default (bit-for-bit unchanged); the opt-in
+                        ! correlated-k kernel is reached only via SCHEME_ECCKD.
+                        ! The shortwave stays SESAM until the ecCKD SW sibling
+                        ! lands (Phase 2), so clear-sky SW is scheme-agnostic here.
+                        if (rad%scheme == SCHEME_ECCKD) then
+                            call aeros_ecckd_lw_clearsky_column(nlev, t_g(i,j,:), &
+                                qv_g(i,j,:), o3col, dpc, z_half, t_s(i,j), &
+                                rad%q_co2, rad%l_o3, fnet, heat_lw, olr, fdw_lw)
+                        else
+                            call aeros_lw_clearsky_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
+                                o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
+                                fnet, heat_lw, olr, fdw_lw)
+                        end if
 
                         call aeros_sw_clearsky_column(nlev, qv_g(i,j,:), o3col, &
                             rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &

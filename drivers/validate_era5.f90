@@ -33,10 +33,16 @@ program validate_era5
     use aeros_radiation, only : aeros_lw_clearsky_column, aeros_lw_cloudy_column, &
                                 aeros_sw_clearsky_column, aeros_sw_cloudy_column, &
                                 aeros_insolation_daily
+    use aeros_ecckd,     only : aeros_ecckd_lw_clearsky_column
     use aeros_cloud,     only : aeros_cloud_diagnose
     use ncio,            only : nc_create, nc_write_dim, nc_write, nc_read, nc_size
 
     implicit none
+
+    ! Clear-sky longwave scheme selector (arg 3): "sesam" (default) or "ecckd".
+    ! Only the clear-sky LW kernel switches; the all-sky and diagnosed-cloud
+    ! paths stay on SESAM (the ecCKD cloudy branch is a later phase).
+    logical :: lw_ecckd = .FALSE.
 
     ! --- CO2 for the 1991-2020 climatology period. Global-mean CO2 rose from
     !     ~355 ppm (1991) to ~412 ppm (2020); ~380 ppm is the period mean.
@@ -81,17 +87,35 @@ program validate_era5
     real(wp), allocatable :: dcrelw_m(:,:), dcresw_m(:,:), dcrenet_m(:,:)
     real(wp), allocatable :: dcc_m(:,:)                   ! diagnosed cloud cover
 
-    real(wp) :: q_co2
+    real(wp) :: q_co2, co2_ppm_run
 
     ! --- paths ---------------------------------------------------------------
     base = "/Users/alrobi001/data/era5"
     fout = "output/era5_rad_validation.nc"
     if (command_argument_count() >= 1) call get_command_argument(1, base)
     if (command_argument_count() >= 2) call get_command_argument(2, fout)
+    if (command_argument_count() >= 3) then
+        block
+            character(len=32) :: sarg
+            call get_command_argument(3, sarg)
+            lw_ecckd = (trim(adjustl(sarg)) == "ecckd")
+        end block
+    end if
+    ! arg 4: CO2 override [ppm] (for the doubling diagnostic); default 380
+    co2_ppm_run = CO2_PPM
+    if (command_argument_count() >= 4) then
+        block
+            character(len=32) :: carg
+            call get_command_argument(4, carg)
+            read(carg, *) co2_ppm_run
+        end block
+    end if
+    write(*,"(a,l1,a,f7.1)") " validate_era5:: ecCKD LW = ", lw_ecckd, &
+                             "   CO2 ppm = ", co2_ppm_run
     dpl = trim(base)//"/monthly-pressure-levels/"
     dsl = trim(base)//"/monthly-single-levels/"
 
-    q_co2 = CO2_PPM*1.0e-6_wp * M_CO2/M_AIR
+    q_co2 = co2_ppm_run*1.0e-6_wp * M_CO2/M_AIR
 
     ! --- dimensions ----------------------------------------------------------
     nlon  = nc_size(trim(pl("t")), "longitude")
@@ -248,9 +272,15 @@ contains
             if (zhalf(k-1) <= zhalf(k)) zhalf(k-1) = zhalf(k) + 10.0_wp
         end do
 
-        call aeros_lw_clearsky_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
-            dpc(1:n), zhalf(0:n), ts, q_co2, .TRUE., &
-            fnet(0:n), heat(1:n), olr, fdw_lw)
+        if (lw_ecckd) then
+            call aeros_ecckd_lw_clearsky_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
+                dpc(1:n), zhalf(0:n), ts, q_co2, .TRUE., &
+                fnet(0:n), heat(1:n), olr, fdw_lw)
+        else
+            call aeros_lw_clearsky_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
+                dpc(1:n), zhalf(0:n), ts, q_co2, .TRUE., &
+                fnet(0:n), heat(1:n), olr, fdw_lw)
+        end if
 
         swin = tisr(i,j)/ACC
         call aeros_sw_clearsky_column(n, qcol(1:n), ocol(1:n), .TRUE., &
