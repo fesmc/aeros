@@ -39,7 +39,8 @@ program test_radiation
     use aeros_defs,         only : S0, pi
     use aeros_radiation,    only : aeros_lw_clearsky_column, &
                                    aeros_lw_cloudy_column, &
-                                   aeros_sw_clearsky_column, aeros_insolation_daily
+                                   aeros_sw_clearsky_column, aeros_sw_cloudy_column, &
+                                   aeros_insolation_daily
 
     implicit none
 
@@ -96,6 +97,7 @@ program test_radiation
     call test_insolation(nfail)
     call test_shortwave(nfail)
     call test_cloudy_lw(nfail)
+    call test_cloudy_sw(nfail)
 
     call aeros_vgrid_end(vg)
     call aeros_grid_end(grd)
@@ -426,6 +428,86 @@ contains
                    "a thicker cloud reduces OLR further (monotone in opacity)", nfail)
         return
     end subroutine test_cloudy_lw
+
+    ! === 9. All-sky (cloudy) shortwave =======================================
+
+    subroutine test_cloudy_sw(nfail)
+        integer, intent(inout) :: nfail
+        real(wp) :: cz, swdn
+        real(wp) :: heat_cs(nlev), up_cs, dw_cs, net_cs
+        real(wp) :: heat0(nlev), up0, dw0, net0
+        real(wp) :: heat1(nlev), up1, dw1, net1
+        real(wp) :: heat2(nlev), up2, dw2, net2
+        real(wp) :: cf(nlev), clwc(nlev), ciwc(nlev)
+        real(wp) :: a_atm, col_heat, rel, sig
+        integer  :: kk
+
+        write(*,*) ""
+        write(*,*) " -- all-sky shortwave (mid-tropospheric cloud, 30N midsummer)"
+
+        call aeros_insolation_daily(30.0_wp*real(pi,wp)/180.0_wp, 172.0_wp, real(S0,wp), cz, swdn)
+
+        ! clear-sky reference
+        call aeros_sw_clearsky_column(nlev, q, o3, .FALSE., dp_lev, swdn, cz, &
+                                      0.06_wp, 0.06_wp, heat_cs, up_cs, dw_cs, net_cs)
+
+        ! zero cloud must recover the clear-sky column exactly
+        cf = 0.0_wp; clwc = 0.0_wp; ciwc = 0.0_wp
+        call aeros_sw_cloudy_column(nlev, q, o3, .FALSE., dp_lev, swdn, cz, &
+                                    0.06_wp, 0.06_wp, cf, clwc, ciwc, &
+                                    heat0, up0, dw0, net0)
+        call check(up0 == up_cs .and. dw0 == dw_cs .and. net0 == net_cs, &
+                   "zero cloud recovers the clear-sky SW fluxes exactly", nfail)
+
+        ! a liquid cloud deck in the mid troposphere
+        do kk = 1, nlev
+            sig = pfull(kk)/ps
+            if (sig > 0.4_wp .and. sig < 0.6_wp) then
+                cf(kk)   = 0.9_wp
+                clwc(kk) = 1.0e-4_wp
+            end if
+        end do
+        call aeros_sw_cloudy_column(nlev, q, o3, .FALSE., dp_lev, swdn, cz, &
+                                    0.06_wp, 0.06_wp, cf, clwc, ciwc, &
+                                    heat1, up1, dw1, net1)
+
+        write(*,"(a,f7.3,a)") "   clear-sky planetary albedo     ", up_cs/swdn, " "
+        write(*,"(a,f7.3,a)") "   all-sky planetary albedo       ", up1/swdn, " "
+        write(*,"(a,f7.2,a)") "   SW cloud radiative effect TOA  ", -(up1-up_cs), " W/m2"
+        write(*,"(a,f7.2,a)") "   clear-sky surface down SW      ", dw_cs, " W/m2"
+        write(*,"(a,f7.2,a)") "   all-sky surface down SW        ", dw1, " W/m2"
+
+        call check(up1 > up_cs, &
+                   "cloud raises the planetary albedo (negative SW CRE)", nfail)
+        call check(dw1 < dw_cs .and. net1 < net_cs, &
+                   "cloud reduces the surface shortwave", nfail)
+
+        ! energy: column absorption equals the TOA-minus-surface residual
+        a_atm = swdn - up1 - net1
+        col_heat = 0.0_wp
+        do kk = 1, nlev
+            col_heat = col_heat + (real(cp_d, wp)/real(grav, wp))*heat1(kk)*dp_lev(kk)
+        end do
+        rel = abs(col_heat - a_atm)/max(1.0_wp, abs(a_atm))
+        write(*,"(a,es12.3)") "   |col SW heating - absorption|  ", rel
+        call check(a_atm > 0.0_wp .and. rel < 1.0e-10_wp, &
+                   "all-sky column SW heating equals the absorbed flux", nfail)
+
+        ! a thicker cloud reflects more (monotone albedo)
+        do kk = 1, nlev
+            sig = pfull(kk)/ps
+            if (sig > 0.4_wp .and. sig < 0.6_wp) then
+                cf(kk)   = 1.0_wp
+                clwc(kk) = 5.0e-4_wp
+            end if
+        end do
+        call aeros_sw_cloudy_column(nlev, q, o3, .FALSE., dp_lev, swdn, cz, &
+                                    0.06_wp, 0.06_wp, cf, clwc, ciwc, &
+                                    heat2, up2, dw2, net2)
+        call check(up2 > up1, &
+                   "a thicker cloud raises the albedo further (monotone)", nfail)
+        return
+    end subroutine test_cloudy_sw
 
     subroutine check(ok, label, nfail)
         logical, intent(in) :: ok

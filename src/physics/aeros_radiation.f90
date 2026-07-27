@@ -141,6 +141,23 @@ module aeros_radiation
     real(wp), parameter :: SW_B2_W    = 0.0267_wp
     real(wp), parameter :: SW_COSZ_O  = 1.0_wp/1.66_wp  ! diffuse-beam cosine
 
+    ! === Grey-cloud shortwave optics =======================================
+    ! Cloud SW optical depth per layer from the in-cloud water paths by
+    ! geometric optics tau = 1.5 WP/(rho r_e); a conservative-scattering
+    ! two-stream then gives the cloud reflectance R = gamma tau/(1+gamma tau),
+    ! gamma = (1-g)/(2 mu), plus a small (near-IR) cloud absorptance. Standard
+    ! droplet/crystal sizes and densities; tunable in one place. Unlike the LW
+    ! grey absorption, SW is scattering, so the cloud enters as an albedo and the
+    ! column is run clear + overcast and blended by cloud fraction (max overlap).
+    real(wp), parameter :: SW_R_LIQ   = 10.0e-6_wp  ! liquid effective radius [m]
+    real(wp), parameter :: SW_R_ICE   = 30.0e-6_wp  ! ice effective radius [m]
+    real(wp), parameter :: SW_RHO_LIQ = 1000.0_wp   ! liquid water density [kg m-3]
+    real(wp), parameter :: SW_RHO_ICE = 917.0_wp    ! ice density [kg m-3]
+    real(wp), parameter :: SW_CLD_G   = 0.85_wp     ! cloud asymmetry factor [-]
+    real(wp), parameter :: SW_CLD_ABS = 0.08_wp     ! max cloud SW absorptance [-]
+    real(wp), parameter :: SW_CLD_TAU_A = 8.0_wp    ! absorptance e-folding optical depth
+    real(wp), parameter :: SW_CLD_MAX = 0.999_wp    ! max column cloud fraction [-]
+
     ! === Orbit (present-day, for the stopgap insolation) ===================
     real(wp), parameter :: OBLIQUITY  = 23.44_wp*pi/180.0_wp  ! [rad]
     real(wp), parameter :: DAYS_YEAR  = 365.25_wp
@@ -201,6 +218,7 @@ module aeros_radiation
     public :: aeros_lw_clearsky_column
     public :: aeros_lw_cloudy_column
     public :: aeros_sw_clearsky_column
+    public :: aeros_sw_cloudy_column
     public :: aeros_insolation_daily
 
 contains
@@ -842,6 +860,131 @@ contains
         end function itf_w_ir
 
     end subroutine aeros_sw_clearsky_column
+
+    subroutine aeros_sw_cloudy_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
+                                      coszen, alb_vis, alb_ir, cf, clwc, ciwc, &
+                                      heat, sw_up_toa, sw_dw_sur, sw_net_sur)
+        ! All-sky shortwave for one column. Shortwave is scattering, not grey
+        ! absorption, so -- unlike the longwave -- the cloud cannot fold into a
+        ! per-layer transmission. Instead the tuned clear-sky column
+        ! (aeros_sw_clearsky_column) is run once, an overcast column is built by
+        ! placing a cloud reflector on top of it, and the two are blended by the
+        ! column cloud fraction (maximum overlap), exactly SESAM's run-twice
+        ! structure:  F = (1-CF) F_clear + CF F_overcast.
+        !
+        ! The cloud reflector is resolved from the in-cloud water paths: each
+        ! layer contributes tau_k = 1.5 (LWP_k/(rho_l r_l) + IWP_k/(rho_i r_i)),
+        ! with the in-cloud path = grid-mean/CF so the blend conserves the
+        ! grid-mean condensate. A conservative-scattering two-stream on the
+        ! column optical depth tau = sum tau_k gives the cloud reflectance
+        ! R = gamma tau/(1+gamma tau), gamma=(1-g)/(2 mu); a small saturating
+        ! absorptance A takes the near-IR cloud absorption; T = 1-R-A. Adding the
+        ! cloud reflector above the clear column (planetary albedo alb_clr):
+        !
+        !   alb_ov = R + T^2 alb_clr/(1 - R alb_clr),   Phi = T/(1 - R alb_clr)
+        !
+        ! so the overcast surface fluxes are the clear ones times Phi. The
+        ! overcast atmospheric absorption is the exact TOA-minus-surface residual,
+        ! distributed by the clear-sky heating profile (gas) plus the per-layer
+        ! cloud optical depth (cloud), conserving energy. Optics are intensive,
+        ! so the routine is grid-agnostic, as the clear-sky one.
+
+        implicit none
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: q(:)        ! (nlev) specific humidity [kg kg-1]
+        real(wp), intent(in)  :: o3(:)       ! (nlev) ozone mass mixing ratio [kg kg-1]
+        logical,  intent(in)  :: l_o3
+        real(wp), intent(in)  :: dp_lev(:)   ! (nlev) layer thickness [Pa], > 0
+        real(wp), intent(in)  :: swdown_toa  ! daily-mean TOA down SW [W m-2]
+        real(wp), intent(in)  :: coszen      ! airmass cosine zenith [-]
+        real(wp), intent(in)  :: alb_vis     ! surface albedo, visible [-]
+        real(wp), intent(in)  :: alb_ir      ! surface albedo, near-IR [-]
+        real(wp), intent(in)  :: cf(:)       ! (nlev) cloud fraction [0-1]
+        real(wp), intent(in)  :: clwc(:)     ! (nlev) cloud liquid water [kg kg-1]
+        real(wp), intent(in)  :: ciwc(:)     ! (nlev) cloud ice water    [kg kg-1]
+
+        real(wp), intent(out) :: heat(:)     ! (nlev) SW heating rate [K s-1]
+        real(wp), intent(out) :: sw_up_toa   ! TOA upward (reflected) SW [W m-2]
+        real(wp), intent(out) :: sw_dw_sur   ! surface downward SW [W m-2]
+        real(wp), intent(out) :: sw_net_sur  ! surface net absorbed SW [W m-2]
+
+        real(wp) :: heat_cs(nlev), up_cs, dw_cs, net_cs
+        real(wp) :: tau_c(nlev), cldw(nlev)
+        real(wp) :: cff, cosz, gamma, tau, rcld, acld, tcld
+        real(wp) :: alb_clr, alb_ov, phi, up_ov, dw_ov, net_ov, a_atm_ov
+        real(wp) :: lwp, iwp, wsum, gsum
+        integer  :: k
+
+        ! clear-sky column (the tuned reference; also the polar-night guard)
+        call aeros_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
+            coszen, alb_vis, alb_ir, heat_cs, up_cs, dw_cs, net_cs)
+
+        ! column cloud fraction: maximum overlap
+        cff = 0.0_wp
+        do k = 1, nlev
+            cff = max(cff, min(1.0_wp, max(0.0_wp, cf(k))))
+        end do
+        cff = min(cff, SW_CLD_MAX)
+
+        ! no cloud or no sun: the clear-sky column is the answer
+        if (cff <= 0.0_wp .or. swdown_toa <= 0.0_wp) then
+            heat = heat_cs
+            sw_up_toa = up_cs; sw_dw_sur = dw_cs; sw_net_sur = net_cs
+            return
+        end if
+
+        ! per-layer cloud optical depth from the in-cloud water paths
+        ! (grid-mean/CF), geometric optics tau = 1.5 WP/(rho r_e)
+        tau = 0.0_wp
+        do k = 1, nlev
+            lwp = max(0.0_wp, clwc(k))*dp_lev(k)/grav / cff      ! [kg m-2] in-cloud
+            iwp = max(0.0_wp, ciwc(k))*dp_lev(k)/grav / cff
+            tau_c(k) = 1.5_wp*(lwp/(SW_RHO_LIQ*SW_R_LIQ) + iwp/(SW_RHO_ICE*SW_R_ICE))
+            tau = tau + tau_c(k)
+        end do
+
+        ! conservative-scattering two-stream cloud reflectance + small absorptance
+        cosz  = max(coszen, 0.1_wp)
+        gamma = 0.5_wp*(1.0_wp - SW_CLD_G)/cosz
+        rcld  = gamma*tau/(1.0_wp + gamma*tau)
+        acld  = SW_CLD_ABS*(1.0_wp - exp(-tau/SW_CLD_TAU_A))
+        rcld  = min(rcld, 1.0_wp - acld)
+        tcld  = max(0.0_wp, 1.0_wp - rcld - acld)
+
+        ! add the cloud reflector above the clear column
+        alb_clr = up_cs/swdown_toa
+        alb_ov  = rcld + tcld*tcld*alb_clr/(1.0_wp - rcld*alb_clr)
+        phi     = tcld/(1.0_wp - rcld*alb_clr)
+        up_ov   = swdown_toa*alb_ov
+        dw_ov   = dw_cs*phi
+        net_ov  = net_cs*phi
+
+        ! overcast atmospheric absorption = exact boundary residual, distributed
+        ! by the clear-sky heating (gas) plus the cloud optical depth (cloud)
+        a_atm_ov = max(0.0_wp, swdown_toa - up_ov - net_ov)
+        wsum = 0.0_wp; gsum = 0.0_wp
+        do k = 1, nlev
+            cldw(k) = tau_c(k) + max(0.0_wp, heat_cs(k))*dp_lev(k)
+            wsum = wsum + cldw(k)
+            gsum = gsum + max(0.0_wp, heat_cs(k))*dp_lev(k)
+        end do
+        if (wsum <= 0.0_wp) then                 ! no weight: fall back to mass
+            do k = 1, nlev
+                cldw(k) = dp_lev(k); wsum = wsum + dp_lev(k)
+            end do
+        end if
+
+        ! blend clear and overcast by the column cloud fraction
+        sw_up_toa  = (1.0_wp-cff)*up_cs  + cff*up_ov
+        sw_dw_sur  = (1.0_wp-cff)*dw_cs  + cff*dw_ov
+        sw_net_sur = (1.0_wp-cff)*net_cs + cff*net_ov
+        do k = 1, nlev
+            heat(k) = (1.0_wp-cff)*heat_cs(k) &
+                    + cff*(grav/cp_d)*(a_atm_ov*(cldw(k)/wsum))/dp_lev(k)
+        end do
+
+        return
+    end subroutine aeros_sw_cloudy_column
 
     subroutine aeros_radiation_apply(rad, vg, grd, t_g, qv_g, lnps_g, t_s, &
                                      nstep, dt, dt_phys)
