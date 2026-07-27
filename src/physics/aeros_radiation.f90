@@ -94,7 +94,17 @@ module aeros_radiation
     real(wp), parameter :: LW_EMIS   = 1.0_wp      ! atmospheric emissivity
     real(wp), parameter :: LW_BETA0  = 1.66_wp     ! diffusivity factor
 
-    ! water vapour: d_vap = 1/(1 + a_vap x^b + a2 x^b2 + a3 x^3),  x = beta0*u
+    ! water vapour: d_vap = 1/(1 + vap_opac (a_vap x^b + a2 x^b2 + a3 x^3)),
+    !   x = beta0*u
+    ! LW_VAP_OPAC is a single documented correction to the vapour opacity, NOT a
+    ! re-fit of the SESAM coefficients: it multiplies the whole vapour optical
+    ! depth, so 1.0 is SESAM verbatim and < 1 makes the band less opaque. Against
+    ! ERA5 clear-sky the SESAM fit runs ~16 W/m2 too opaque in the warm moist
+    ! tropics (OLR too low, §14); because the term is negligible at small path
+    ! and dominant at large path, one scale corrects the tropics without touching
+    ! the dry columns. Tuned to null the global-mean clear-sky OLR bias; retire
+    ! it when the correlated-k (ecCKD) scheme lands. See m2_results §20.
+    real(wp), parameter :: LW_VAP_OPAC = 0.80_wp
     real(wp), parameter :: LW_A_VAP    = 1.6_wp
     real(wp), parameter :: LW_BETA_VAP = 0.45_wp
     real(wp), parameter :: LW_A2_VAP   = 0.1_wp
@@ -510,9 +520,10 @@ contains
             end do
 
             ! water vapour, PIK report 81 eq. 6.5
-            dv = 1.0_wp/(1.0_wp + LW_A_VAP *(LW_BETA0*aw)**LW_BETA_VAP  &
+            dv = 1.0_wp/(1.0_wp + LW_VAP_OPAC*( &
+                                  LW_A_VAP *(LW_BETA0*aw)**LW_BETA_VAP  &
                                 + LW_A2_VAP*(LW_BETA0*aw)**LW_BETA2_VAP &
-                                + LW_A3_VAP*(LW_BETA0*aw)**3)
+                                + LW_A3_VAP*(LW_BETA0*aw)**3))
             ! CO2, PIK report 81 eq. 6.6 with the high-CO2 correction factor
             dc = (1.0_wp - min(0.2_wp, 0.1_wp*(ac/1000.0_wp)**2)) &
                  * (1.0_wp + LW_A0_CO2*LW_A1_CO2*(LW_BETA0*ac)**LW_BETA_CO2) &
@@ -675,9 +686,10 @@ contains
                 tcld = tcld * tcl(m)
             end do
 
-            dv = 1.0_wp/(1.0_wp + LW_A_VAP *(LW_BETA0*aw)**LW_BETA_VAP  &
+            dv = 1.0_wp/(1.0_wp + LW_VAP_OPAC*( &
+                                  LW_A_VAP *(LW_BETA0*aw)**LW_BETA_VAP  &
                                 + LW_A2_VAP*(LW_BETA0*aw)**LW_BETA2_VAP &
-                                + LW_A3_VAP*(LW_BETA0*aw)**3)
+                                + LW_A3_VAP*(LW_BETA0*aw)**3))
             dc = (1.0_wp - min(0.2_wp, 0.1_wp*(ac/1000.0_wp)**2)) &
                  * (1.0_wp + LW_A0_CO2*LW_A1_CO2*(LW_BETA0*ac)**LW_BETA_CO2) &
                  / (1.0_wp + LW_A0_CO2*(LW_BETA0*ac)**LW_BETA_CO2)

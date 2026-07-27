@@ -909,20 +909,20 @@ SW and net CRE). Area-weighted global means [W m⁻²]:
 
 | CRE (TOA) | model | ERA5 | bias |
 |---|---|---|---|
-| LW  | +18.2 | +21.8 | −3.6 |
+| LW  | +19.7 | +21.8 | −2.1 |
 | SW  | −44.5 | −46.1 | +1.6 |
-| net | −26.3 | −24.2 | −2.0 |
+| net | −24.7 | −24.2 | −0.5 |
 
-All three land within a few W/m² and the **spatial patterns match** — LW warming
-peaking over the ITCZ and warm-pool deep convection, SW cooling over the marine
-stratocumulus decks and storm tracks, net cooling concentrated in the tropics.
-The residual −3.6 LW CRE is consistent with the §14 clear-sky OLR being ~16 W/m²
-too low (too opaque leaves less headroom for cloud to further cut the OLR) and
-with maximum overlap running slightly weak where cloud is in separated decks;
-maximum-random overlap is the identified refinement. The SW is essentially on
-target. This validates the *radiative transfer* of the cloudy branch against
-observations, offline — decoupled from coupled-model cloud generation, which
-§19 now supplies.
+(These are with the §20 water-vapour opacity correction; before it the LW CRE
+was +18.2, bias −3.6, and the net −26.3.) All three land within a couple of W/m²
+and the **spatial patterns match** — LW warming peaking over the ITCZ and
+warm-pool deep convection, SW cooling over the marine stratocumulus decks and
+storm tracks, net cooling concentrated in the tropics. The small residual −2.1
+LW CRE is consistent with maximum overlap running slightly weak where cloud is
+in separated decks (maximum-random overlap is the identified refinement); the SW
+and net are essentially on target. This validates the *radiative transfer* of
+the cloudy branch against observations, offline — decoupled from coupled-model
+cloud generation, which §19 now supplies.
 
 ## 19. Diagnostic clouds wired into the coupled model (M2.5g)
 
@@ -952,3 +952,35 @@ near-overcast, optically thick cloud everywhere. Tuning the diagnosis (higher
 `RH_crit`, smaller condensate fraction) against ERA5 `cc` / the §17 CRE is the
 immediate next step; the wiring, opt-in and validated end-to-end, is what lands
 here.
+
+## 20. The clear-sky OLR opacity bias — a vapour-opacity correction (M2.5h)
+
+§14 found the clear-sky OLR ~16 W/m² too low, concentrated in the warm moist
+tropics: the SESAM broadband water-vapour band is too opaque where the vapour
+path is largest. The SESAM coefficients are one internally-consistent fit not
+meant to be re-fit piecemeal (and the structural fix is the eventual ecCKD
+scheme), so rather than repartition them this adds a **single documented
+correction** `LW_VAP_OPAC` multiplying the whole vapour optical depth in
+`d_vap = 1/(1 + vap_opac·τ_vap)`. `vap_opac = 1` is SESAM verbatim (bit-for-bit);
+`< 1` reduces the opacity. Because the term is negligible at small path and
+dominant at large path, one scale corrects the tropics and barely touches the
+dry columns — it targets exactly where the bias lives.
+
+A single knob cannot null the TOA and surface longwave bias at once — they
+trade off, so it is set to minimize the combined clear-sky LW error:
+
+| `vap_opac` | OLR bias | sfc-down-LW bias |
+|---|---|---|
+| 1.00 (SESAM) | −15.9 | +6.4 |
+| 0.80 (kept)  | −7.1  | −5.0 |
+| 0.65         | +0.9  | −16.7 |
+
+At **0.80** the clear-sky OLR bias more than halves (−15.9 → −7.1) while the
+surface-down-LW magnitude stays comparable (+6.4 → −5.0, the one cost — its sign
+flips). The shortwave is untouched (a separate band); the CO₂-doubling forcing
+stays canonical (2.8 → 3.0 W/m², the vapour band masking the CO₂ bands slightly
+less); the greenhouse and all `test_radiation` checks pass. The correction also
+helps the cloudy branch: with the clear-sky OLR less biased there is more
+headroom for cloud, so the §18 TOA cloud radiative effect improves — LW CRE
+−3.6 → −2.1, net CRE −2.0 → −0.5 against ERA5. `vap_opac` is a named parameter
+(one place, documented) to be retired when ecCKD lands.
