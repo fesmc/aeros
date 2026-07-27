@@ -143,9 +143,16 @@ $(objdir)/aeros_cloud.o: $(physdir)/aeros_cloud.f90 \
 # resolved column. A column process like the others; needs the vertical
 # coordinate for the layer pressures and the grid for its geometry. The all-sky
 # path consumes the diagnostic cloud scheme.
+# Top-of-atmosphere insolation via the fesmc/insol package (Laskar 2004 orbit).
+# insol is an external prebuilt library reached through INC_INSOL / LIB_INSOL.
+$(objdir)/aeros_insolation.o: $(physdir)/aeros_insolation.f90 \
+							$(objdir)/aeros_defs.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 $(objdir)/aeros_radiation.o: $(physdir)/aeros_radiation.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o \
-							$(objdir)/aeros_grid.o $(objdir)/aeros_cloud.o
+							$(objdir)/aeros_grid.o $(objdir)/aeros_cloud.o \
+							$(objdir)/aeros_insolation.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 # M2.4c: surface energy/moisture budget (section 6.1). Prescribed-SST
@@ -222,6 +229,7 @@ aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_condensation.o \
                  $(objdir)/aeros_convection.o \
                  $(objdir)/aeros_cloud.o \
+                 $(objdir)/aeros_insolation.o \
                  $(objdir)/aeros_radiation.o \
                  $(objdir)/aeros_surface.o \
                  $(objdir)/aeros_vdiff.o \

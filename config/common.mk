@@ -68,4 +68,10 @@ LFLAGS_EXTRA ?= -Wl,-zmuldefs
 # SHTns precedes FFTW (it calls FFTW); both precede fesm-utils only by
 # convention -- they share no symbols. SHTns is C++-linked internally, so
 # -lstdc++ is required when the link is driven by the Fortran compiler.
-LFLAGS = $(LIB_NC) $(LIB_FESMUTILS) $(LIB_SHTNS) $(LIB_FFTW) -lstdc++ $(LFLAGS_EXTRA)
+# fesmc/insol (Laskar 2004 insolation). Prebuilt static lib, no dependencies;
+# INSOLROOT is a symlink to the insol checkout (gitignored, like fesm-utils).
+INSOLROOT = insol
+INC_INSOL = -I${INSOLROOT}/libinsol/include
+LIB_INSOL = -L${INSOLROOT}/libinsol/include -linsol
+
+LFLAGS = $(LIB_NC) $(LIB_FESMUTILS) $(LIB_SHTNS) $(LIB_FFTW) $(LIB_INSOL) -lstdc++ $(LFLAGS_EXTRA)

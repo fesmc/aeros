@@ -39,3 +39,4 @@ maps/
 # SHTns tuning cache (SHT_LOAD_SAVE_CFG), written into the working dir
 shtns_cfg
 shtns_cfg_fftw
+insol

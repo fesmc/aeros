@@ -76,6 +76,8 @@ module aeros_radiation
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure, &
                                aeros_hydrostatic
     use aeros_cloud,    only : aeros_cloud_diagnose
+    use aeros_insolation, only : aeros_insol_class, aeros_insol_init, &
+                               aeros_insol_end, aeros_insol_annual, aeros_insol_day
     use nml,            only : nml_read
 
     implicit none
@@ -205,6 +207,8 @@ module aeros_radiation
         real(wp) :: albedo   = 0.06_wp       ! surface broadband albedo (ocean)
         logical  :: seasonal = .FALSE.       ! .FALSE. = annual-mean insolation
         real(wp) :: doy0     = 0.0_wp        ! start day-of-year (seasonal mode)
+        real(dp) :: time_bp  = 0.0_dp        ! orbital year before present (Laskar); 0 = present-day
+        type(aeros_insol_class) :: ins       ! insol (Laskar 2004) insolation state
 
         ! Call cadence: recompute the full transfer every `interval` seconds and
         ! hold the heating rate fixed between, per design.md section 5.
@@ -249,9 +253,6 @@ contains
         type(aeros_grid_class),  intent(in)    :: grd
         logical,                 intent(in)    :: enabled
 
-        integer  :: j, d
-        real(wp) :: cz, sw, wsum, czsum, swsum
-
         call aeros_radiation_end(rad)
 
         rad%enabled = enabled
@@ -266,25 +267,13 @@ contains
         rad%olr = 0.0_wp; rad%lw_dw_sur = 0.0_wp
         rad%sw_dw_sur = 0.0_wp; rad%sw_up_toa = 0.0_wp; rad%sw_net_sur = 0.0_wp
 
-        ! Annual-mean insolation per latitude: the daily-mean averaged over the
-        ! year, with the airmass cosine zenith insolation-weighted. In seasonal
-        ! mode these are overwritten each recompute from the current day.
-        do j = 1, grd%nlat
-            swsum = 0.0_wp; czsum = 0.0_wp; wsum = 0.0_wp
-            do d = 1, 360
-                call aeros_insolation_daily(grd%lat(j)*pi/180.0_wp, real(d, wp), &
-                                            rad%tsi, cz, sw)
-                swsum = swsum + sw
-                czsum = czsum + cz*sw          ! insolation-weighted
-                wsum  = wsum + sw
-            end do
-            rad%sw_toa(j) = swsum/360.0_wp
-            if (wsum > 0.0_wp) then
-                rad%coszen(j) = czsum/wsum
-            else
-                rad%coszen(j) = 0.0_wp
-            end if
-        end do
+        ! Insolation from the insol package (Laskar 2004 orbit at rad%time_bp).
+        ! The annual-mean per-latitude sw_toa/coszen seed the annual-mean mode;
+        ! in seasonal mode they are overwritten each recompute from the current
+        ! day (aeros_radiation_apply). coszen is the insolation-weighted mean
+        ! airmass cosine, as the shortwave band scheme expects.
+        call aeros_insol_init(rad%ins, grd, rad%time_bp)
+        call aeros_insol_annual(rad%ins, rad%sw_toa, rad%coszen)
 
         return
     end subroutine aeros_radiation_init
@@ -301,6 +290,7 @@ contains
         logical  :: enabled, seasonal
         integer  :: scheme
         real(wp) :: co2_ppm, albedo, tsi, interval, doy0
+        real(dp) :: time_bp
         logical  :: l_o3, clouds
 
         enabled  = rad%enabled
@@ -313,6 +303,7 @@ contains
         seasonal = rad%seasonal
         interval = rad%interval
         doy0     = rad%doy0
+        time_bp  = rad%time_bp
 
         call nml_read(filename, "radiation", "enabled",  enabled, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "scheme",   scheme, defaults_file=defaults_file)
@@ -324,6 +315,7 @@ contains
         call nml_read(filename, "radiation", "seasonal", seasonal, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "interval", interval, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "doy0",     doy0, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "time_bp",  time_bp, defaults_file=defaults_file)
 
         rad%scheme   = scheme
         rad%co2_ppm  = co2_ppm
@@ -334,6 +326,7 @@ contains
         rad%seasonal = seasonal
         rad%interval = interval
         rad%doy0     = doy0
+        rad%time_bp  = time_bp
 
         call aeros_radiation_init(rad, grd, enabled)
 
@@ -351,6 +344,7 @@ contains
         if (allocated(rad%sw_dw_sur)) deallocate(rad%sw_dw_sur)
         if (allocated(rad%sw_net_sur)) deallocate(rad%sw_net_sur)
         if (allocated(rad%sw_up_toa)) deallocate(rad%sw_up_toa)
+        call aeros_insol_end(rad%ins)
         rad%enabled = .FALSE.
         rad%nlon = 0; rad%nlat = 0
         return
@@ -1067,13 +1061,11 @@ contains
         if (mod(nstep, nrad) == 0) then
 
             if (rad%seasonal) then
-                doy = modulo(rad%doy0 + real(nstep, wp)*dt/86400.0_wp, DAYS_YEAR)
-                do j = 1, rad%nlat
-                    call aeros_insolation_daily(grd%lat(j)*pi/180.0_wp, doy, &
-                                                rad%tsi, cz, sw)
-                    rad%coszen(j) = cz
-                    rad%sw_toa(j) = sw
-                end do
+                ! Refresh insolation for the current day from insol (Laskar orbit
+                ! at rad%time_bp). aeros_insol_day wraps the day into the radiative
+                ! year (DAY_YEAR), so pass the raw elapsed day-of-year.
+                doy = rad%doy0 + real(nstep, wp)*dt/86400.0_wp
+                call aeros_insol_day(rad%ins, rad%sw_toa, rad%coszen, doy)
             end if
 
             !$omp parallel do collapse(2) schedule(static) &

@@ -150,7 +150,16 @@ New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
 
 ## Carried M2 items (not blocking)
 
-Cloudy-sky radiation (#3 above), ecCKD behind the `scheme` selector, Laskar
-orbital insolation; CLIMBER-X ocean (slab is the interim); shallow convection is
-temperature-only (§12.2); Manabe multi-layer adjustment; vertical van Leer;
-per-row polar sub-cycling; `tau_diff`/∇⁶ retune.
+Cloudy-sky radiation (#3 above); CLIMBER-X ocean (slab is the interim); shallow
+convection is temperature-only (§12.2); Manabe multi-layer adjustment; vertical
+van Leer; per-row polar sub-cycling; `tau_diff`/∇⁶ retune.
+
+**In progress / done (capabilities):**
+- **Seasonal cycle + Laskar orbital insolation — DONE (§27).** `aeros_insolation`
+  wraps the fesmc/insol package; namelist `time_bp` selects the epoch. Validated
+  (`probe_insol`): annual-global mean = S0/4, polar day/night, live Milankovitch
+  redistribution at 21 ka. All 18 tests pass. Needs the `insol` symlink (like
+  `fesm-utils`) in each worktree.
+- **ecCKD radiation** behind the `scheme` selector — under development on branch
+  `ecckd-radiation` (compact Malkmus/Goody correlated-k, ~18–20 g-points, opt-in;
+  SESAM stays default). Not yet merged.

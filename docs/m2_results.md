@@ -1289,3 +1289,45 @@ where a steady aquaplanet is simply not expected to reproduce ERA5, and chasing
 that with parameterization tuning would be fitting the wrong target. Closing it
 belongs to the capabilities a paleoclimate model needs anyway: a seasonal cycle
 (orbital insolation) and, eventually, land and a dynamical ocean.
+
+## 27. Seasonal cycle and orbital forcing via the insol package (M3a)
+
+The first of those capabilities. All the RCE work above ran on **steady
+annual-mean insolation**; a paleoclimate model needs the seasonal cycle (ice-sheet
+SMB is a summer-melt quantity) and orbital (Milankovitch) forcing as a genuine
+axis (design.md §6). Rather than grow the earlier present-day, circular,
+obliquity-only stopgap, aeros now uses the **fesmc/insol package** (Laskar et al.
+2004 orbital elements, `~/models/insol`), which delivers both at once.
+
+- **New module `aeros_insolation`** wraps insol: an `insol_class` built once with
+  the grid latitudes, supplying annual-mean and per-day `sw_toa` / `coszen`
+  (`coszm_kind="flux"`, the insolation-weighted airmass cosine the shortwave band
+  wants). `aeros_radiation` calls it in init (annual mean) and, in `seasonal`
+  mode, on the recompute cadence. The old `aeros_insolation_daily` is retained
+  only as the `test_radiation` analytic reference.
+- **Orbital axis:** a namelist knob `time_bp` (orbital year before present, 1950
+  CE; 0 = present-day) threads straight into insol, so the *same* code gives any
+  epoch's seasonal cycle — the paleoclimate forcing, for free.
+- **Build:** insol is a prebuilt dependency reached through an `insol` symlink
+  (gitignored, like `fesm-utils`); it carries no external deps and ships its own
+  LA2004 tables, which are read through the symlink so nothing is duplicated into
+  the aeros tree. Radiative calendar `DAY_YEAR = 365`.
+
+**Validation** (`drivers/probe_insol.f90` → `make probe-insol`;
+`scripts/plot_insol_seasonal.jl` → `docs/figures/insol_seasonal.png`):
+
+| check | result | expected |
+|---|---|---|
+| annual + global mean | 340.28 W/m² | S0/4 = 340.25 |
+| solstice (d172) NH pole | 523.8 W/m² | bright (24-h day) |
+| solstice (d172) SH pole | 0.0 W/m² | polar night |
+| LGM (21 ka BP) NH-pole solstice | 535.6 W/m² | > present (orbital) |
+
+The annual-global mean lands on S0/4 to 0.03 W/m², the solstice reproduces the
+polar day/night bow-tie, and the 21 ka run shifts NH summer-pole insolation up
+~12 W/m² at a fixed annual-global mean — the Milankovitch redistribution, live.
+All 18 acceptance tests still pass (the insolation swap preserves the physical
+relations the radiation/RCE tests assert: equator ≈ S0/π, polar night = 0, global
+mean ≈ S0/4). Unlike the extratropical circulation (§26), the seasonal cycle *is*
+fair to validate against ERA5, which has seasons — the natural next use is a
+seasonal coupled run and the SMB-relevant seasonal temperature cycle.

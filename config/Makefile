@@ -61,7 +61,7 @@ endif
 # Include flags shared by every compile in this project. Collected once here
 # rather than repeated per rule: aeros links three external dependencies
 # (fesm-utils, SHTns, FFTW) and the list will not get shorter.
-INCFLAGS = $(INC_NC) $(INC_FESMUTILS) $(INC_SHTNS) $(INC_FFTW)
+INCFLAGS = $(INC_NC) $(INC_FESMUTILS) $(INC_SHTNS) $(INC_FFTW) $(INC_INSOL)
 
 ###############################################
 ##
@@ -234,6 +234,11 @@ rce-long : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/rce_long.x $(drvdir)/rce_long.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    rce_long.x is ready."
+
+probe-insol : aeros-static
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/probe_insol.x $(drvdir)/probe_insol.f90 \
+		-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+	@echo "    probe_insol.x is ready."
 
 probe-lw : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/probe_lw.x $(drvdir)/probe_lw.f90 \
