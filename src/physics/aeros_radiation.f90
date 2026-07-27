@@ -121,6 +121,10 @@ module aeros_radiation
     real(wp), parameter :: LW_KABS_LIQ = 0.10_wp   ! LW mass absorption, liquid [m2 g-1]
     real(wp), parameter :: LW_KABS_ICE = 0.06_wp   ! LW mass absorption, ice    [m2 g-1]
 
+    ! Below this cloud fraction a cloudy cell is treated as clear (guards the
+    ! grid-mean -> in-cloud division by cf). Shared by the LW and SW cloud paths.
+    real(wp), parameter :: CLD_CF_FLOOR = 1.0e-3_wp
+
     ! molar masses for the CO2 volume->mass mixing ratio conversion
     real(wp), parameter :: M_CO2 = 44.0095_wp      ! g/mol
     real(wp), parameter :: M_AIR = 28.97_wp        ! g/mol
@@ -520,29 +524,28 @@ contains
     subroutine aeros_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
                                       q_co2, l_o3, cf, clwc, ciwc, &
                                       fnet, heat, olr, fdw_sur)
-        ! All-sky longwave for one column: the clear-sky band kernel
-        ! (aeros_lw_clearsky_column) with a resolved per-layer grey cloud folded
-        ! into the interface-to-interface transmission. Same column ordering
-        ! (k=1 top .. k=nlev surface), same emissivity-method flux integral, same
-        ! outputs. The one physics addition is that each layer carries a grey
-        ! cloud transmission
+        ! All-sky longwave for one column by SESAM's run-twice-and-blend
+        ! (lwr_total): a clear column and an overcast column are computed with the
+        ! same band kernel and blended by the column cloud fraction at maximum
+        ! overlap,
         !
-        !   tcl_k = 1 - cf_k * eps_k,   eps_k = 1 - exp(-(k_liq LWP_k + k_ice IWP_k))
+        !   F = (1 - CF) F_clear + CF F_overcast,   CF = max_k cf_k.
         !
-        ! from its in-layer condensate paths LWP_k = 1e3 clwc_k dp_k/g and
-        ! IWP_k = 1e3 ciwc_k dp_k/g [g m-2] and cloud fraction cf_k. The
-        ! broadband transmission between two interfaces is then the clear-sky gas
-        ! transmission times the product of tcl over the layers between them:
-        ! grey absorbers multiply (Beer), the gas band model does not (its fit is
-        ! evaluated once on the accumulated path, as in the clear-sky routine),
-        ! and cf_k gives a random-overlap effective transmission per layer.
-        ! cf=0 (or zero condensate) recovers aeros_lw_clearsky_column bit-for-bit.
+        ! The overcast column carries the cloud as a per-layer grey transmission
+        ! tcl_k = exp(-(k_liq LWP_k + k_ice IWP_k)) built from the IN-CLOUD water
+        ! paths LWP_k = 1e3 clwc_k dp_k/g / CF (the grid-mean condensate spread
+        ! over the cloud fraction, so the blend conserves the grid-mean water),
+        ! multiplied into the clear-sky gas transmission between interfaces (grey
+        ! absorbers multiply; the gas band fit is still evaluated once on the
+        ! accumulated path). Maximum overlap matches the shortwave kernel and
+        ! avoids the overcast bias of per-layer random overlap (which drives the
+        ! column toward 1 - prod(1-cf_k) and over-traps). cf=0 (or zero
+        ! condensate) returns the clear-sky column bit-for-bit.
         !
-        ! Cloud optics are intensive -- built from physical water paths and layer
-        ! thickness -- so the routine is invariant to the vertical grid it runs
-        ! on. It can be driven on ERA5's pressure levels (the all-sky validation)
-        ! or on a refined radiation grid and remapped to the transport grid, with
-        ! no change here: the grid choice lives in the caller, not the kernel.
+        ! Cloud optics are intensive, so the routine is grid-agnostic: it runs on
+        ! ERA5's pressure levels (the all-sky validation) or a refined radiation
+        ! grid remapped to the transport grid, unchanged -- the grid choice lives
+        ! in the caller.
 
         implicit none
         integer,  intent(in)  :: nlev
@@ -563,24 +566,36 @@ contains
         real(wp), intent(out) :: olr         ! outgoing LW at TOA [W m-2]
         real(wp), intent(out) :: fdw_sur     ! downward LW at surface [W m-2]
 
-        ! layer quantities, local surface->top order (l = 1 surface .. nlev top)
-        real(wp) :: b(nlev)
-        real(wp) :: uwv(nlev), uco2(nlev), uo3(nlev)
-        real(wp) :: tcl(nlev)                ! per-layer grey cloud transmission
-        real(wp) :: zc(0:nlev)
+        ! clear-sky reference
+        real(wp) :: fnet_cs(0:nlev), heat_cs(nlev), olr_cs, fdw_cs
+        ! overcast column, local surface->top order (l = 1 surface .. nlev top)
+        real(wp) :: b(nlev), uwv(nlev), uco2(nlev), uo3(nlev), tcl(nlev)
+        real(wp) :: zc(0:nlev), expc(0:nlev)
         real(wp) :: bsfc, fup(0:nlev), fdw(0:nlev)
-        real(wp) :: h0, kco2, expc(0:nlev), zmid, dz
-        real(wp) :: lwp, iwp, ecld
+        real(wp) :: h0, kco2, zmid, dz, lwp, iwp, cff, olr_ov, fdw_ov
         integer  :: k, l, i
 
+        ! clear-sky column (the reference; also the no-cloud short-circuit)
+        call aeros_lw_clearsky_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+            q_co2, l_o3, fnet_cs, heat_cs, olr_cs, fdw_cs)
+
+        ! column cloud fraction, maximum overlap
+        cff = 0.0_wp
+        do k = 1, nlev
+            cff = max(cff, min(1.0_wp, max(0.0_wp, cf(k))))
+        end do
+        if (cff <= CLD_CF_FLOOR) then
+            fnet = fnet_cs; heat = heat_cs; olr = olr_cs; fdw_sur = fdw_cs
+            return
+        end if
+
+        ! --- overcast column: gas kernel x grey cloud (in-cloud water/CF) ------
         h0   = (R_d*T0/grav)*100.0_wp
         kco2 = (LW_AK_CO2 + 1.0_wp)/h0
-
         do i = 0, nlev
             zc(i) = z_half(nlev - i)*100.0_wp
             expc(i) = exp(-kco2*zc(i))
         end do
-
         do l = 1, nlev
             k = nlev - l + 1
             b(l) = LW_EMIS*sigma_sb*t(k)**4
@@ -594,18 +609,13 @@ contains
             else
                 uo3(l) = 0.0_wp
             end if
-
-            ! grey cloud transmission: in-layer condensate paths [g m-2],
-            ! emissivity, weighted by cloud fraction (random overlap).
-            lwp  = 1.0e3_wp * max(0.0_wp, clwc(k)) * dp_lev(k)/grav
-            iwp  = 1.0e3_wp * max(0.0_wp, ciwc(k)) * dp_lev(k)/grav
-            ecld = 1.0_wp - exp(-(LW_KABS_LIQ*lwp + LW_KABS_ICE*iwp))
-            tcl(l) = 1.0_wp - min(1.0_wp, max(0.0_wp, cf(k)))*ecld
+            ! in-cloud condensate = grid-mean/CF; overcast grey transmission
+            lwp = 1.0e3_wp * max(0.0_wp, clwc(k)) * dp_lev(k)/grav / cff
+            iwp = 1.0e3_wp * max(0.0_wp, ciwc(k)) * dp_lev(k)/grav / cff
+            tcl(l) = exp(-(LW_KABS_LIQ*lwp + LW_KABS_ICE*iwp))
         end do
 
         bsfc = LW_EMIS*sigma_sb*ts**4
-
-        ! upward flux at each interface (positive up)
         fup(0) = bsfc
         do i = 1, nlev
             fup(i) = bsfc*trans(0, i)
@@ -613,8 +623,6 @@ contains
                 fup(i) = fup(i) + b(l)*(trans(l, i) - trans(l-1, i))
             end do
         end do
-
-        ! downward flux at each interface (positive down)
         fdw(nlev) = 0.0_wp
         do i = nlev-1, 0, -1
             fdw(i) = 0.0_wp
@@ -622,14 +630,16 @@ contains
                 fdw(i) = fdw(i) + b(l)*(trans(l-1, i) - trans(l, i))
             end do
         end do
+        olr_ov = fup(nlev)
+        fdw_ov = fdw(0)
 
+        ! --- blend clear and overcast by CF (maximum overlap) -----------------
+        ! overcast net-upward on model interface i is fup(nlev-i) - fdw(nlev-i)
         do i = 0, nlev
-            fnet(nlev - i) = fup(i) - fdw(i)
+            fnet(i) = (1.0_wp-cff)*fnet_cs(i) + cff*(fup(nlev-i) - fdw(nlev-i))
         end do
-
-        olr     = fup(nlev)
-        fdw_sur = fdw(0)
-
+        olr     = (1.0_wp-cff)*olr_cs + cff*olr_ov
+        fdw_sur = (1.0_wp-cff)*fdw_cs + cff*fdw_ov
         do k = 1, nlev
             heat(k) = (grav/cp_d) * (fnet(k) - fnet(k-1))/dp_lev(k)
         end do
@@ -927,7 +937,7 @@ contains
         cff = min(cff, SW_CLD_MAX)
 
         ! no cloud or no sun: the clear-sky column is the answer
-        if (cff <= 0.0_wp .or. swdown_toa <= 0.0_wp) then
+        if (cff <= CLD_CF_FLOOR .or. swdown_toa <= 0.0_wp) then
             heat = heat_cs
             sw_up_toa = up_cs; sw_dw_sur = dw_cs; sw_net_sur = net_cs
             return
