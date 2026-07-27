@@ -1191,3 +1191,46 @@ subsidence-drying limitation.
 (no eddies), moist free troposphere (no subsidence drying), warm upper-troposphere
 (coarse L12 + detrainment), warm poles (prescribed SST) — none random. This is a
 credible first Tier-2 validation and a clean baseline for the next steps.
+
+## 25. Do baroclinic eddies grow? T21 vs T42, and why the jet stays weak (M2.5m)
+
+§24 left the jet at the right latitude/level but ~25% of ERA5 strength, the
+signature of absent eddy momentum-flux convergence. This tests directly whether
+seeded baroclinic eddies grow and spin the jet up, and whether the truncation
+(T21) is the limiter — the standing handoff step-2 question. All runs are the
+balanced rotating RCE (`cond_rh_crit = 0.93`, `c_d = 1.5e-3`), 200 days;
+`eddy_diag` reports mid-tropospheric eddy KE and `[v'T']` each 10 days, and the
+seed (`seed_asym`) perturbs zonal wavenumbers 1–6.
+
+| config | eddy KE (saturated) | zonal-mean jet | jet position |
+|---|---|---|---|
+| T21 control (no seed) | ~0 (machine zero) | 6.9 / 7.0 | ±36°, 198 hPa |
+| T21 seed, ∇⁶ τ=6 h | ~0.7 | 9.6 / 9.1 | ±25°, 313 hPa |
+| T21 seed, ∇⁶ τ=24 h | ~1.0 | ~9–10 | (noisy) |
+| **T42 control** | ~0 | 7.7 / 7.9 | ±35°, 198 hPa |
+| **T42 seed** | ~0.9 | 10.4 / 10.3 | ±24° |
+| ERA5 | ~10²–10³ | 27 / 31 | ±30–36° |
+
+**Three findings, one conclusion.** (1) *The axisymmetric trap is real:* with no
+seed the run stays exactly on the m=0 manifold — eddy KE at machine zero — because
+zonally symmetric forcing never populates m>0. (2) *The seed does not take off:*
+from an initial pulse (eddy KE ~3–4 m²/s²) it **decays** over ~40 days and
+saturates at ~1 m²/s² — ~100× below the observed storm track — with `[v'T']` at
+noise level. (3) *Neither cure works:* slackening the ∇⁶ hyperdiffusion 4×
+(τ 6→24 h) barely changes the saturated level, and **T42 gives essentially the
+same answer as T21** (eddy KE ~0.9 vs ~0.7; jet 10.4 vs 9.6). So the weak jet is
+neither a numerical-diffusion artifact nor a truncation limit — doubling the
+resolution does not unlock the eddies.
+
+**What it is.** The limiter is the RCE state itself: its baroclinicity is weak and
+surface-trapped (the equator–pole gradient and jet peak at the lowest level,
+decaying upward — the same structure that drove the §15 low-level-jet blow-up),
+so the baroclinic instability that would build a storm track is marginal at any
+resolution here. Seeded eddies do transport *some* momentum — they lift the
+zonal-mean jet from ~7 to ~10 m/s and shift it equatorward (±36°→±24°), a real but
+small effect — but cannot close the gap to ERA5's 27–31 m/s. Closing it needs
+*stronger baroclinic forcing* (a realistic meridional SST gradient, a seasonal
+cycle, land–sea contrast), not more spectral resolution — a modeling step beyond
+the aquaplanet RCE and deferred. For the M2 validation the takeaway is bounded:
+the jet's *position* is right and its *weakness* is now explained and quantified,
+not a mystery.

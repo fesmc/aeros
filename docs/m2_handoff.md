@@ -83,9 +83,15 @@ New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
 
 1. **Balance TOA in the rotating vehicle** (albedo ~0.47, or start the OLR-opacity
    fix) → a *true* steady RCE equilibrium, the reference state for validation.
-2. **Do eddies now grow?** With `c_d>0` + `seed_asym>0`, does the drag-stabilized
-   realistic jet develop baroclinic eddies (the `eddy_diag` metrics)? Tells us
-   whether T21 supports meaningful eddy transport or T42 is needed.
+2. **Do eddies now grow? — ANSWERED: no, and it is not a resolution problem**
+   (§25). Seeded (`seed_asym>0`) baroclinic eddies decay from the seed and
+   saturate at eddy KE ~1 m²/s² (~100× below the observed storm track) with
+   `[v'T']` at noise level; the jet rises only from ~7 to ~10 m/s (ERA5 27–31).
+   Slackening ∇⁶ 4× and going to **T42 both give the same answer** — so the weak
+   jet is neither a hyperdiffusion artifact nor a truncation limit. The limiter is
+   the RCE's weak, surface-trapped baroclinicity; closing the jet gap needs
+   stronger baroclinic forcing (meridional SST gradient / seasonal cycle / land),
+   not more resolution. Deferred as a modeling step beyond the aquaplanet RCE.
 3. **Model humidity bias in the coupled RCE — RESOLVED for now** (§22–23).
    Localized against ERA5 (`scripts/rce_humidity_vs_era5.jl`, `rce_long` RH dump):
    the RCE was near-saturated at nearly all lat/height (+40% RH vs ERA5), both the
