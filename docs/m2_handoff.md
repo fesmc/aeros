@@ -1,130 +1,102 @@
-# M2 handoff — where to pick up (after M2.5a–d)
+# M2 handoff — where to pick up (after the RCE resolution)
 
-Supersedes the earlier M2.4 handoff. `main` is at the M2.5 series; `make all
-openmp=1` is clean and **all 18 acceptance tests pass**. Full detail is in
-[`m2_results.md`](m2_results.md) §14–16; this is the orientation, the one open
-blocker, and the recommended choices for it.
+Supersedes the earlier M2.5a–d handoff. `main` is pushed (`origin/main`), `make
+all openmp=1` is clean, and **all 18 acceptance tests pass**. This session
+diagnosed and **resolved the M2 RCE runaway** (the long-standing blocker). Detail
+below; the earlier handoff's content is folded in where still relevant.
 
-## What landed this session (M2.5a–d)
+## The RCE runaway is resolved
 
-- **§14 — ERA5 clear-sky radiation validation (M2.5a).** The clear-sky LW/SW
-  operators driven on ERA5's native pressure-level columns (no regrid) vs ERA5
-  clear-sky fluxes, lat×lon maps. Patterns match; biases modest and
-  interpretable — **OLR is ~16 W/m² too low (the scheme is a touch too opaque)**,
-  surface SW ~16 too high (no aerosol). `drivers/validate_era5.f90`,
-  `scripts/plot_era5_validation.jl`. Tier 1 only; Tier 2 (cloud/RH/u/v) is not in
-  the delivered data.
-- **§15 — the RCE lowest-layer instability, diagnosed and mitigated (M2.5b–c).**
-  It is **perfectly zonally symmetric** — an axisymmetric column instability, not
-  a grid-scale hot spot. Two fixes landed: `aeros_vdiff` (boundary-layer vertical
-  diffusion, **implicit on the n+1 state** — forward-splitting a diffusion term
-  on a leapfrog is unconditionally unstable) and condensation moved to the
-  forward-split path (its coupled-RCE heating is no longer "small and smooth").
-  Together they push the blow-up from day 34 to day ~200.
-- **§16 — slab ocean (M2.5d) + the defaults-file paradigm.** `aeros_ocean` owns
-  the SST (prescribed | slab surface-energy-balance), the plug point for a real
-  ocean. Parameter files are now overrides over `input/aeros_defaults.nml`.
+The coupled radiative-convective run blew up (~day 63–186 depending on config).
+Diagnosed end-to-end with new instrumentation (below); **five suspects were ruled
+out by direct test** — a radiation vertical "sawtooth" (turned out to be a bug in
+the diagnostic itself), OLR saturation (refuted by a clean `probe_lw` dOLR/dTs ≈
+2.75 W/m²/K sweep), the convection closure, global energy balance, and the
+model-top sponge. **Two real root causes, both now addressed:**
 
-Everything new is **off by default** (`vdiff`, `surface`, `radiation` enabled
-`.FALSE.`; ocean `mode = prescribed`), so HS and every prior run/test are
-bit-unchanged.
+1. **Missing surface momentum drag → the rotating blow-up (the main one).** The
+   RCE baroclinicity is *surface-trapped* (gradient + jet peak at the lowest
+   level, decaying upward), so it spins a low-level jet — and nothing braked it
+   (`aeros_surface` did heat/moisture only; `aeros_vdiff` was zero-flux at the
+   surface; the sponge is top-only). HS stayed bounded only because it kept
+   explicit low-level Rayleigh friction, dropped when the RCE replaced HS forcing.
+   **Fix (committed):** a bulk surface stress `τ = ρ c_d |u| u`, imposed
+   *implicitly* as the momentum bottom BC of `aeros_vdiff` (forward-split momentum
+   on the leapfrog is unstable — the vdiff lesson). `surf%c_d` (0 = off/
+   bit-unchanged; ~1.5e-3 to enable). → the **rotating RCE now completes 200 days
+   NaN-free**, jet at a realistic upper level (~16 m/s, 25–36°), T_low ~292–300 K,
+   **without eddies**. So "needs 3D eddies" was wrong; the defect was the momentum
+   sink.
+2. **No dry convective adjustment → a hot dry surface heat-trap.** Once surface
+   fluxes heat + dry the lowest layer (RH→~0), the *moist* SBM buoyancy test finds
+   it stable and the convecting band detaches upward, leaving a super-adiabatic
+   layer no moist scheme ventilates. **Fix (committed, opt-in):** standalone dry
+   convective adjustment before the moist scheme, relaxed over τ (`cnv%dry_adjust`,
+   off by default). Correct physics; ventilates the layer; not required to bound
+   the run once drag is on.
 
-## The one open blocker: the subtropical axisymmetric column instability
+## Two bounded-RCE vehicles now exist (`drivers/rce_long.f90`)
 
-A bounded, equilibrated RCE is the prerequisite for the ERA5 moist-line
-validation, and it is **not yet reached**. The fast blow-up is fixed; what
-remains is a slower runaway that survives everything tried so far. The
-characterization is sharp (all via `drivers/rce_long.f90`, which has the
-instrumentation — per-level min/max T with location, zonal-mean-vs-departure
-split, per-term heating, TOA/surface energy balance, and namelist knobs for
-every physics toggle, `vdiff_k0`, `albedo`, `ocean_mode/depth`, `seed_asym`):
+- **Rotating, realistic (preferred):** `c_d > 0` (+ default rotation/gradient).
+  Real equator-pole gradient and upper-level jet. The right vehicle for ERA5.
+- **Non-rotating uniform:** `l_nonrotating` + `l_uniform_insol` (uniform IC). No
+  jet at all (f=0); isolates column physics. Confirmed the column physics is
+  sound (T_low bounded, OLR responds).
 
-- The runaway is a **zonal-mean lowest-layer temperature at a subtropical
-  latitude** climbing to 360–380 K (`max |T − zonalmean| = 0.00 K` — purely
-  axisymmetric with the default m=0 start).
-- It is **robust** to: vdiff strength, condensation coupling, a cloud-proxy
-  albedo that balances TOA to ~0, a slab ocean that makes the surface flux
-  self-limiting, and an eddy seed that breaks the m=0 symmetry. Each delays or
-  changes it; none removes it (slab+albedo → NaN day 176; slab+albedo+eddies →
-  day 88).
-- So it is **not** a coupling/numerics bug and **not** the energy imbalance — it
-  is a property of the moist axisymmetric column at T21L12 with the current
-  convection scheme.
+Both leave a residual **+15–17 W/m² net TOA** (OLR ~20 W/m² too low — the Tier-1
+"too opaque" bias) → slow secondary warming, not a blow-up. Balance it with
+albedo ~0.47 or an LW-opacity fix for a true steady equilibrium.
 
-### Recommended choices, cheapest first
+## What landed this session (all on `main`, pushed)
 
-1. **Diagnose the mechanism before fixing it (½ day).** Run `rce_long` to the
-   onset and read, at the hot latitude, the per-term heating (surface / vdiff /
-   convection / condensation / radiation) and the SBM band it selects. The
-   question to settle: is the subtropical descending column getting a spurious
-   convective/condensational heating, or is the lowest layer simply not being
-   ventilated? This tells you which of the below is the real fix rather than
-   guessing.
-2. **Resolution (1 day).** Rerun the same config at **T42L20**. If the
-   instability weakens or vanishes, it is under-resolution of the subtropical
-   subsidence/boundary layer and the path is simply to run at higher resolution
-   (design.md's production target anyway). If it persists at T42L20, it is the
-   scheme — go to 3/4.
-3. **Clouds (the real physics, ~1 week) — recommended regardless.** The
-   cloudy-sky LW/SW branch (`lwr_clouds`, cloud albedo) is the deferred M2.4
-   radiation piece. It is worth doing next on its own merits: it fixes the TOA
-   balance *physically* (albedo from clouds, ~0.3, rather than the cloud-proxy
-   knob), and cloud radiative effects in the subtropics (low-cloud cooling of the
-   descending branch) are exactly the missing feedback that could stabilise the
-   hot latitude. This is my pick for the substantive next step — it is needed for
-   climate validation anyway, and it plausibly addresses both the global balance
-   and the local runaway at once. Needs a cloud field (a diagnostic cloud
-   fraction/water from RH is enough to start).
-4. **Convection at the descending branch (if 1 points there).** If the diagnosis
-   shows SBM misbehaving in the dry subsiding column, revisit its trigger/closure
-   there (the shallow branch is temperature-only, §12.2) rather than adding more
-   diffusion.
+- **Surface momentum drag** (`surf%c_d`, implicit via vdiff). The rotating-RCE fix.
+- **Dry convective adjustment** (`cnv%dry_adjust`, opt-in, relaxed over τ).
+- **Convection single-layer-band fix** (skip `ktop==kb`: not overturning).
+- **Diagnostic suite in `rce_long`:** per-term heating split (`enable_diag`),
+  buoyancy `h_b` vs `h*_env` + RH, hot-latitude local TOA, eddy (RMS T′/KE/[v′T′]),
+  baroclinicity vertical structure, `max|u|` location; a per-term capture-bug fix.
+- **`drivers/probe_lw.f90`** (`make probe-lw`): offline clear-sky radiation column
+  harness — the tool that exonerated radiation. Reusable.
+- **`aeros_timestep_set_sponge`** (sponge strengths tunable after init).
 
-Do **not** reach for a temperature clamp or stronger sponge — the point of the
-RCE is that the climate emerges.
+New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
+`l_nonrotating`, `c_d`, `sponge_kr/kt/sigma`.
 
-## Then: ERA5 climate validation (Tier 1 done, Tier 2 blocked)
+## Next steps (recommended order)
 
-- **Clear-sky radiation (Tier 1): done** (§14), and it flagged the OLR −16 W/m²
-  bias — worth a look when clouds land, as the two interact.
-- **Moist line (Tier 2): blocked twice** — on a bounded RCE (above) and on the
-  Tier-2 fields (cloud fraction/water, RH, u, v), which were **not** in the
-  delivered ERA5 data. When both clear, turn on seasonal insolation + the real
-  ozone field and tune the moist stack against ERA5.
-
-## Other open M2 items (not blocking)
-
-- **Radiation deferred:** cloudy-sky branch (see #3 above), ecCKD behind the
-  `scheme` selector, Laskar orbital insolation (present-day perpetual now).
-- **Ocean:** the slab is the interim; CLIMBER-X's ocean is the eventual
-  component (design.md §6.1) — plugs in where the slab is.
-- **Shallow convection is temperature-only** (§12.2); restore the
-  moisture-redistributing branch once there is a working RCE to tune against.
-- Carried from before: Manabe multi-layer adjustment, water-closure
-  characterization at T42 over a long run, vertical van Leer, per-row polar
-  sub-cycling, `tau_diff`/∇⁶ retune, the Albedo thread sweep.
+1. **Balance TOA in the rotating vehicle** (albedo ~0.47, or start the OLR-opacity
+   fix) → a *true* steady RCE equilibrium, the reference state for validation.
+2. **Do eddies now grow?** With `c_d>0` + `seed_asym>0`, does the drag-stabilized
+   realistic jet develop baroclinic eddies (the `eddy_diag` metrics)? Tells us
+   whether T21 supports meaningful eddy transport or T42 is needed.
+3. **Clouds + the OLR −20 bias** (deferred M2.4 radiation piece): the cloudy-sky
+   LW/SW branch fixes TOA balance physically and is needed for Tier-2 anyway.
+4. **ERA5 moist-line (Tier 2):** the bounded-RCE blocker is now cleared, but it is
+   **still blocked on the missing Tier-2 ERA5 fields** (cloud/RH/u/v were not in
+   the delivered data). Tier 1 (clear-sky) is done (§14).
 
 ## Gotchas the next session will want
 
-- **The RCE driver is `drivers/rce_long.f90`** (committed, unlike the old scratch
-  driver). Namelist-configured; `logs/rce_*.nml` have working examples. It is a
-  diagnostic tool, not an acceptance test — it does not stay stable yet.
-- **Physics coupling paths.** Surface SH, convection, condensation, radiation and
-  vdiff's temperature change all ride the **forward-split** `wrk%dt_phys` (applied
-  to n+1 after the dynamics step). vdiff is the exception in HOW: it is a
-  diffusion operator, so it is applied **implicitly on the n+1 state** at step 3c
-  next to the horizontal diffusion/sponge — never forward-split. Humidity
-  (incl. evaporation, condensation drying) is gridpoint-forward. The ocean SST
-  steps after surface+radiation from their surface fluxes.
-- **Defaults paradigm.** Case `.nml` files carry only overrides;
-  `input/aeros_defaults.nml` is the full schema. `nml_read` takes an optional
-  `defaults_file` (threaded through the load chain, not module state — `nml` is
-  stateless/shared). Absent it, legacy "case file must be complete" behaviour
-  holds, which is why the `_init`-only tests are unaffected. Drivers require the
-  defaults file.
-- **A bounded RCE needs a cloud-proxy albedo with the current clear-sky scheme.**
-  Ocean albedo 0.06 gives a +90 W/m² TOA imbalance; ~0.4 balances it. This goes
-  away once clouds provide the albedo.
-- **`timeout` is not on macOS** (it is `gtimeout`); don't wrap runs in it.
-- **Moist IC trap:** seed humidity from a realistic lapse-rate profile, not a
-  fraction of `q_sat` against a warm column aloft.
+- **`rce_long` requires every namelist key it reads to be present** — `nml_read`
+  (no `defaults_file` in this driver) is *fatal* on a missing key ("parameter not
+  found"). When you add a knob, add it to every `logs/rce_*.nml` you run.
+- **`probe_lw`** is a diagnostic driver, not a test. `make probe-lw`.
+- **`c_d=0` and `cnv%dry_adjust=.FALSE.` are the defaults** — every prior run/test
+  is bit-unchanged; the fixes are opt-in.
+- **The `Makefile` is generated** from `config/Makefile` by `configme` and is
+  gitignored. Add driver/test rules to **`config/Makefile`** (the committed
+  template), not just the root `Makefile`.
+- **Worktrees** (per the global worktree discipline) need two things the fresh
+  worktree lacks: copy the root `Makefile` in, and symlink `fesm-utils` →
+  `/Users/alrobi001/models/fesm-utils`. Both are gitignored.
+- **macOS:** `script` has no `-qfc` (that's util-linux — logs silently fail); and
+  `timeout` is `gtimeout`. For live logs, redirect stdout to a file directly.
+- **The RCE driver is `drivers/rce_long.f90`** — namelist-configured, heavily
+  instrumented; a diagnostic tool, not an acceptance test.
+
+## Carried M2 items (not blocking)
+
+Cloudy-sky radiation (#3 above), ecCKD behind the `scheme` selector, Laskar
+orbital insolation; CLIMBER-X ocean (slab is the interim); shallow convection is
+temperature-only (§12.2); Manabe multi-layer adjustment; vertical van Leer;
+per-row polar sub-cycling; `tau_diff`/∇⁶ retune.
