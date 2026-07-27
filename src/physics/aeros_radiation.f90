@@ -196,7 +196,10 @@ module aeros_radiation
     ! === Configuration / state =============================================
     type, public :: aeros_rad_class
         logical :: enabled = .FALSE.        ! off by default, like convection
-        integer :: scheme  = SCHEME_SESAM
+        ! ecCKD (correlated-k, §28) is the production default: better clear-sky OLR,
+        ! CO2 forcing and LW cloud effect than SESAM, with no vapour-opacity fudge.
+        ! SESAM (SCHEME_SESAM) is retained as the fast, bit-reproducible fallback.
+        integer :: scheme  = SCHEME_ECCKD
 
         integer :: nlon = 0
         integer :: nlat = 0
