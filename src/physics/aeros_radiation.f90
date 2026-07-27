@@ -53,12 +53,23 @@ module aeros_radiation
     !
     ! === Scope of the current state ========================================
     !
-    ! Clear-sky longwave only. lwr_clouds (SESAM's cloudy branch) waits until
-    ! clouds exist as a field; the clear-sky path is what validates against
-    ! ERA5 clear-sky fluxes (ttrc, strdc). No grid apply and no timestep wiring
-    ! yet: aeros_lw_clearsky_column is exposed and exercised offline by
-    ! test_radiation on a single column. `enabled` defaults .FALSE. as for the
-    ! other physics.
+    ! Clear-sky longwave and shortwave, plus an all-sky (cloudy) longwave that
+    ! folds a resolved per-layer grey cloud into the clear-sky band kernel
+    ! (aeros_lw_cloudy_column). SESAM's own cloudy branch (lwr_clouds) blended a
+    ! single analytic slab; on the resolved sigma column aeros instead carries
+    ! the cloud as a per-layer emissivity built from the condensate paths, the
+    ! same "resolve it, don't reconstruct it" deviation the clear-sky port made.
+    ! The all-sky path validates against ERA5's all-sky fluxes (ttr, str) and the
+    ! §17 cloud radiative effect. Still to come: the all-sky shortwave sibling,
+    ! and the coupled grid apply -- the column kernels are exposed and exercised
+    ! offline by test_radiation and drivers/validate_era5 for now. `enabled`
+    ! defaults .FALSE. as for the other physics.
+    !
+    ! The column kernels take an arbitrary nlev column and are agnostic to the
+    ! grid they run on (that is why validate_era5 can drive them on ERA5's 37
+    ! levels, not the model's). Radiation on a refined vertical grid remapped
+    ! back to the transport grid is therefore a caller-side wrapper, not a kernel
+    ! change: interpolate T/q/cloud up, run the kernel, remap the heating down.
 
     use aeros_defs,     only : dp, wp, io_unit_err, R_d, cp_d, grav, T0, p0, &
                                sigma_sb, S0, pi, aeros_grid_class
@@ -100,6 +111,15 @@ module aeros_radiation
     real(wp), parameter :: LW_AK_O3    = 0.6_wp    ! pressure-broadening exponent
     real(wp), parameter :: LW_A_O3     = 8.246_wp
     real(wp), parameter :: LW_BETA_O3  = 0.539_wp
+
+    ! === Grey-cloud longwave optics ========================================
+    ! Per-layer cloud emissivity eps = 1 - exp(-(k_liq LWP + k_ice IWP)), with
+    ! the condensate water paths in [g m-2]. The coefficients are standard
+    ! broadband LW flux (diffusivity-included) mass absorption values -- Stephens
+    ! (1978)-type for liquid, smaller for the larger ice crystals -- not tuned to
+    ! SESAM's slab. Named parameters, tunable in one place.
+    real(wp), parameter :: LW_KABS_LIQ = 0.10_wp   ! LW mass absorption, liquid [m2 g-1]
+    real(wp), parameter :: LW_KABS_ICE = 0.06_wp   ! LW mass absorption, ice    [m2 g-1]
 
     ! molar masses for the CO2 volume->mass mixing ratio conversion
     real(wp), parameter :: M_CO2 = 44.0095_wp      ! g/mol
@@ -179,6 +199,7 @@ module aeros_radiation
     public :: aeros_radiation_apply
     public :: aeros_radiation_report
     public :: aeros_lw_clearsky_column
+    public :: aeros_lw_cloudy_column
     public :: aeros_sw_clearsky_column
     public :: aeros_insolation_daily
 
@@ -477,6 +498,163 @@ contains
         end function trans
 
     end subroutine aeros_lw_clearsky_column
+
+    subroutine aeros_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                      q_co2, l_o3, cf, clwc, ciwc, &
+                                      fnet, heat, olr, fdw_sur)
+        ! All-sky longwave for one column: the clear-sky band kernel
+        ! (aeros_lw_clearsky_column) with a resolved per-layer grey cloud folded
+        ! into the interface-to-interface transmission. Same column ordering
+        ! (k=1 top .. k=nlev surface), same emissivity-method flux integral, same
+        ! outputs. The one physics addition is that each layer carries a grey
+        ! cloud transmission
+        !
+        !   tcl_k = 1 - cf_k * eps_k,   eps_k = 1 - exp(-(k_liq LWP_k + k_ice IWP_k))
+        !
+        ! from its in-layer condensate paths LWP_k = 1e3 clwc_k dp_k/g and
+        ! IWP_k = 1e3 ciwc_k dp_k/g [g m-2] and cloud fraction cf_k. The
+        ! broadband transmission between two interfaces is then the clear-sky gas
+        ! transmission times the product of tcl over the layers between them:
+        ! grey absorbers multiply (Beer), the gas band model does not (its fit is
+        ! evaluated once on the accumulated path, as in the clear-sky routine),
+        ! and cf_k gives a random-overlap effective transmission per layer.
+        ! cf=0 (or zero condensate) recovers aeros_lw_clearsky_column bit-for-bit.
+        !
+        ! Cloud optics are intensive -- built from physical water paths and layer
+        ! thickness -- so the routine is invariant to the vertical grid it runs
+        ! on. It can be driven on ERA5's pressure levels (the all-sky validation)
+        ! or on a refined radiation grid and remapped to the transport grid, with
+        ! no change here: the grid choice lives in the caller, not the kernel.
+
+        implicit none
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: t(:)        ! (nlev) layer temperature [K]
+        real(wp), intent(in)  :: q(:)        ! (nlev) specific humidity [kg kg-1]
+        real(wp), intent(in)  :: o3(:)       ! (nlev) ozone mass mixing ratio [kg kg-1]
+        real(wp), intent(in)  :: dp_lev(:)   ! (nlev) layer thickness [Pa], > 0
+        real(wp), intent(in)  :: z_half(0:)  ! (0:nlev) interface height [m]
+        real(wp), intent(in)  :: ts          ! surface skin temperature [K]
+        real(wp), intent(in)  :: q_co2       ! CO2 mass mixing ratio [kg kg-1]
+        logical,  intent(in)  :: l_o3        ! include ozone
+        real(wp), intent(in)  :: cf(:)       ! (nlev) cloud fraction [0-1]
+        real(wp), intent(in)  :: clwc(:)     ! (nlev) cloud liquid water [kg kg-1]
+        real(wp), intent(in)  :: ciwc(:)     ! (nlev) cloud ice water    [kg kg-1]
+
+        real(wp), intent(out) :: fnet(0:)    ! (0:nlev) net UPWARD LW flux [W m-2]
+        real(wp), intent(out) :: heat(:)     ! (nlev) LW heating rate [K s-1]
+        real(wp), intent(out) :: olr         ! outgoing LW at TOA [W m-2]
+        real(wp), intent(out) :: fdw_sur     ! downward LW at surface [W m-2]
+
+        ! layer quantities, local surface->top order (l = 1 surface .. nlev top)
+        real(wp) :: b(nlev)
+        real(wp) :: uwv(nlev), uco2(nlev), uo3(nlev)
+        real(wp) :: tcl(nlev)                ! per-layer grey cloud transmission
+        real(wp) :: zc(0:nlev)
+        real(wp) :: bsfc, fup(0:nlev), fdw(0:nlev)
+        real(wp) :: h0, kco2, expc(0:nlev), zmid, dz
+        real(wp) :: lwp, iwp, ecld
+        integer  :: k, l, i
+
+        h0   = (R_d*T0/grav)*100.0_wp
+        kco2 = (LW_AK_CO2 + 1.0_wp)/h0
+
+        do i = 0, nlev
+            zc(i) = z_half(nlev - i)*100.0_wp
+            expc(i) = exp(-kco2*zc(i))
+        end do
+
+        do l = 1, nlev
+            k = nlev - l + 1
+            b(l) = LW_EMIS*sigma_sb*t(k)**4
+            uwv(l) = 0.1_wp * q(k) * dp_lev(k)/grav
+            uco2(l) = q_co2/kco2 * (expc(l-1) - expc(l))
+            if (l_o3) then
+                zmid = 0.5_wp*(zc(l-1) + zc(l))
+                dz   = zc(l) - zc(l-1)
+                uo3(l) = (p0/(R_d*T0))*1.0e-3_wp * exp(-zmid*(LW_AK_O3+1.0_wp)/h0) &
+                         * o3(k) * dz
+            else
+                uo3(l) = 0.0_wp
+            end if
+
+            ! grey cloud transmission: in-layer condensate paths [g m-2],
+            ! emissivity, weighted by cloud fraction (random overlap).
+            lwp  = 1.0e3_wp * max(0.0_wp, clwc(k)) * dp_lev(k)/grav
+            iwp  = 1.0e3_wp * max(0.0_wp, ciwc(k)) * dp_lev(k)/grav
+            ecld = 1.0_wp - exp(-(LW_KABS_LIQ*lwp + LW_KABS_ICE*iwp))
+            tcl(l) = 1.0_wp - min(1.0_wp, max(0.0_wp, cf(k)))*ecld
+        end do
+
+        bsfc = LW_EMIS*sigma_sb*ts**4
+
+        ! upward flux at each interface (positive up)
+        fup(0) = bsfc
+        do i = 1, nlev
+            fup(i) = bsfc*trans(0, i)
+            do l = 1, i
+                fup(i) = fup(i) + b(l)*(trans(l, i) - trans(l-1, i))
+            end do
+        end do
+
+        ! downward flux at each interface (positive down)
+        fdw(nlev) = 0.0_wp
+        do i = nlev-1, 0, -1
+            fdw(i) = 0.0_wp
+            do l = i+1, nlev
+                fdw(i) = fdw(i) + b(l)*(trans(l-1, i) - trans(l, i))
+            end do
+        end do
+
+        do i = 0, nlev
+            fnet(nlev - i) = fup(i) - fdw(i)
+        end do
+
+        olr     = fup(nlev)
+        fdw_sur = fdw(0)
+
+        do k = 1, nlev
+            heat(k) = (grav/cp_d) * (fnet(k) - fnet(k-1))/dp_lev(k)
+        end do
+
+        return
+
+    contains
+
+        pure real(wp) function trans(ia, ib) result(tr)
+            ! Broadband gas transmission between local interfaces ia and ib
+            ! (clear-sky d_vap d_co2 d_o3 fits on the accumulated path) times the
+            ! product of the grey cloud transmissions of the layers between them.
+            integer, intent(in) :: ia, ib
+            integer :: lo, hi, m
+            real(wp) :: aw, ac, ao, dv, dc, dobn, tcld
+
+            lo = min(ia, ib); hi = max(ia, ib)
+            if (hi - lo <= 0) then
+                tr = 1.0_wp
+                return
+            end if
+
+            aw = 0.0_wp; ac = 0.0_wp; ao = 0.0_wp; tcld = 1.0_wp
+            do m = lo+1, hi
+                aw = aw + uwv(m)
+                ac = ac + uco2(m)
+                ao = ao + uo3(m)
+                tcld = tcld * tcl(m)
+            end do
+
+            dv = 1.0_wp/(1.0_wp + LW_A_VAP *(LW_BETA0*aw)**LW_BETA_VAP  &
+                                + LW_A2_VAP*(LW_BETA0*aw)**LW_BETA2_VAP &
+                                + LW_A3_VAP*(LW_BETA0*aw)**3)
+            dc = (1.0_wp - min(0.2_wp, 0.1_wp*(ac/1000.0_wp)**2)) &
+                 * (1.0_wp + LW_A0_CO2*LW_A1_CO2*(LW_BETA0*ac)**LW_BETA_CO2) &
+                 / (1.0_wp + LW_A0_CO2*(LW_BETA0*ac)**LW_BETA_CO2)
+            dobn = 1.0_wp - LW_A_O3*(ao**LW_BETA_O3)
+
+            tr = dv*dc*dobn*tcld
+            return
+        end function trans
+
+    end subroutine aeros_lw_cloudy_column
 
     subroutine aeros_insolation_daily(lat, doy, tsi, coszen, swdown)
         ! Daily-mean insolation for one latitude and day-of-year. Present-day

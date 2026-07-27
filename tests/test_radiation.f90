@@ -38,6 +38,7 @@ program test_radiation
     use aeros_condensation, only : aeros_qsat
     use aeros_defs,         only : S0, pi
     use aeros_radiation,    only : aeros_lw_clearsky_column, &
+                                   aeros_lw_cloudy_column, &
                                    aeros_sw_clearsky_column, aeros_insolation_daily
 
     implicit none
@@ -94,6 +95,7 @@ program test_radiation
     call test_co2_forcing(nfail)
     call test_insolation(nfail)
     call test_shortwave(nfail)
+    call test_cloudy_lw(nfail)
 
     call aeros_vgrid_end(vg)
     call aeros_grid_end(grd)
@@ -349,6 +351,81 @@ contains
                    "column SW heating equals the absorbed flux", nfail)
         return
     end subroutine test_shortwave
+
+    ! === 8. All-sky (cloudy) longwave ========================================
+
+    subroutine test_cloudy_lw(nfail)
+        integer, intent(inout) :: nfail
+        real(wp) :: fnet(0:nlev), heat(nlev), olr_cs, fdw_cs
+        real(wp) :: olr0, fdw0, olr_cld, fdw_cld, olr_thick, fdw_thick
+        real(wp) :: cf(nlev), clwc(nlev), ciwc(nlev)
+        real(wp) :: col_heat, flux_conv, rel, sig
+        integer  :: kk
+
+        write(*,*) ""
+        write(*,*) " -- all-sky longwave (mid-tropospheric cloud)"
+
+        ! clear-sky reference
+        call aeros_lw_clearsky_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                      co2_kgkg(280.0_wp), .FALSE., &
+                                      fnet, heat, olr_cs, fdw_cs)
+
+        ! zero cloud must recover the clear-sky kernel bit-for-bit
+        cf = 0.0_wp; clwc = 0.0_wp; ciwc = 0.0_wp
+        call aeros_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                    co2_kgkg(280.0_wp), .FALSE., cf, clwc, ciwc, &
+                                    fnet, heat, olr0, fdw0)
+        call check(olr0 == olr_cs .and. fdw0 == fdw_cs, &
+                   "zero cloud recovers the clear-sky OLR/down-LW exactly", nfail)
+
+        ! a liquid cloud deck in the mid troposphere (0.4 < sigma < 0.6)
+        do kk = 1, nlev
+            sig = pfull(kk)/ps
+            if (sig > 0.4_wp .and. sig < 0.6_wp) then
+                cf(kk)   = 0.9_wp
+                clwc(kk) = 1.0e-4_wp        ! ~40 g/m2 layer water path
+            end if
+        end do
+        call aeros_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                    co2_kgkg(280.0_wp), .FALSE., cf, clwc, ciwc, &
+                                    fnet, heat, olr_cld, fdw_cld)
+
+        write(*,"(a,f7.2,a)") "   clear-sky OLR                  ", olr_cs,  " W/m2"
+        write(*,"(a,f7.2,a)") "   all-sky OLR (cloud)            ", olr_cld, " W/m2"
+        write(*,"(a,f7.2,a)") "   LW cloud radiative effect TOA  ", olr_cs - olr_cld, " W/m2"
+        write(*,"(a,f7.2,a)") "   clear-sky surface down LW      ", fdw_cs,  " W/m2"
+        write(*,"(a,f7.2,a)") "   all-sky surface down LW        ", fdw_cld, " W/m2"
+
+        call check(olr_cld < olr_cs, &
+                   "cloud reduces OLR (positive LW cloud radiative effect)", nfail)
+        call check(fdw_cld > fdw_cs, &
+                   "cloud increases the downward LW at the surface", nfail)
+
+        ! energy identity carries over to the all-sky path
+        col_heat = 0.0_wp
+        do kk = 1, nlev
+            col_heat = col_heat + (real(cp_d, wp)/real(grav, wp))*heat(kk)*dp_lev(kk)
+        end do
+        flux_conv = fnet(nlev) - fnet(0)
+        rel = abs(col_heat - flux_conv)/max(1.0_wp, abs(flux_conv))
+        call check(rel < 1.0e-12_wp, &
+                   "all-sky layer heating is exactly the flux divergence", nfail)
+
+        ! a thicker/more opaque deck cools OLR further (monotone in optical depth)
+        do kk = 1, nlev
+            sig = pfull(kk)/ps
+            if (sig > 0.4_wp .and. sig < 0.6_wp) then
+                cf(kk)   = 1.0_wp
+                clwc(kk) = 5.0e-4_wp
+            end if
+        end do
+        call aeros_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                    co2_kgkg(280.0_wp), .FALSE., cf, clwc, ciwc, &
+                                    fnet, heat, olr_thick, fdw_thick)
+        call check(olr_thick < olr_cld, &
+                   "a thicker cloud reduces OLR further (monotone in opacity)", nfail)
+        return
+    end subroutine test_cloudy_lw
 
     subroutine check(ok, label, nfail)
         logical, intent(in) :: ok
