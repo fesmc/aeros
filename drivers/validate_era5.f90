@@ -33,7 +33,8 @@ program validate_era5
     use aeros_radiation, only : aeros_lw_clearsky_column, aeros_lw_cloudy_column, &
                                 aeros_sw_clearsky_column, aeros_sw_cloudy_column, &
                                 aeros_insolation_daily
-    use aeros_ecckd,     only : aeros_ecckd_lw_clearsky_column
+    use aeros_ecckd,     only : aeros_ecckd_lw_clearsky_column, &
+                                aeros_ecckd_sw_clearsky_column
     use aeros_cloud,     only : aeros_cloud_diagnose
     use ncio,            only : nc_create, nc_write_dim, nc_write, nc_read, nc_size
 
@@ -283,9 +284,15 @@ contains
         end if
 
         swin = tisr(i,j)/ACC
-        call aeros_sw_clearsky_column(n, qcol(1:n), ocol(1:n), .TRUE., &
-            dpc(1:n), swin, coszen(j), alb, alb, &
-            heat(1:n), sw_up, sw_dw, sw_net)
+        if (lw_ecckd) then
+            call aeros_ecckd_sw_clearsky_column(n, qcol(1:n), ocol(1:n), .TRUE., &
+                dpc(1:n), swin, coszen(j), alb, alb, &
+                heat(1:n), sw_up, sw_dw, sw_net)
+        else
+            call aeros_sw_clearsky_column(n, qcol(1:n), ocol(1:n), .TRUE., &
+                dpc(1:n), swin, coszen(j), alb, alb, &
+                heat(1:n), sw_up, sw_dw, sw_net)
+        end if
 
         ! all-sky: the same operators with ERA5's cloud column
         call aeros_lw_cloudy_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &

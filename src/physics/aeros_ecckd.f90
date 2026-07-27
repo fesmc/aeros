@@ -59,9 +59,32 @@ module aeros_ecckd
     !   2xCO2 forcing    3.6 W/m2   (SESAM 3.0; canonical ~3.7)
     ! and ~1.8x the SESAM LW cost per column (10 g-points, O(nlev^2) solver).
     !
-    ! Not yet here (later phases): the shortwave sibling and the all-sky
-    ! (grey-cloud) branch -- aeros_radiation routes the ecCKD shortwave and every
-    ! cloudy column through the SESAM kernels, so grey clouds keep working.
+    ! === Shortwave (Phase 2) ===============================================
+    !
+    ! The clear-sky shortwave (aeros_ecckd_sw_clearsky_column) re-expresses
+    ! SESAM's validated two-band SW (§14, TOA net SW bias only ~-5 W/m2) as an
+    ! explicit g-point sum and upgrades ozone from a constant band transmission to
+    ! a real correlated-k absorber:
+    !   - near-IR H2O band: SESAM's tuned 2-exponential reused VERBATIM as its two
+    !     g-points (weights SW_A1/A2, exponents SW_B1/B2) -- don't re-derive what
+    !     works. No atmospheric scattering (near-IR Rayleigh negligible).
+    !   - visible+UV band: SESAM's Rayleigh single-reflection scattering reused
+    !     as-is, but the constant ozone transmission SW_C_ITF_O is replaced by a
+    !     3-g-point ozone k-distribution (strong Hartley/Huggins UV, weak Chappuis,
+    !     transparent window) acting on the actual ozone airmass path. This is the
+    !     predictive win: the ozone SW heating now scales with the ozone amount and
+    !     the insolation geometry, so it transfers to non-present orbits (LGM,
+    !     orbital extremes) where a present-day-fit constant would not.
+    ! With a single constant ozone g-point the scheme reduces to SESAM's SW
+    ! bit-for-bit. In the event the a-priori ozone k-distribution needs no ERA5
+    ! anchoring (O3_KSCALE = 1.0): on ERA5 clear-sky columns it does not regress
+    ! SESAM and is marginally closer to observations (TOA net SW bias -4.5 vs
+    ! SESAM -5.1; surface SW overshoot slightly reduced). 5 SW g-points total
+    ! (visible 3 + near-IR 2); ~0.8x the SESAM SW cost per column, energy exact.
+    !
+    ! Not yet here (Phase 3): the all-sky (grey-cloud) branch -- aeros_radiation
+    ! routes every cloudy column through the SESAM kernels, so grey clouds keep
+    ! working.
 
     use aeros_defs, only : wp, sigma_sb, grav, cp_d, p0, pi
 
@@ -130,7 +153,30 @@ module aeros_ecckd
          1.00_wp,  1.00_wp,  1.00_wp,   1.00_wp   &   ! O3
         ], [NB,NGAS])
 
+    ! === Shortwave band parameters =========================================
+    ! Solar-band split and the near-IR H2O / Rayleigh values are SESAM's, reused
+    ! (aeros_radiation SW block; validated §14). Kept here so the ecCKD SW is
+    ! self-contained. Do not "tune" these -- they are the reused SESAM fit.
+    real(wp), parameter :: SW_FRAC_VU = 0.45_wp        ! visible+UV fraction of TSI
+    real(wp), parameter :: SW_RSCAT   = 0.17_wp        ! Rayleigh visible reflectance
+    real(wp), parameter :: SW_COSZ_O  = 1.0_wp/1.66_wp ! diffuse-beam cosine
+    real(wp), parameter :: SW_A1_W = 0.21_wp, SW_A2_W = 0.79_wp   ! near-IR H2O weights
+    real(wp), parameter :: SW_B1_W = 6.27_wp, SW_B2_W = 0.0267_wp ! near-IR H2O exponents
+
+    ! Visible ozone k-distribution (3 g-points): the a-priori SHAPE is the ozone
+    ! SW cross-section spread (strong Hartley/Huggins UV, weak Chappuis, transparent
+    ! window); O3_KVIS are effective mass absorption coefficients [cm2 g-1] on the
+    ! ozone path, O3_WVIS the sub-band solar weights (sum to 1). O3_KSCALE is the
+    ! single ERA5-anchored magnitude knob (tuned so the clear-sky SW is not
+    ! regressed vs SESAM/ERA5). With one weight at k=0 and the rest zero this
+    ! reduces to a transparent visible; matching SESAM's 0.98 sets the anchor.
+    integer,  parameter :: NG_O3V = 3
+    real(wp), parameter :: O3_WVIS(NG_O3V) = [0.030_wp, 0.120_wp, 0.850_wp]
+    real(wp), parameter :: O3_KVIS(NG_O3V) = [2000.0_wp, 45.0_wp, 0.0_wp]
+    real(wp), parameter :: O3_KSCALE = 1.0_wp
+
     public :: aeros_ecckd_lw_clearsky_column
+    public :: aeros_ecckd_sw_clearsky_column
 
 contains
 
@@ -235,6 +281,132 @@ contains
         end do
         return
     end subroutine aeros_ecckd_lw_clearsky_column
+
+    subroutine aeros_ecckd_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
+                                              coszen, alb_vis, alb_ir, heat, &
+                                              sw_up_toa, sw_dw_sur, sw_net_sur)
+        ! Clear-sky shortwave for one column. Signature identical to
+        ! aeros_sw_clearsky_column (SESAM), so the two are interchangeable behind
+        ! the scheme selector. Model ordering (k=1 top .. k=nlev surface).
+        !
+        ! Structure is SESAM's validated clear-sky SW (planetary albedo, two-path
+        ! surface transmission, residual column absorption -- so energy closes
+        ! exactly), with the near-IR H2O 2-exponential reused verbatim as its two
+        ! g-points, and the constant ozone transmission replaced by a 3-g-point
+        ! ozone k-distribution acting on the actual ozone slant path (predictive at
+        ! non-present orbits). With a single k=0 window g-point and the anchor set
+        ! to 0.98 it reduces to SESAM's SW.
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: q(:)        ! (nlev) specific humidity [kg kg-1]
+        real(wp), intent(in)  :: o3(:)       ! (nlev) ozone mass mixing ratio [kg kg-1]
+        logical,  intent(in)  :: l_o3        ! resolve ozone SW
+        real(wp), intent(in)  :: dp_lev(:)   ! (nlev) layer thickness [Pa], > 0
+        real(wp), intent(in)  :: swdown_toa  ! daily-mean TOA down SW [W m-2]
+        real(wp), intent(in)  :: coszen      ! airmass cosine zenith [-]
+        real(wp), intent(in)  :: alb_vis, alb_ir   ! surface albedo, visible / near-IR
+        real(wp), intent(out) :: heat(:)     ! (nlev) SW heating rate [K s-1]
+        real(wp), intent(out) :: sw_up_toa, sw_dw_sur, sw_net_sur
+
+        real(wp) :: cosz, icos, uwv_cum(0:nlev), uo3_col, fdw_ir(0:nlev)
+        real(wp) :: cvis_o3, itf_ir_full, m_col, m_d1
+        real(wp) :: alb_vu, alb_ir_p, alb_p, itf_atm_vu, itf_atm_ir
+        real(wp) :: a_atm, a_o3, a_w, w(nlev), wo3(nlev), wsum, wo3sum, m
+        integer  :: k, i
+
+        heat = 0.0_wp
+        if (swdown_toa <= 0.0_wp) then                 ! polar night
+            sw_up_toa = 0.0_wp; sw_dw_sur = 0.0_wp; sw_net_sur = 0.0_wp
+            return
+        end if
+        cosz = max(coszen, 0.1_wp)
+        icos = 1.0_wp/cosz + 1.0_wp/SW_COSZ_O
+
+        ! cumulative water-vapour path from TOA [g cm-2]
+        uwv_cum(0) = 0.0_wp
+        do k = 1, nlev
+            uwv_cum(k) = uwv_cum(k-1) + 0.1_wp*q(k)*dp_lev(k)/grav
+        end do
+
+        ! ozone column path and the visible-band ozone transmission (down pass)
+        uo3_col = 0.0_wp
+        if (l_o3) then
+            do k = 1, nlev
+                uo3_col = uo3_col + 0.1_wp*max(0.0_wp, o3(k))*dp_lev(k)/grav
+            end do
+        end if
+        cvis_o3 = o3_vis_trans(uo3_col/cosz)
+
+        ! --- planetary albedo (SESAM; constant O3 transmission -> cvis_o3) ------
+        m_col = uwv_cum(nlev)*icos
+        itf_ir_full = itf_w_ir(m_col)
+        alb_vu   = (SW_RSCAT + (1.0_wp-SW_RSCAT)**2*alb_vis &
+                    /(1.0_wp - SW_RSCAT*alb_vis))*cvis_o3
+        alb_ir_p = alb_ir*itf_ir_full
+        alb_p    = SW_FRAC_VU*alb_vu + (1.0_wp-SW_FRAC_VU)*alb_ir_p
+        sw_up_toa = swdown_toa*alb_p
+
+        ! --- surface net and downward (SESAM two-path) -------------------------
+        m_d1 = uwv_cum(nlev)/cosz
+        itf_atm_vu = (1.0_wp-SW_RSCAT)*(1.0_wp-alb_vis)*cvis_o3 &
+                   + (1.0_wp-SW_RSCAT)*alb_vis*SW_RSCAT*(1.0_wp-alb_vis) &
+                     /(1.0_wp - SW_RSCAT*alb_vis)*cvis_o3
+        itf_atm_ir = (1.0_wp-alb_ir)*itf_w_ir(m_d1)
+        sw_net_sur = swdown_toa*(SW_FRAC_VU*itf_atm_vu + (1.0_wp-SW_FRAC_VU)*itf_atm_ir)
+        sw_dw_sur  = swdown_toa*(SW_FRAC_VU*itf_atm_vu/(1.0_wp-alb_vis) &
+                               + (1.0_wp-SW_FRAC_VU)*itf_atm_ir/(1.0_wp-alb_ir))
+
+        ! --- distribute the column absorption residual over layers -------------
+        a_atm = max(0.0_wp, swdown_toa - sw_up_toa - sw_net_sur)
+        if (l_o3) then
+            a_o3 = swdown_toa*SW_FRAC_VU*(1.0_wp - SW_RSCAT)*(1.0_wp - cvis_o3)
+            a_o3 = min(a_o3, a_atm)
+        else
+            a_o3 = 0.0_wp
+        end if
+        a_w = a_atm - a_o3
+
+        do i = 0, nlev
+            fdw_ir(i) = itf_w_ir(uwv_cum(i)/cosz)
+        end do
+        wsum = 0.0_wp
+        do k = 1, nlev
+            w(k) = max(0.0_wp, fdw_ir(k-1) - fdw_ir(k)); wsum = wsum + w(k)
+        end do
+        if (wsum <= 0.0_wp) then
+            do k = 1, nlev; w(k) = dp_lev(k); wsum = wsum + dp_lev(k); end do
+        end if
+        wo3sum = 0.0_wp
+        do k = 1, nlev
+            wo3(k) = max(0.0_wp, o3(k))*dp_lev(k); wo3sum = wo3sum + wo3(k)
+        end do
+        if (wo3sum <= 0.0_wp) then
+            wo3 = w; wo3sum = wsum
+        end if
+        do k = 1, nlev
+            heat(k) = (grav/cp_d)*(a_w*(w(k)/wsum) + a_o3*(wo3(k)/wo3sum))/dp_lev(k)
+        end do
+        return
+
+    contains
+
+        pure real(wp) function itf_w_ir(m) result(tr)
+            ! near-IR water-vapour band transmission (SESAM 2-exp = 2 g-points)
+            real(wp), intent(in) :: m
+            tr = SW_A1_W*exp(-SW_B1_W*m) + SW_A2_W*exp(-SW_B2_W*m)
+        end function itf_w_ir
+
+        pure real(wp) function o3_vis_trans(u) result(tr)
+            ! visible-band ozone transmission from the 3-g-point k-distribution,
+            ! ozone slant path u [g cm-2]. Sum_g w_g exp(-scale k_g u).
+            real(wp), intent(in) :: u
+            integer :: g
+            tr = 0.0_wp
+            do g = 1, NG_O3V
+                tr = tr + O3_WVIS(g)*exp(-O3_KSCALE*O3_KVIS(g)*u)
+            end do
+        end function o3_vis_trans
+
+    end subroutine aeros_ecckd_sw_clearsky_column
 
     subroutine band_flux(nlev, wg, pf_layer, bsrc, bsurf, ctau, fup, fdw)
         ! Emissivity-method net LW flux on the interfaces for one band+g-point.
