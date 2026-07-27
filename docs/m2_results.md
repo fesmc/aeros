@@ -860,6 +860,67 @@ artifact is a cosmetic sub-surface step at the bottom-left of the cross-sections
 over the high Antarctic plateau (1000/925 hPa levels below ground) — the same
 column-truncation cosmetic noted for the §14 high-terrain speckle.
 
-This is Tier 2's target. The cloudy-sky LW/SW branch (§13, deferred) is next: it
-must reproduce this CRE, and it is also the physical route to the §14 OLR −16
-W/m² clear-sky bias' cloudy counterpart.
+This is Tier 2's target. The cloudy-sky LW/SW branch that must reproduce it is
+built and validated in §18.
+
+## 18. Cloudy-sky radiation — the operators reproduce the CRE target (M2.5f)
+
+The all-sky longwave and shortwave operators are ported the same way the
+clear-sky ones were: the *band physics* of SESAM's cloudy branch on aeros's
+resolved column, not SESAM's analytic slab. Cloud optics are built per layer
+from the condensate paths, so — like the clear-sky kernels — the routines are
+intensive and grid-agnostic (they run on ERA5's 37 levels here, or a refined
+radiation grid remapped to the transport grid later, unchanged). Both are opt-in
+siblings of the clear-sky kernels; `cf=0` recovers clear-sky bit-for-bit, so
+every existing run and the 18 acceptance tests are untouched.
+
+**Longwave (`aeros_lw_cloudy_column`).** A grey cloud is pure absorption, so it
+folds into the clear-sky band transmission: each layer carries a transmission
+`exp(-(k_liq LWP + k_ice IWP))` from its in-cloud water paths (standard
+Stephens-type mass absorption coefficients), multiplied into the gas
+transmission between interfaces (grey absorbers multiply; the gas band fit is
+still evaluated once on the accumulated path). Overlap is SESAM's `lwr_total`
+structure: a clear and an overcast column blended by the column cloud fraction
+at **maximum overlap**, `F = (1−CF) F_clear + CF F_overcast`, `CF = max_k cf_k`,
+the overcast column carrying the in-cloud condensate `grid-mean/CF` so the blend
+conserves grid-mean water. The first cut used per-layer *random* overlap and
+over-trapped (column cloud → `1−∏(1−cf_k)` → near-overcast; +15 W/m² TOA LW CRE
+bias); maximum overlap, consistent with the shortwave, fixed it.
+
+**Shortwave (`aeros_sw_cloudy_column`).** Shortwave is scattering, not grey
+absorption, so the cloud enters as an albedo, not a per-layer transmission: the
+tuned clear-sky column is run once, an overcast column is built by placing a
+cloud reflector above it, and the two are blended by `CF`. The per-layer cloud
+optical depth comes from the in-cloud water paths by geometric optics
+`τ = 1.5 WP/(ρ r_e)`; a conservative-scattering two-stream on the column depth
+gives the reflectance `R = γτ/(1+γτ)`, `γ=(1−g)/2μ`, with a small near-IR
+absorptance; the cloud reflector is added above the clear column
+(`alb_ov = R + T² alb_clr/(1−R alb_clr)`) so the overcast surface fluxes are the
+clear ones times `T/(1−R alb_clr)`. Absorption is the exact TOA-minus-surface
+residual, distributed by the clear heating plus the cloud optical depth, so the
+column energy identity holds to machine precision (as it does for the longwave
+flux divergence).
+
+**Validation.** `drivers/validate_era5.f90` now drives the cloudy operators on
+ERA5's own `cc`/`clwc`/`ciwc` columns and compares the resulting cloud radiative
+effect (all-sky − clear-sky) against ERA5's, cell by cell
+(`docs/figures/era5_cre_validation.png`, three rows model/ERA5/bias for TOA LW,
+SW and net CRE). Area-weighted global means [W m⁻²]:
+
+| CRE (TOA) | model | ERA5 | bias |
+|---|---|---|---|
+| LW  | +18.2 | +21.8 | −3.6 |
+| SW  | −44.5 | −46.1 | +1.6 |
+| net | −26.3 | −24.2 | −2.0 |
+
+All three land within a few W/m² and the **spatial patterns match** — LW warming
+peaking over the ITCZ and warm-pool deep convection, SW cooling over the marine
+stratocumulus decks and storm tracks, net cooling concentrated in the tropics.
+The residual −3.6 LW CRE is consistent with the §14 clear-sky OLR being ~16 W/m²
+too low (too opaque leaves less headroom for cloud to further cut the OLR) and
+with maximum overlap running slightly weak where cloud is in separated decks;
+maximum-random overlap is the identified refinement. The SW is essentially on
+target. This validates the *radiative transfer* of the cloudy branch against
+observations, offline — decoupled from coupled-model cloud generation (no cloud
+scheme exists yet; wiring the operators into `aeros_radiation_apply` with a
+diagnostic cloud field is the separate next step).

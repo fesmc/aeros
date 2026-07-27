@@ -30,8 +30,9 @@ program validate_era5
 
     use, intrinsic :: ieee_arithmetic, only : ieee_is_nan
     use aeros_defs,      only : dp, wp, grav, cp_d, sigma_sb, R_d, p0, S0, pi
-    use aeros_radiation, only : aeros_lw_clearsky_column, &
-                                aeros_sw_clearsky_column, aeros_insolation_daily
+    use aeros_radiation, only : aeros_lw_clearsky_column, aeros_lw_cloudy_column, &
+                                aeros_sw_clearsky_column, aeros_sw_cloudy_column, &
+                                aeros_insolation_daily
     use ncio,            only : nc_create, nc_write_dim, nc_write, nc_read, nc_size
 
     implicit none
@@ -50,9 +51,11 @@ program validate_era5
     ! stored surface->top in the file (1000..1 hPa).
     real(wp), allocatable :: lon(:), lat(:), plev(:)
     real(wp), allocatable :: t3(:,:,:), q3(:,:,:), o33(:,:,:), z3(:,:,:)
+    real(wp), allocatable :: cc3(:,:,:), clwc3(:,:,:), ciwc3(:,:,:)  ! cloud
     real(wp), allocatable :: sp2(:,:), skt2(:,:), zsfc2(:,:), fal2(:,:)
     real(wp), allocatable :: ttrc(:,:), tsrc(:,:), strc(:,:), ssrc(:,:)
     real(wp), allocatable :: strdc(:,:), ssrdc(:,:), tisr(:,:)
+    real(wp), allocatable :: ttr(:,:), tsr(:,:)     ! all-sky TOA thermal/solar
     real(wp), allocatable :: coszen(:)              ! annual-mean, per latitude
 
     ! Outputs (lon,lat): model, ERA5, bias for six fluxes, plus insolation.
@@ -63,6 +66,13 @@ program validate_era5
     real(wp), allocatable :: swd_m(:,:),   swd_e(:,:)     ! surface downward SW
     real(wp), allocatable :: swn_m(:,:),   swn_e(:,:)     ! surface net SW
     real(wp), allocatable :: insol(:,:)                   ! TOA down SW fed in
+
+    ! All-sky TOA (model, ERA5) and the cloud radiative effect (model, ERA5).
+    real(wp), allocatable :: olra_m(:,:),  olra_e(:,:)    ! all-sky OLR
+    real(wp), allocatable :: swta_m(:,:),  swta_e(:,:)    ! all-sky TOA net SW
+    real(wp), allocatable :: crelw_m(:,:), crelw_e(:,:)   ! TOA LW cloud effect
+    real(wp), allocatable :: cresw_m(:,:), cresw_e(:,:)   ! TOA SW cloud effect
+    real(wp), allocatable :: crenet_m(:,:),crenet_e(:,:)  ! TOA net cloud effect
 
     real(wp) :: q_co2
 
@@ -94,6 +104,9 @@ program validate_era5
     call read_pl("q",  q3)
     call read_pl("o3", o33)
     call read_pl("z",  z3)
+    call read_pl("cc",   cc3)      ! cloud fraction [0-1]
+    call read_pl("clwc", clwc3)    ! cloud liquid water [kg kg-1]
+    call read_pl("ciwc", ciwc3)    ! cloud ice water    [kg kg-1]
     call read_sl("sp",  sp2)
     call read_sl("skt", skt2)
     call read_sl("z",   zsfc2)         ! surface geopotential
@@ -105,6 +118,8 @@ program validate_era5
     call read_sl("strdc", strdc)
     call read_sl("ssrdc", ssrdc)
     call read_sl("tisr",  tisr)
+    call read_sl("ttr",   ttr)         ! all-sky TOA net thermal
+    call read_sl("tsr",   tsr)         ! all-sky TOA net solar
 
     ! --- annual-mean insolation-weighted cosine zenith per latitude ----------
     ! Same construction aeros_radiation_init uses; the shortwave needs an
@@ -120,6 +135,11 @@ program validate_era5
     allocate(swd_m(nlon,nlat), swd_e(nlon,nlat))
     allocate(swn_m(nlon,nlat), swn_e(nlon,nlat))
     allocate(insol(nlon,nlat))
+    allocate(olra_m(nlon,nlat), olra_e(nlon,nlat))
+    allocate(swta_m(nlon,nlat), swta_e(nlon,nlat))
+    allocate(crelw_m(nlon,nlat), crelw_e(nlon,nlat))
+    allocate(cresw_m(nlon,nlat), cresw_e(nlon,nlat))
+    allocate(crenet_m(nlon,nlat),crenet_e(nlon,nlat))
 
     ! --- ERA5 target fields in the operator's conventions [W m-2] ------------
     olr_e = -ttrc/ACC                    ! OLR (up) = -(top net thermal)
@@ -128,6 +148,14 @@ program validate_era5
     swt_e =  tsrc/ACC                    ! TOA net SW (down - up)
     swd_e =  ssrdc/ACC                   ! surface downward SW
     swn_e =  ssrc/ACC                    ! surface net SW (absorbed)
+
+    olra_e = -ttr/ACC                    ! all-sky OLR
+    swta_e =  tsr/ACC                    ! all-sky TOA net SW
+    ! Cloud radiative effect = all-sky minus clear-sky net-downward flux
+    ! (positive = clouds warm), the §17 convention. At TOA net-down LW = -OLR.
+    crelw_e  = olr_e  - olra_e           ! = (ttr - ttrc)/ACC  > 0
+    cresw_e  = swta_e - swt_e            ! = (tsr - tsrc)/ACC  < 0
+    crenet_e = crelw_e + cresw_e
 
     ! --- column-by-column transfer -------------------------------------------
     !$omp parallel do collapse(2) schedule(dynamic) private(i,j)
@@ -154,9 +182,11 @@ contains
         integer  :: n, k, kk
         real(wp) :: ps, ts, alb, swin
         real(wp) :: pcol(nplev), tcol(nplev), qcol(nplev), ocol(nplev), hcol(nplev)
+        real(wp) :: ccol(nplev), lcol(nplev), icol(nplev)
         real(wp) :: dpc(nplev), zhalf(0:nplev), phalf(0:nplev)
         real(wp) :: fnet(0:nplev), heat(nplev)
         real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net
+        real(wp) :: olr_a, fdw_a, swup_a, swdw_a, swnet_a
 
         ps  = sp2(i,j)                    ! Pa
         ts  = skt2(i,j)
@@ -174,6 +204,9 @@ contains
             qcol(n) = max(0.0_wp, q3(i,j,kk))
             ocol(n) = max(0.0_wp, o33(i,j,kk))
             hcol(n) = z3(i,j,kk)/grav                   ! geopotential height [m]
+            ccol(n) = min(1.0_wp, max(0.0_wp, cc3(i,j,kk)))
+            lcol(n) = max(0.0_wp, clwc3(i,j,kk))
+            icol(n) = max(0.0_wp, ciwc3(i,j,kk))
         end do
         if (n < 3) then                                 ! degenerate column
             call set_missing(i, j); return
@@ -212,6 +245,16 @@ contains
             dpc(1:n), swin, coszen(j), alb, alb, &
             heat(1:n), sw_up, sw_dw, sw_net)
 
+        ! all-sky: the same operators with ERA5's cloud column
+        call aeros_lw_cloudy_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
+            dpc(1:n), zhalf(0:n), ts, q_co2, .TRUE., &
+            ccol(1:n), lcol(1:n), icol(1:n), &
+            fnet(0:n), heat(1:n), olr_a, fdw_a)
+        call aeros_sw_cloudy_column(n, qcol(1:n), ocol(1:n), .TRUE., &
+            dpc(1:n), swin, coszen(j), alb, alb, &
+            ccol(1:n), lcol(1:n), icol(1:n), &
+            heat(1:n), swup_a, swdw_a, swnet_a)
+
         olr_m(i,j) = olr
         lwd_m(i,j) = fdw_lw
         lwn_m(i,j) = fdw_lw - sigma_sb*ts**4          ! net = down - up
@@ -219,6 +262,12 @@ contains
         swd_m(i,j) = sw_dw
         swn_m(i,j) = sw_net
         insol(i,j) = swin
+
+        olra_m(i,j) = olr_a                            ! all-sky OLR
+        swta_m(i,j) = swin - swup_a                    ! all-sky TOA net SW
+        crelw_m(i,j)  = olr - olr_a                    ! clear - all-sky OLR
+        cresw_m(i,j)  = (swin - swup_a) - (swin - sw_up)
+        crenet_m(i,j) = crelw_m(i,j) + cresw_m(i,j)
         return
     end subroutine one_column
 
@@ -227,6 +276,8 @@ contains
         real(wp), parameter :: mv = -9999.0_wp
         olr_m(i,j) = mv; lwd_m(i,j) = mv; lwn_m(i,j) = mv
         swt_m(i,j) = mv; swd_m(i,j) = mv; swn_m(i,j) = mv; insol(i,j) = mv
+        olra_m(i,j) = mv; swta_m(i,j) = mv
+        crelw_m(i,j) = mv; cresw_m(i,j) = mv; crenet_m(i,j) = mv
         return
     end subroutine set_missing
 
@@ -328,6 +379,13 @@ contains
         call line("TOA net SW          ", swt_m, swt_e)
         call line("surface down SW     ", swd_m, swd_e)
         call line("surface net SW      ", swn_m, swn_e)
+        write(*,"(a)") ""
+        write(*,"(a)") "  all-sky / cloud effect [W m-2]      model     ERA5     bias"
+        call line("all-sky OLR         ", olra_m, olra_e)
+        call line("all-sky TOA net SW  ", swta_m, swta_e)
+        call line("TOA LW cloud effect ", crelw_m,  crelw_e)
+        call line("TOA SW cloud effect ", cresw_m,  cresw_e)
+        call line("TOA net cloud effect", crenet_m, crenet_e)
         return
     end subroutine report_global_means
 
@@ -357,6 +415,17 @@ contains
         call wmap("swnet_sfc_mod", swn_m); call wmap("swnet_sfc_era", swn_e)
         call wbias("swnet_sfc", swn_m, swn_e)
         call wmap("insol", insol)
+        ! all-sky and cloud radiative effect
+        call wmap("olr_allsky_mod", olra_m); call wmap("olr_allsky_era", olra_e)
+        call wbias("olr_allsky", olra_m, olra_e)
+        call wmap("swnet_toa_allsky_mod", swta_m); call wmap("swnet_toa_allsky_era", swta_e)
+        call wbias("swnet_toa_allsky", swta_m, swta_e)
+        call wmap("cre_lw_toa_mod", crelw_m); call wmap("cre_lw_toa_era", crelw_e)
+        call wbias("cre_lw_toa", crelw_m, crelw_e)
+        call wmap("cre_sw_toa_mod", cresw_m); call wmap("cre_sw_toa_era", cresw_e)
+        call wbias("cre_sw_toa", cresw_m, cresw_e)
+        call wmap("cre_net_toa_mod", crenet_m); call wmap("cre_net_toa_era", crenet_e)
+        call wbias("cre_net_toa", crenet_m, crenet_e)
         return
     end subroutine write_output
 
