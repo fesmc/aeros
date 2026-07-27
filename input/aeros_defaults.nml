@@ -250,10 +250,13 @@
     ! the surface broadband albedo; tsi the solar constant [W/m2]; seasonal
     ! toggles the daily-mean seasonal cycle (else annual-mean); interval the
     ! recompute cadence [s]; doy0 the start day-of-year in seasonal mode.
+    ! clouds turns on the diagnostic all-sky path (aeros_cloud + the cloudy
+    ! kernels); OFF => clear-sky, bit-unchanged.
     enabled  = .FALSE.
     scheme   = 1
     co2_ppm  = 280.0
     l_o3     = .TRUE.
+    clouds   = .FALSE.
     albedo   = 0.06
     tsi      = 1361.0
     seasonal = .FALSE.

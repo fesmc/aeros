@@ -921,6 +921,34 @@ too low (too opaque leaves less headroom for cloud to further cut the OLR) and
 with maximum overlap running slightly weak where cloud is in separated decks;
 maximum-random overlap is the identified refinement. The SW is essentially on
 target. This validates the *radiative transfer* of the cloudy branch against
-observations, offline — decoupled from coupled-model cloud generation (no cloud
-scheme exists yet; wiring the operators into `aeros_radiation_apply` with a
-diagnostic cloud field is the separate next step).
+observations, offline — decoupled from coupled-model cloud generation, which
+§19 now supplies.
+
+## 19. Diagnostic clouds wired into the coupled model (M2.5g)
+
+The all-sky operators need a cloud column; the model has no prognostic cloud
+water or fraction (condensation removes condensate on the spot, §9), so
+`aeros_cloud` diagnoses one from the resolved T/q/p: an RH-based cloud fraction
+(Sundqvist, `cf = 1 − √(1 − b)`, `b = (RH − rhc)/(1 − rhc)`, critical RH a
+constant-by-default but two-endpoint vertical profile) and a temperature-
+dependent in-cloud condensate (`q_ic = f · q_sat`, split liquid/ice by a
+temperature ramp), returned as the grid-mean `clwc`/`ciwc` the kernels expect.
+`aeros_radiation_apply` calls it per column and switches to the cloudy kernels
+when the new `radiation%clouds` flag is on (default off → clear-sky, every run
+and the 18 tests bit-unchanged). `test_radiation` checks the diagnosis gives
+physical `cf`/water and that fed through the all-sky kernel it reduces OLR.
+
+**The coupled TOA-balance check exposes that the first-cut cloud parameters are
+far too aggressive for the model's moist RCE state.** Running the bounded
+rotating vehicle (`rce_long`, `c_d>0`, prescribed SST, physical ocean albedo
+0.06) clouds-off vs clouds-on: the global TOA net flux swings from **+88 W/m²**
+(dark ocean, no cloud reflection) to **−100 W/m²** — OLR cut 208→140, planetary
+albedo ~0.85, a near-total overcast. The sign is right (clouds cool the planet
+and the balance moves the right way) but the magnitude is ~8× the realistic net
+CRE. The cause is not the kernels (the ERA5-driven validation, §18, is on target
+with *realistic* input cloud) but the diagnosis: with `RH_crit = 0.70` and
+`q_ic = 0.04 q_sat`, the model's near-saturated deep convective columns produce
+near-overcast, optically thick cloud everywhere. Tuning the diagnosis (higher
+`RH_crit`, smaller condensate fraction) against ERA5 `cc` / the §17 CRE is the
+immediate next step; the wiring, opt-in and validated end-to-end, is what lands
+here.

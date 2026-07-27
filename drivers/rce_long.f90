@@ -47,6 +47,7 @@ program rce_long
     logical  :: l_rad = .TRUE., l_sponge = .TRUE., l_vdiff = .FALSE.
     logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
     logical  :: l_dry_adjust = .TRUE. ! dry convective adjustment before the moist scheme
+    logical  :: l_rad_clouds = .FALSE. ! diagnostic all-sky clouds in the radiation
     logical  :: l_uniform_insol = .FALSE. ! flatten insolation to its global mean (no meridional gradient)
     logical  :: l_nonrotating = .FALSE.   ! zero Coriolis (no jet organization; RCE vehicle)
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
@@ -118,6 +119,7 @@ program rce_long
     ts%surf%c_h = c_h; ts%surf%c_e = c_e; ts%surf%u_min = u_min
     ts%surf%c_d = c_d
     ts%rad%enabled  = l_rad
+    ts%rad%clouds   = l_rad_clouds
     ts%sponge_on    = l_sponge
     call aeros_timestep_set_sponge(ts, vg, sponge_kr, sponge_kt, sponge_sigma)
     ts%vd%enabled   = l_vdiff
@@ -259,6 +261,7 @@ contains
         call nml_read(nmlfile, "rce", "sponge_sigma", sponge_sigma)
         call nml_read(nmlfile, "rce", "l_cnd", l_cnd)
         call nml_read(nmlfile, "rce", "l_rad", l_rad)
+        call nml_read(nmlfile, "rce", "l_rad_clouds", l_rad_clouds)
         call nml_read(nmlfile, "rce", "l_sponge", l_sponge)
         call nml_read(nmlfile, "rce", "l_vdiff", l_vdiff)
         call nml_read(nmlfile, "rce", "l_diag", l_diag)

@@ -41,6 +41,7 @@ program test_radiation
                                    aeros_lw_cloudy_column, &
                                    aeros_sw_clearsky_column, aeros_sw_cloudy_column, &
                                    aeros_insolation_daily
+    use aeros_cloud,        only : aeros_cloud_diagnose
 
     implicit none
 
@@ -98,6 +99,7 @@ program test_radiation
     call test_shortwave(nfail)
     call test_cloudy_lw(nfail)
     call test_cloudy_sw(nfail)
+    call test_cloud_diagnose(nfail)
 
     call aeros_vgrid_end(vg)
     call aeros_grid_end(grd)
@@ -508,6 +510,47 @@ contains
                    "a thicker cloud raises the albedo further (monotone)", nfail)
         return
     end subroutine test_cloudy_sw
+
+    ! === 10. Diagnostic cloud scheme =========================================
+
+    subroutine test_cloud_diagnose(nfail)
+        integer, intent(inout) :: nfail
+        real(wp) :: cf(nlev), clwc(nlev), ciwc(nlev)
+        real(wp) :: fnet(0:nlev), heat(nlev), olr_cs, fdw_cs, olr_cld, fdw_cld
+        real(wp) :: cfmax, clwsum, valid
+        integer  :: kk
+
+        write(*,*) ""
+        write(*,*) " -- diagnostic cloud scheme"
+
+        call aeros_cloud_diagnose(nlev, t, q, pfull, ps, cf, clwc, ciwc)
+
+        cfmax = 0.0_wp; clwsum = 0.0_wp; valid = 1.0_wp
+        do kk = 1, nlev
+            cfmax  = max(cfmax, cf(kk))
+            clwsum = clwsum + clwc(kk) + ciwc(kk)
+            if (cf(kk) < 0.0_wp .or. cf(kk) > 1.0_wp) valid = 0.0_wp
+            if (clwc(kk) < 0.0_wp .or. ciwc(kk) < 0.0_wp) valid = 0.0_wp
+        end do
+        write(*,"(a,f7.3)")   "   max diagnosed cloud fraction   ", cfmax
+        write(*,"(a,es12.3)") "   column cloud water (l+i)       ", clwsum
+
+        call check(valid > 0.5_wp, "cloud fraction in [0,1] and water non-negative", nfail)
+        call check(cfmax > 0.0_wp .and. cfmax <= 1.0_wp, &
+                   "the moist column diagnoses some cloud", nfail)
+        call check(clwsum > 0.0_wp, "cloudy layers carry cloud water", nfail)
+
+        ! the diagnosed cloud, fed to the all-sky kernel, warms the LW (reduces OLR)
+        call aeros_lw_clearsky_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                      co2_kgkg(280.0_wp), .FALSE., &
+                                      fnet, heat, olr_cs, fdw_cs)
+        call aeros_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                    co2_kgkg(280.0_wp), .FALSE., cf, clwc, ciwc, &
+                                    fnet, heat, olr_cld, fdw_cld)
+        call check(olr_cld < olr_cs, &
+                   "diagnosed cloud reduces OLR through the all-sky kernel", nfail)
+        return
+    end subroutine test_cloud_diagnose
 
     subroutine check(ok, label, nfail)
         logical, intent(in) :: ok

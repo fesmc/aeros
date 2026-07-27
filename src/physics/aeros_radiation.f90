@@ -75,6 +75,7 @@ module aeros_radiation
                                sigma_sb, S0, pi, aeros_grid_class
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure, &
                                aeros_hydrostatic
+    use aeros_cloud,    only : aeros_cloud_diagnose
     use nml,            only : nml_read
 
     implicit none
@@ -186,6 +187,7 @@ module aeros_radiation
 
         real(wp) :: co2_ppm  = 280.0_wp     ! CO2 volume mixing ratio [ppmv]
         logical  :: l_o3     = .TRUE.        ! prescribed ozone (LW + stratospheric SW)
+        logical  :: clouds   = .FALSE.       ! diagnostic all-sky clouds (off => clear-sky)
         real(wp) :: q_co2    = 0.0_wp        ! CO2 mass mixing ratio [kg kg-1], derived
 
         ! Insolation / shortwave.
@@ -289,12 +291,13 @@ contains
         logical  :: enabled, seasonal
         integer  :: scheme
         real(wp) :: co2_ppm, albedo, tsi, interval, doy0
-        logical  :: l_o3
+        logical  :: l_o3, clouds
 
         enabled  = rad%enabled
         scheme   = rad%scheme
         co2_ppm  = rad%co2_ppm
         l_o3     = rad%l_o3
+        clouds   = rad%clouds
         albedo   = rad%albedo
         tsi      = rad%tsi
         seasonal = rad%seasonal
@@ -305,6 +308,7 @@ contains
         call nml_read(filename, "radiation", "scheme",   scheme, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "co2_ppm",  co2_ppm, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "l_o3",     l_o3, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "clouds",   clouds, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "albedo",   albedo, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "tsi",      tsi, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "seasonal", seasonal, defaults_file=defaults_file)
@@ -314,6 +318,7 @@ contains
         rad%scheme   = scheme
         rad%co2_ppm  = co2_ppm
         rad%l_o3     = l_o3
+        rad%clouds   = clouds
         rad%albedo   = albedo
         rad%tsi      = tsi
         rad%seasonal = seasonal
@@ -1031,6 +1036,7 @@ contains
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: phi_full(vg%nlev), phi_half(0:vg%nlev), z_half(0:vg%nlev)
         real(wp) :: o3col(vg%nlev)
+        real(wp) :: cf(vg%nlev), clwc(vg%nlev), ciwc(vg%nlev)
         real(wp) :: fnet(0:vg%nlev), heat_lw(vg%nlev), heat_sw(vg%nlev)
         real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net, doy, cz, sw
         integer  :: i, j, k, nlev, nrad
@@ -1059,8 +1065,8 @@ contains
             end if
 
             !$omp parallel do collapse(2) schedule(static) &
-            !$omp   private(i,j,phalf,pfull,dpc,phi_full,phi_half,z_half,o3col,fnet, &
-            !$omp           heat_lw,heat_sw,olr,fdw_lw,sw_up,sw_dw,sw_net)
+            !$omp   private(i,j,phalf,pfull,dpc,phi_full,phi_half,z_half,o3col, &
+            !$omp           cf,clwc,ciwc,fnet,heat_lw,heat_sw,olr,fdw_lw,sw_up,sw_dw,sw_net)
             do j = 1, rad%nlat
                 do i = 1, rad%nlon
                     call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
@@ -1076,13 +1082,27 @@ contains
                                            phi_full, phi_half)
                     z_half = phi_half/grav
 
-                    call aeros_lw_clearsky_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
-                        o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
-                        fnet, heat_lw, olr, fdw_lw)
+                    if (rad%clouds) then
+                        ! diagnose the cloud column, then the all-sky operators
+                        call aeros_cloud_diagnose(nlev, t_g(i,j,:), qv_g(i,j,:), &
+                            pfull, exp(lnps_g(i,j)), cf, clwc, ciwc)
 
-                    call aeros_sw_clearsky_column(nlev, qv_g(i,j,:), o3col, &
-                        rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
-                        rad%albedo, heat_sw, sw_up, sw_dw, sw_net)
+                        call aeros_lw_cloudy_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
+                            o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
+                            cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw)
+
+                        call aeros_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
+                            rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
+                            rad%albedo, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
+                    else
+                        call aeros_lw_clearsky_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
+                            o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
+                            fnet, heat_lw, olr, fdw_lw)
+
+                        call aeros_sw_clearsky_column(nlev, qv_g(i,j,:), o3col, &
+                            rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
+                            rad%albedo, heat_sw, sw_up, sw_dw, sw_net)
+                    end if
 
                     rad%heat(i,j,:) = heat_lw + heat_sw
 
@@ -1118,6 +1138,7 @@ contains
         write(io_unit, '(a,i0)')     "    scheme   = ", rad%scheme
         write(io_unit, '(a,f8.2)')   "    co2_ppm  = ", rad%co2_ppm
         write(io_unit, '(a,l1)')     "    l_o3     = ", rad%l_o3
+        write(io_unit, '(a,l1)')     "    clouds   = ", rad%clouds
         return
     end subroutine aeros_radiation_report
 
