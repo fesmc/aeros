@@ -34,7 +34,9 @@ program validate_era5
                                 aeros_sw_clearsky_column, aeros_sw_cloudy_column, &
                                 aeros_insolation_daily
     use aeros_ecckd,     only : aeros_ecckd_lw_clearsky_column, &
-                                aeros_ecckd_sw_clearsky_column
+                                aeros_ecckd_sw_clearsky_column, &
+                                aeros_ecckd_lw_cloudy_column, &
+                                aeros_ecckd_sw_cloudy_column
     use aeros_cloud,     only : aeros_cloud_diagnose
     use ncio,            only : nc_create, nc_write_dim, nc_write, nc_read, nc_size
 
@@ -295,14 +297,25 @@ contains
         end if
 
         ! all-sky: the same operators with ERA5's cloud column
-        call aeros_lw_cloudy_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
-            dpc(1:n), zhalf(0:n), ts, q_co2, .TRUE., &
-            ccol(1:n), lcol(1:n), icol(1:n), &
-            fnet(0:n), heat(1:n), olr_a, fdw_a)
-        call aeros_sw_cloudy_column(n, qcol(1:n), ocol(1:n), .TRUE., &
-            dpc(1:n), swin, coszen(j), alb, alb, &
-            ccol(1:n), lcol(1:n), icol(1:n), &
-            heat(1:n), swup_a, swdw_a, swnet_a)
+        if (lw_ecckd) then
+            call aeros_ecckd_lw_cloudy_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
+                dpc(1:n), zhalf(0:n), ts, q_co2, .TRUE., &
+                ccol(1:n), lcol(1:n), icol(1:n), &
+                fnet(0:n), heat(1:n), olr_a, fdw_a)
+            call aeros_ecckd_sw_cloudy_column(n, qcol(1:n), ocol(1:n), .TRUE., &
+                dpc(1:n), swin, coszen(j), alb, alb, &
+                ccol(1:n), lcol(1:n), icol(1:n), &
+                heat(1:n), swup_a, swdw_a, swnet_a)
+        else
+            call aeros_lw_cloudy_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
+                dpc(1:n), zhalf(0:n), ts, q_co2, .TRUE., &
+                ccol(1:n), lcol(1:n), icol(1:n), &
+                fnet(0:n), heat(1:n), olr_a, fdw_a)
+            call aeros_sw_cloudy_column(n, qcol(1:n), ocol(1:n), .TRUE., &
+                dpc(1:n), swin, coszen(j), alb, alb, &
+                ccol(1:n), lcol(1:n), icol(1:n), &
+                heat(1:n), swup_a, swdw_a, swnet_a)
+        end if
 
         olr_m(i,j) = olr
         lwd_m(i,j) = fdw_lw

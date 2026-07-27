@@ -29,7 +29,9 @@ program test_ecckd
     use aeros_condensation, only : aeros_qsat
     use aeros_radiation,    only : aeros_sw_clearsky_column, aeros_insolation_daily
     use aeros_ecckd,        only : aeros_ecckd_lw_clearsky_column, &
-                                   aeros_ecckd_sw_clearsky_column
+                                   aeros_ecckd_sw_clearsky_column, &
+                                   aeros_ecckd_lw_cloudy_column, &
+                                   aeros_ecckd_sw_cloudy_column
 
     implicit none
 
@@ -70,6 +72,7 @@ program test_ecckd
     call test_sw_energy(nfail)
     call test_olr_and_co2(nfail)
     call test_sw_reduces_to_sesam(nfail)
+    call test_clouds(nfail)
 
     call aeros_vgrid_end(vg)
     call aeros_grid_end(grd)
@@ -192,6 +195,66 @@ contains
         call check(abs(edw-sdw)/max(1.0_wp,sdw)   < 0.03_wp, "surface down SW within 3% of SESAM", nfail)
         call check(abs(enet-snet)/max(1.0_wp,snet) < 0.03_wp, "surface net SW within 3% of SESAM", nfail)
     end subroutine test_sw_reduces_to_sesam
+
+    ! === 5. All-sky (grey cloud folded into the g-points) =====================
+    subroutine test_clouds(nfail)
+        integer, intent(inout) :: nfail
+        real(wp) :: fnet(0:nlev), heat(nlev), olr_cs, fdw_cs, olr0, fdw0, olr_cld, fdw_cld
+        real(wp) :: cf(nlev), clwc(nlev), ciwc(nlev)
+        real(wp) :: cz, swdn, hcs(nlev), up_cs, dw_cs, net_cs
+        real(wp) :: h0(nlev), up0, dw0, net0, h1(nlev), up1, dw1, net1
+        real(wp) :: col_heat, flux_conv, rel, sig
+        integer  :: kk
+
+        write(*,*) ""
+        write(*,*) " -- all-sky: cf=0 reduces to clear; a cloud deck warms LW / brightens SW"
+
+        ! clear-sky references
+        call aeros_ecckd_lw_clearsky_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                            co2_kgkg(280.0_wp), .TRUE., fnet, heat, olr_cs, fdw_cs)
+        call aeros_insolation_daily(30.0_wp*real(pi,wp)/180.0_wp, 172.0_wp, real(S0,wp), cz, swdn)
+        call aeros_ecckd_sw_clearsky_column(nlev, q, o3, .TRUE., dp_lev, swdn, cz, &
+                                            0.06_wp, 0.06_wp, hcs, up_cs, dw_cs, net_cs)
+
+        ! cf=0 must recover the clear-sky columns bit-for-bit
+        cf = 0.0_wp; clwc = 0.0_wp; ciwc = 0.0_wp
+        call aeros_ecckd_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                          co2_kgkg(280.0_wp), .TRUE., cf, clwc, ciwc, &
+                                          fnet, heat, olr0, fdw0)
+        call aeros_ecckd_sw_cloudy_column(nlev, q, o3, .TRUE., dp_lev, swdn, cz, &
+                                          0.06_wp, 0.06_wp, cf, clwc, ciwc, h0, up0, dw0, net0)
+        call check(olr0 == olr_cs .and. fdw0 == fdw_cs, &
+                   "cf=0 recovers the clear-sky LW exactly", nfail)
+        call check(up0 == up_cs .and. dw0 == dw_cs .and. net0 == net_cs, &
+                   "cf=0 recovers the clear-sky SW exactly", nfail)
+
+        ! a mid-tropospheric liquid cloud deck
+        do kk = 1, nlev
+            sig = pfull(kk)/ps
+            if (sig > 0.4_wp .and. sig < 0.6_wp) then
+                cf(kk) = 0.9_wp; clwc(kk) = 1.0e-4_wp
+            end if
+        end do
+        call aeros_ecckd_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                          co2_kgkg(280.0_wp), .TRUE., cf, clwc, ciwc, &
+                                          fnet, heat, olr_cld, fdw_cld)
+        call aeros_ecckd_sw_cloudy_column(nlev, q, o3, .TRUE., dp_lev, swdn, cz, &
+                                          0.06_wp, 0.06_wp, cf, clwc, ciwc, h1, up1, dw1, net1)
+        write(*,"(a,f7.2,a)") "   LW cloud radiative effect      ", olr_cs - olr_cld, " W/m2"
+        write(*,"(a,f7.2,a)") "   SW cloud radiative effect      ", -(up1 - up_cs), " W/m2"
+        call check(olr_cld < olr_cs, "cloud reduces OLR (positive LW cloud effect)", nfail)
+        call check(fdw_cld > fdw_cs, "cloud raises the surface downward LW", nfail)
+        call check(up1 > up_cs .and. dw1 < dw_cs, "cloud raises albedo / dims surface SW", nfail)
+
+        ! energy closure carries to the all-sky LW
+        col_heat = 0.0_wp
+        do kk = 1, nlev
+            col_heat = col_heat + (real(cp_d, wp)/real(grav, wp))*heat(kk)*dp_lev(kk)
+        end do
+        flux_conv = fnet(nlev) - fnet(0)
+        rel = abs(col_heat - flux_conv)/max(1.0_wp, abs(flux_conv))
+        call check(rel < 1.0e-12_wp, "all-sky LW heating is exactly the flux divergence", nfail)
+    end subroutine test_clouds
 
     subroutine check(ok, label, nfail)
         logical, intent(in) :: ok

@@ -79,7 +79,9 @@ module aeros_radiation
     use aeros_insolation, only : aeros_insol_class, aeros_insol_init, &
                                aeros_insol_end, aeros_insol_annual, aeros_insol_day
     use aeros_ecckd,    only : aeros_ecckd_lw_clearsky_column, &
-                               aeros_ecckd_sw_clearsky_column
+                               aeros_ecckd_sw_clearsky_column, &
+                               aeros_ecckd_lw_cloudy_column, &
+                               aeros_ecckd_sw_cloudy_column
     use nml,            only : nml_read
 
     implicit none
@@ -1093,13 +1095,23 @@ contains
                         call aeros_cloud_diagnose(nlev, t_g(i,j,:), qv_g(i,j,:), &
                             pfull, exp(lnps_g(i,j)), cf, clwc, ciwc)
 
-                        call aeros_lw_cloudy_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
-                            o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
-                            cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw)
-
-                        call aeros_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
-                            rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
-                            rad%albedo, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
+                        ! All-sky: dispatch on the scheme selector (opt-in ecCKD
+                        ! folds the same grey cloud optics into its g-points).
+                        if (rad%scheme == SCHEME_ECCKD) then
+                            call aeros_ecckd_lw_cloudy_column(nlev, t_g(i,j,:), &
+                                qv_g(i,j,:), o3col, dpc, z_half, t_s(i,j), rad%q_co2, &
+                                rad%l_o3, cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw)
+                            call aeros_ecckd_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
+                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
+                                rad%albedo, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
+                        else
+                            call aeros_lw_cloudy_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
+                                o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
+                                cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw)
+                            call aeros_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
+                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
+                                rad%albedo, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
+                        end if
                     else
                         ! Clear-sky longwave: dispatch on the scheme selector.
                         ! SESAM is the default (bit-for-bit unchanged); the opt-in

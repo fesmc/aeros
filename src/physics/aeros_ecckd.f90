@@ -82,9 +82,19 @@ module aeros_ecckd
     ! SESAM -5.1; surface SW overshoot slightly reduced). 5 SW g-points total
     ! (visible 3 + near-IR 2); ~0.8x the SESAM SW cost per column, energy exact.
     !
-    ! Not yet here (Phase 3): the all-sky (grey-cloud) branch -- aeros_radiation
-    ! routes every cloudy column through the SESAM kernels, so grey clouds keep
-    ! working.
+    ! === Clouds (Phase 3) ==================================================
+    !
+    ! All-sky LW/SW (aeros_ecckd_{lw,sw}_cloudy_column) fold SESAM's validated
+    ! grey per-layer cloud optics into the ecCKD g-point transmissions -- NO new
+    ! spectral points. LW: run-twice-and-blend (clear + overcast), the grey cloud
+    ! optical depth from the in-cloud water paths added into every g-point's
+    ! transmission, maximum overlap. SW: SESAM's cloud reflector (two-stream) on
+    ! the ecCKD clear-sky base, blended by cloud fraction. cf=0 returns clear-sky
+    ! bit-for-bit. On ERA5 (observed-cloud CRE, §17-18) with zero cloud tuning:
+    !   TOA LW CRE  +21.4 W/m2 (bias -0.4; SESAM -2.1 -- the accurate ecCKD
+    !               clear-sky OLR leaves more headroom for cloud)
+    !   TOA SW CRE  -44.6 W/m2 (bias +1.5)
+    !   TOA net CRE -23.1 W/m2 (bias +1.1)
 
     use aeros_defs, only : wp, sigma_sb, grav, cp_d, p0, pi
 
@@ -175,8 +185,26 @@ module aeros_ecckd
     real(wp), parameter :: O3_KVIS(NG_O3V) = [2000.0_wp, 45.0_wp, 0.0_wp]
     real(wp), parameter :: O3_KSCALE = 1.0_wp
 
+    ! === Grey-cloud optics (Phase 3) =======================================
+    ! Reused from SESAM's grey-cloud block (aeros_radiation; validated CRE §17-18)
+    ! so the ecCKD cloudy path carries the same per-layer cloud optics, folded into
+    ! the g-point transmissions -- no new spectral points.
+    real(wp), parameter :: LW_KABS_LIQ = 0.10_wp   ! LW mass absorption, liquid [m2 g-1]
+    real(wp), parameter :: LW_KABS_ICE = 0.06_wp   ! LW mass absorption, ice    [m2 g-1]
+    real(wp), parameter :: CLD_CF_FLOOR = 1.0e-3_wp
+    real(wp), parameter :: SW_R_LIQ   = 10.0e-6_wp ! liquid effective radius [m]
+    real(wp), parameter :: SW_R_ICE   = 30.0e-6_wp ! ice effective radius [m]
+    real(wp), parameter :: SW_RHO_LIQ = 1000.0_wp  ! liquid water density [kg m-3]
+    real(wp), parameter :: SW_RHO_ICE = 917.0_wp   ! ice density [kg m-3]
+    real(wp), parameter :: SW_CLD_G   = 0.85_wp    ! cloud asymmetry factor [-]
+    real(wp), parameter :: SW_CLD_ABS = 0.08_wp    ! max cloud SW absorptance [-]
+    real(wp), parameter :: SW_CLD_TAU_A = 8.0_wp   ! absorptance e-folding optical depth
+    real(wp), parameter :: SW_CLD_MAX = 0.999_wp   ! max column cloud fraction [-]
+
     public :: aeros_ecckd_lw_clearsky_column
     public :: aeros_ecckd_sw_clearsky_column
+    public :: aeros_ecckd_lw_cloudy_column
+    public :: aeros_ecckd_sw_cloudy_column
 
 contains
 
@@ -184,58 +212,123 @@ contains
                                               q_co2, l_o3, fnet, heat, olr, fdw_sur)
         ! Clear-sky longwave for one column via the Malkmus correlated-k. Signature
         ! is identical to aeros_lw_clearsky_column (the SESAM kernel) so the two are
-        ! interchangeable behind the `scheme` selector. Model ordering on input
-        ! (k=1 top .. k=nlev surface); fluxes on the nlev+1 interfaces.
-        !
-        ! Local convention (as SESAM): interface i=0 surface .. i=nlev TOA; local
-        ! layer l (surface->top) is model layer k = nlev-l+1.
-
+        ! interchangeable behind the `scheme` selector. A thin wrapper over the
+        ! shared transfer worker with zero cloud optical depth.
         integer,  intent(in)  :: nlev
-        real(wp), intent(in)  :: t(:)        ! (nlev) layer temperature [K]
-        real(wp), intent(in)  :: q(:)        ! (nlev) specific humidity [kg kg-1]
-        real(wp), intent(in)  :: o3(:)       ! (nlev) ozone mass mixing ratio [kg kg-1]
-        real(wp), intent(in)  :: dp_lev(:)   ! (nlev) layer thickness [Pa], > 0
-        real(wp), intent(in)  :: z_half(0:)  ! (0:nlev) interface height [m] (kept for signature parity)
-        real(wp), intent(in)  :: ts          ! surface skin temperature [K]
-        real(wp), intent(in)  :: q_co2       ! CO2 mass mixing ratio [kg kg-1]
-        logical,  intent(in)  :: l_o3        ! include ozone
+        real(wp), intent(in)  :: t(:), q(:), o3(:), dp_lev(:)
+        real(wp), intent(in)  :: z_half(0:)  ! (kept for signature parity; unused)
+        real(wp), intent(in)  :: ts, q_co2
+        logical,  intent(in)  :: l_o3
+        real(wp), intent(out) :: fnet(0:), heat(:), olr, fdw_sur
 
-        real(wp), intent(out) :: fnet(0:)    ! (0:nlev) net UPWARD LW flux [W m-2]
-        real(wp), intent(out) :: heat(:)     ! (nlev) LW heating rate [K s-1]
-        real(wp), intent(out) :: olr         ! outgoing LW at TOA [W m-2]
-        real(wp), intent(out) :: fdw_sur     ! downward LW at surface [W m-2]
+        real(wp) :: cloud_od(nlev)
+        integer  :: k
 
-        ! g-point k-table (reference), built once per call: k [cm2 g-1] and weight
+        cloud_od = 0.0_wp
+        call ecckd_lw_flux(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, cloud_od, &
+                           fnet, olr, fdw_sur)
+        do k = 1, nlev
+            heat(k) = (grav/cp_d) * (fnet(k) - fnet(k-1))/dp_lev(k)
+        end do
+    end subroutine aeros_ecckd_lw_clearsky_column
+
+    subroutine aeros_ecckd_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
+                                            q_co2, l_o3, cf, clwc, ciwc, &
+                                            fnet, heat, olr, fdw_sur)
+        ! All-sky longwave: SESAM's run-twice-and-blend (aeros_lw_cloudy_column),
+        ! but on the ecCKD gas g-points. A clear column and an overcast column
+        ! (clear-sky gas g-points times a per-layer grey cloud transmission built
+        ! from the IN-CLOUD water paths = grid-mean/CF) are blended by the column
+        ! cloud fraction at maximum overlap. The grey cloud folds into the g-point
+        ! transmissions -- no new spectral points. cf=0 returns clear bit-for-bit.
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: t(:), q(:), o3(:), dp_lev(:)
+        real(wp), intent(in)  :: z_half(0:)  ! (kept for signature parity; unused)
+        real(wp), intent(in)  :: ts, q_co2
+        logical,  intent(in)  :: l_o3
+        real(wp), intent(in)  :: cf(:), clwc(:), ciwc(:)
+        real(wp), intent(out) :: fnet(0:), heat(:), olr, fdw_sur
+
+        real(wp) :: cloud_od(nlev), fnet_cs(0:nlev), fnet_ov(0:nlev)
+        real(wp) :: olr_cs, fdw_cs, olr_ov, fdw_ov, cff, lwp, iwp
+        integer  :: k
+
+        ! clear-sky reference
+        cloud_od = 0.0_wp
+        call ecckd_lw_flux(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, cloud_od, &
+                           fnet_cs, olr_cs, fdw_cs)
+
+        cff = 0.0_wp
+        do k = 1, nlev
+            cff = max(cff, min(1.0_wp, max(0.0_wp, cf(k))))
+        end do
+        if (cff <= CLD_CF_FLOOR) then
+            fnet = fnet_cs; olr = olr_cs; fdw_sur = fdw_cs
+            do k = 1, nlev
+                heat(k) = (grav/cp_d) * (fnet(k) - fnet(k-1))/dp_lev(k)
+            end do
+            return
+        end if
+
+        ! overcast: grey cloud LW optical depth per layer from in-cloud water
+        do k = 1, nlev
+            lwp = 1.0e3_wp * max(0.0_wp, clwc(k)) * dp_lev(k)/grav / cff   ! [g m-2]
+            iwp = 1.0e3_wp * max(0.0_wp, ciwc(k)) * dp_lev(k)/grav / cff
+            cloud_od(k) = LW_KABS_LIQ*lwp + LW_KABS_ICE*iwp
+        end do
+        call ecckd_lw_flux(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, cloud_od, &
+                           fnet_ov, olr_ov, fdw_ov)
+
+        ! blend clear and overcast by the column cloud fraction (maximum overlap)
+        do k = 0, nlev
+            fnet(k) = (1.0_wp-cff)*fnet_cs(k) + cff*fnet_ov(k)
+        end do
+        olr     = (1.0_wp-cff)*olr_cs + cff*olr_ov
+        fdw_sur = (1.0_wp-cff)*fdw_cs + cff*fdw_ov
+        do k = 1, nlev
+            heat(k) = (grav/cp_d) * (fnet(k) - fnet(k-1))/dp_lev(k)
+        end do
+    end subroutine aeros_ecckd_lw_cloudy_column
+
+    subroutine ecckd_lw_flux(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, cloud_od, &
+                             fnet, olr, fdw_sur)
+        ! Shared LW transfer worker: net-upward flux on the interfaces from the
+        ! Malkmus correlated-k gas g-points, with an optional per-layer grey cloud
+        ! optical depth cloud_od(nlev) (model order; 0 for clear-sky, folded into
+        ! every g-point's transmission). Outputs fnet, olr, fdw_sur; the caller
+        ! forms the heating rate (so the cloudy blend can act on fnet first).
+        !
+        ! Local convention: interface i=0 surface .. i=nlev TOA; local layer l
+        ! (surface->top) is model layer k = nlev-l+1.
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: t(:), q(:), o3(:), dp_lev(:)
+        real(wp), intent(in)  :: ts, q_co2
+        logical,  intent(in)  :: l_o3
+        real(wp), intent(in)  :: cloud_od(:)  ! (nlev) grey LW cloud optical depth, model order
+        real(wp), intent(out) :: fnet(0:), olr, fdw_sur
+
         real(wp) :: kj(NB,NGAS,NGT), gw(NB,NGT)
-        ! per-layer absorber mass paths [g cm-2], local order (l=1 surface)
-        real(wp) :: umass(nlev,NGAS)
-        real(wp) :: pratio(nlev), tlay(nlev)            ! layer p/p0 and T, local order
-        real(wp) :: pf_layer(nlev,NB)                   ! band Planck fraction per layer
-        real(wp) :: bsrc(nlev)                          ! grey layer source sigma T^4, local
-        real(wp) :: bsurf_b(NB)                         ! surface Planck fraction * sigma Ts^4
-        real(wp) :: ctau(0:nlev)                        ! cumulative optical depth, this g-point
-        real(wp) :: fup(0:nlev), fdw(0:nlev)
+        real(wp) :: umass(nlev,NGAS), pratio(nlev), tlay(nlev)
+        real(wp) :: pf_layer(nlev,NB), bsrc(nlev), bsurf_b(NB)
+        real(wp) :: ctau(0:nlev), ccld(0:nlev), fup(0:nlev), fdw(0:nlev)
         real(wp) :: p_half, pfl, tau_l
         integer  :: k, l, i, ib, ig, igas
 
         call build_ktable(kj, gw)
 
         ! --- per-layer absorber paths, pressure ratio, temperature, Planck ------
-        ! Reconstruct layer pressure from dp (top interface ~ 0): cheap-in-p.
         p_half = 0.0_wp
         do k = 1, nlev                       ! model order, k=1 top
             l   = nlev - k + 1               ! local order, l=1 surface
-            pfl = p_half + 0.5_wp*dp_lev(k)  ! layer-mid pressure
+            pfl = p_half + 0.5_wp*dp_lev(k)
             p_half = p_half + dp_lev(k)
-
-            umass(l,1) = 0.1_wp * max(0.0_wp, q(k))  * dp_lev(k)/grav   ! H2O
-            umass(l,2) = 0.1_wp * max(0.0_wp, q_co2) * dp_lev(k)/grav   ! CO2
+            umass(l,1) = 0.1_wp * max(0.0_wp, q(k))  * dp_lev(k)/grav
+            umass(l,2) = 0.1_wp * max(0.0_wp, q_co2) * dp_lev(k)/grav
             if (l_o3) then
-                umass(l,3) = 0.1_wp * max(0.0_wp, o3(k)) * dp_lev(k)/grav ! O3
+                umass(l,3) = 0.1_wp * max(0.0_wp, o3(k)) * dp_lev(k)/grav
             else
                 umass(l,3) = 0.0_wp
             end if
-
             pratio(l) = pfl/p0
             tlay(l)   = t(k)
             bsrc(l)   = sigma_sb*t(k)**4
@@ -247,11 +340,16 @@ contains
             bsurf_b(ib) = planck_frac(ib, ts)*sigma_sb*ts**4
         end do
 
+        ! cumulative grey cloud optical depth, local surface->top order
+        ccld(0) = 0.0_wp
+        do l = 1, nlev
+            ccld(l) = ccld(l-1) + max(0.0_wp, cloud_od(nlev - l + 1))
+        end do
+
         ! --- accumulate net-upward flux over bands and g-points ----------------
         fnet = 0.0_wp; olr = 0.0_wp; fdw_sur = 0.0_wp
         do ib = 1, NB
             do ig = 1, NGB(ib)
-                ! cumulative optical depth from surface (local i=0) upward
                 ctau(0) = 0.0_wp
                 do l = 1, nlev
                     tau_l = 0.0_wp
@@ -263,10 +361,8 @@ contains
                     end do
                     ctau(l) = ctau(l-1) + tau_l
                 end do
-
                 call band_flux(nlev, gw(ib,ig), pf_layer(:,ib), bsrc, &
-                               bsurf_b(ib), ctau, fup, fdw)
-
+                               bsurf_b(ib), ctau, ccld, fup, fdw)
                 do i = 0, nlev
                     fnet(nlev - i) = fnet(nlev - i) + (fup(i) - fdw(i))
                 end do
@@ -274,13 +370,7 @@ contains
                 fdw_sur = fdw_sur + fdw(0)
             end do
         end do
-
-        ! --- layer heating: divergence of net-upward flux ----------------------
-        do k = 1, nlev
-            heat(k) = (grav/cp_d) * (fnet(k) - fnet(k-1))/dp_lev(k)
-        end do
-        return
-    end subroutine aeros_ecckd_lw_clearsky_column
+    end subroutine ecckd_lw_flux
 
     subroutine aeros_ecckd_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
                                               coszen, alb_vis, alb_ir, heat, &
@@ -408,18 +498,109 @@ contains
 
     end subroutine aeros_ecckd_sw_clearsky_column
 
-    subroutine band_flux(nlev, wg, pf_layer, bsrc, bsurf, ctau, fup, fdw)
+    subroutine aeros_ecckd_sw_cloudy_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
+                                            coszen, alb_vis, alb_ir, cf, clwc, ciwc, &
+                                            heat, sw_up_toa, sw_dw_sur, sw_net_sur)
+        ! All-sky shortwave: SESAM's run-twice-and-blend (aeros_sw_cloudy_column)
+        ! on the ecCKD clear-sky SW base. A cloud reflector (conservative-scattering
+        ! two-stream on the in-cloud optical depth, plus a small near-IR
+        ! absorptance) is placed above the ecCKD clear column and the two are
+        ! blended by the column cloud fraction (maximum overlap). The grey cloud
+        ! optics are gas-independent, so this is SESAM's cloudy SW with the
+        ! clear-sky base swapped to ecCKD -- no new spectral points. cf=0 returns
+        ! the clear-sky column bit-for-bit.
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: q(:), o3(:), dp_lev(:)
+        logical,  intent(in)  :: l_o3
+        real(wp), intent(in)  :: swdown_toa, coszen, alb_vis, alb_ir
+        real(wp), intent(in)  :: cf(:), clwc(:), ciwc(:)
+        real(wp), intent(out) :: heat(:), sw_up_toa, sw_dw_sur, sw_net_sur
+
+        real(wp) :: heat_cs(nlev), up_cs, dw_cs, net_cs
+        real(wp) :: tau_c(nlev), cldw(nlev)
+        real(wp) :: cff, cosz, gamma, tau, rcld, acld, tcld
+        real(wp) :: alb_clr, alb_ov, phi, up_ov, dw_ov, net_ov, a_atm_ov
+        real(wp) :: lwp, iwp, wsum
+        integer  :: k
+
+        ! ecCKD clear-sky column (base; also the polar-night / no-cloud guard)
+        call aeros_ecckd_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
+            coszen, alb_vis, alb_ir, heat_cs, up_cs, dw_cs, net_cs)
+
+        cff = 0.0_wp
+        do k = 1, nlev
+            cff = max(cff, min(1.0_wp, max(0.0_wp, cf(k))))
+        end do
+        cff = min(cff, SW_CLD_MAX)
+        if (cff <= CLD_CF_FLOOR .or. swdown_toa <= 0.0_wp) then
+            heat = heat_cs
+            sw_up_toa = up_cs; sw_dw_sur = dw_cs; sw_net_sur = net_cs
+            return
+        end if
+
+        ! per-layer cloud optical depth from in-cloud water (grid-mean/CF)
+        tau = 0.0_wp
+        do k = 1, nlev
+            lwp = max(0.0_wp, clwc(k))*dp_lev(k)/grav / cff       ! [kg m-2] in-cloud
+            iwp = max(0.0_wp, ciwc(k))*dp_lev(k)/grav / cff
+            tau_c(k) = 1.5_wp*(lwp/(SW_RHO_LIQ*SW_R_LIQ) + iwp/(SW_RHO_ICE*SW_R_ICE))
+            tau = tau + tau_c(k)
+        end do
+
+        ! conservative-scattering two-stream reflectance + small absorptance
+        cosz  = max(coszen, 0.1_wp)
+        gamma = 0.5_wp*(1.0_wp - SW_CLD_G)/cosz
+        rcld  = gamma*tau/(1.0_wp + gamma*tau)
+        acld  = SW_CLD_ABS*(1.0_wp - exp(-tau/SW_CLD_TAU_A))
+        rcld  = min(rcld, 1.0_wp - acld)
+        tcld  = max(0.0_wp, 1.0_wp - rcld - acld)
+
+        ! cloud reflector above the clear column
+        alb_clr = up_cs/swdown_toa
+        alb_ov  = rcld + tcld*tcld*alb_clr/(1.0_wp - rcld*alb_clr)
+        phi     = tcld/(1.0_wp - rcld*alb_clr)
+        up_ov   = swdown_toa*alb_ov
+        dw_ov   = dw_cs*phi
+        net_ov  = net_cs*phi
+
+        ! overcast atmospheric absorption = exact boundary residual, distributed
+        ! by the clear-sky heating (gas) plus the cloud optical depth (cloud)
+        a_atm_ov = max(0.0_wp, swdown_toa - up_ov - net_ov)
+        wsum = 0.0_wp
+        do k = 1, nlev
+            cldw(k) = tau_c(k) + max(0.0_wp, heat_cs(k))*dp_lev(k)
+            wsum = wsum + cldw(k)
+        end do
+        if (wsum <= 0.0_wp) then
+            do k = 1, nlev; cldw(k) = dp_lev(k); wsum = wsum + dp_lev(k); end do
+        end if
+
+        ! blend clear and overcast by the column cloud fraction
+        sw_up_toa  = (1.0_wp-cff)*up_cs  + cff*up_ov
+        sw_dw_sur  = (1.0_wp-cff)*dw_cs  + cff*dw_ov
+        sw_net_sur = (1.0_wp-cff)*net_cs + cff*net_ov
+        do k = 1, nlev
+            heat(k) = (1.0_wp-cff)*heat_cs(k) &
+                    + cff*(grav/cp_d)*(a_atm_ov*(cldw(k)/wsum))/dp_lev(k)
+        end do
+    end subroutine aeros_ecckd_sw_cloudy_column
+
+    subroutine band_flux(nlev, wg, pf_layer, bsrc, bsurf, ctau, ccld, fup, fdw)
         ! Emissivity-method net LW flux on the interfaces for one band+g-point.
         ! Source in this g-point for local layer l is wg*pf_layer(l)*bsrc(l);
         ! surface is wg*bsurf. Transmission between local interfaces from the
-        ! cumulative optical depth (correlated-k: k constant across the g-point,
-        ! so optical depths add and the exponential is on the total path).
+        ! cumulative gas optical depth (correlated-k: k constant across the
+        ! g-point, so optical depths add and the exponential is on the total path),
+        ! diffusivity BETA0, times the grey cloud transmission from the cumulative
+        ! cloud optical depth ccld (already a flux/diffusive optical depth, so no
+        ! BETA0). ccld = 0 (clear) recovers the clear-sky flux bit-for-bit.
         integer,  intent(in)  :: nlev
         real(wp), intent(in)  :: wg
         real(wp), intent(in)  :: pf_layer(:)    ! (nlev) band Planck fraction, local order
         real(wp), intent(in)  :: bsrc(:)        ! (nlev) grey layer source sigma T^4, local order
         real(wp), intent(in)  :: bsurf          ! band Planck fraction * sigma Ts^4
-        real(wp), intent(in)  :: ctau(0:)       ! (0:nlev) cumulative optical depth (surface=0)
+        real(wp), intent(in)  :: ctau(0:)       ! (0:nlev) cumulative gas optical depth (surface=0)
+        real(wp), intent(in)  :: ccld(0:)       ! (0:nlev) cumulative grey cloud optical depth
         real(wp), intent(out) :: fup(0:), fdw(0:)
 
         real(wp) :: b(nlev), bs
@@ -448,7 +629,9 @@ contains
     contains
         pure real(wp) function tr(ia, ib) result(x)
             integer, intent(in) :: ia, ib
-            x = exp(-BETA0*abs(ctau(max(ia,ib)) - ctau(min(ia,ib))))
+            integer :: hi, lo
+            hi = max(ia, ib); lo = min(ia, ib)
+            x = exp(-BETA0*(ctau(hi) - ctau(lo)) - (ccld(hi) - ccld(lo)))
         end function tr
     end subroutine band_flux
 
