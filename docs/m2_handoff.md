@@ -91,7 +91,14 @@ New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
    jet is neither a hyperdiffusion artifact nor a truncation limit. The limiter is
    the RCE's weak, surface-trapped baroclinicity; closing the jet gap needs
    stronger baroclinic forcing (meridional SST gradient / seasonal cycle / land),
-   not more resolution. Deferred as a modeling step beyond the aquaplanet RCE.
+   not more resolution. **Closed as a characterized, expected limitation (§26):**
+   a thermal-wind diagnosis shows the surface T gradient matches ERA5 but collapses
+   aloft (no eddy ventilation of the midlat upper troposphere — the same missing-
+   eddy loop). Crucially this is the *expected* behaviour of a perpetual-annual-mean
+   aquaplanet, which omits the land–sea contrast, stationary waves and seasonal
+   cycle that drive Earth's storm tracks; the fair circulation yardstick is the APE
+   aquaplanet intercomparison, not ERA5. The thermal/moisture columns (§22–24),
+   where the ERA5 comparison *is* fair, validate well. Not a tuning target.
 3. **Model humidity bias in the coupled RCE — RESOLVED for now** (§22–23).
    Localized against ERA5 (`scripts/rce_humidity_vs_era5.jl`, `rce_long` RH dump):
    the RCE was near-saturated at nearly all lat/height (+40% RH vs ERA5), both the

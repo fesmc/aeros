@@ -403,29 +403,56 @@ contains
         call hotspot_split(nlev)
         call eddy_diag()
         call baroclinicity_diag()
-        if (l_diag) call term_table()
+        if (l_diag) then
+            call term_table(hot_lat_index())          ! tropical (warmest low level)
+            call term_table(lat_index_near(45.0_wp))  ! midlatitude
+        end if
         call energy_balance()
         return
     end subroutine report
 
-    subroutine term_table()
-        ! Per-term heating split, zonal-mean at the hot latitude j* (the warmest
-        ! lowest-layer zonal mean -- the runaway column). Settles the handoff
-        ! question: is the descending column being spuriously heated (large +cnv
-        ! or +cnd at depth) or simply not ventilated (surf pumping in, vadv/vdiff
-        ! not carrying it away)? All columns in K/day; hadv = total dynamical
-        ! heating minus its vertical/adiabatic part (vadv).
+    integer function hot_lat_index() result(jstar)
+        ! Latitude row with the warmest zonal-mean lowest layer (the tropics).
         real(wp) :: zm, zmax
-        real(wp) :: hs, hcv, hcd, hr, hvd, hva, hdyn
-        real(wp) :: olrj, swupj, swinj
-        integer  :: k, j, jstar
+        integer  :: j
         zmax = -1.0e30_wp; jstar = 1
         do j = 1, grd%nlat
             zm = sum(now%temp_g(:,j,nlev))/real(grd%nlon, wp)
             if (zm > zmax) then; zmax = zm; jstar = j; end if
         end do
+        return
+    end function hot_lat_index
+
+    integer function lat_index_near(target) result(jbest)
+        ! Latitude row nearest a target latitude [deg].
+        real(wp), intent(in) :: target
+        real(wp) :: d, dbest
+        integer  :: j
+        dbest = 1.0e30_wp; jbest = 1
+        do j = 1, grd%nlat
+            d = abs(grd%lat(j) - target)
+            if (d < dbest) then; dbest = d; jbest = j; end if
+        end do
+        return
+    end function lat_index_near
+
+    subroutine term_table(jstar)
+        ! Per-term heating split, zonal-mean at latitude index jstar. Called for
+        ! the tropical hot latitude (warmest lowest layer) AND a midlatitude
+        ! (~45 deg): the equator-to-midlat contrast in the cnv/cnd heating aloft
+        ! reveals whether moist physics (convection, condensation latent heat) is
+        ! warming the midlatitude free troposphere onto a moist adiabat and so
+        ! collapsing the upper-level meridional temperature gradient the
+        ! thermal-wind jet needs (m2_results §26). All columns in K/day; hadv =
+        ! total dynamical heating minus its vertical/adiabatic part (vadv).
+        integer, intent(in) :: jstar
+        real(wp) :: zmax
+        real(wp) :: hs, hcv, hcd, hr, hvd, hva, hdyn
+        real(wp) :: olrj, swupj, swinj
+        integer  :: k
+        zmax = sum(now%temp_g(:,jstar,nlev))/real(grd%nlon, wp)
         write(*,"(a,i0,a,f6.1,a,f7.2,a)") &
-            "   per-term heating [K/day] at hot latitude j=", jstar, &
+            "   per-term heating [K/day] at j=", jstar, &
             " (lat ", grd%lat(jstar), " N, T_low ", zmax, " K):"
         write(*,"(a)") "   lev    Tzm    qzm[g/kg]    surf     cnv     cnd" // &
                        "     rad   vdiff    vadv    hadv"

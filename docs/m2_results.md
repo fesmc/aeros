@@ -1234,3 +1234,58 @@ cycle, land–sea contrast), not more spectral resolution — a modeling step be
 the aquaplanet RCE and deferred. For the M2 validation the takeaway is bounded:
 the jet's *position* is right and its *weakness* is now explained and quantified,
 not a mystery.
+
+## 26. Why the jet is weak: a thermal-wind diagnosis, and the right yardstick (M2.5n)
+
+The jet weakness (§24–25) has a precise mechanism. The zonal-mean jet is
+thermal-wind balanced, so its shear integrates the meridional temperature
+gradient over height. Comparing the equator-minus-midlatitude temperature
+contrast ΔT by level, model vs ERA5:
+
+| p [hPa] | model ΔT | ERA5 ΔT |
+|---|---|---|
+| 981 (sfc) | +16.5 | +15.6 |
+| 891 | +15.6 | +15.2 |
+| 693 | +10.4 | +14.0 |
+| 519 | +7.8 | +14.8 |
+| 420 | +2.3 | +15.8 |
+| 313 | +1.1 | +14.8 |
+| 198 | −0.1 | +1.6 |
+
+**At the surface the model's gradient matches ERA5 almost exactly (+16.5 vs
++15.6 K) — the APE SST forcing works — but it collapses to ~0 by 300–420 hPa,
+while ERA5 holds ~15 K up to 300 hPa.** ERA5's deep gradient builds a 34 m/s jet
+aloft; the model's vanishing gradient leaves 7.5 m/s, surface-trapped. That is the
+whole of the jet deficit.
+
+**What sets the collapse — a two-latitude heating budget.** `rce_long`'s per-term
+diagnostic (`l_diag`) now reports at the tropical hot latitude *and* at ~45°
+(`term_table` takes a latitude index). At 45° at equilibrium, in the free
+troposphere: **convection is off** (`cnv = 0` at every level; `hb − h*_env` is
+−18 to −45 kJ/kg), **condensation heating is surface-confined** (`cnd ≈ 0` above
+the boundary layer), and **radiation cools** (−0.3 to −1.2 K/day), balanced by
+weak subsidence/diffusion. So moist physics is *not* actively warming the
+midlatitude free troposphere — the earlier "midlats driven onto a moist adiabat"
+guess is refuted for the equilibrium state. The warm midlatitude upper
+troposphere is a spin-up legacy: convection warmed it early, and once it shut off
+there is **no baroclinic-eddy ventilation** to pull it back to a cold,
+baroclinic state. Collapsed gradient and missing eddies (§25) are one self-locking
+problem: no eddies → warm midlat aloft → weak upper-level gradient → weak
+surface-trapped thermal wind → no eddies; §25 showed it does not break at T42.
+
+**The right yardstick.** Much of this mismatch against ERA5 is *expected*, not a
+model defect: this is an aquaplanet with perpetual annual-mean forcing, and Earth's
+extratropical storm tracks are organized and energized by exactly what the setup
+omits — land–sea contrast and stationary waves, and a seasonal cycle. Judging the
+model's *circulation* against ERA5 (full reality) therefore overstates the
+"error"; the fair reference is the aquaplanet intercomparison (APE, Neale &
+Hoskins), where the target jet is itself weaker and more zonally symmetric than
+ERA5's. Two things remain genuinely worth noting even against that fairer bar:
+the surface gradient and jet *position* are right (the dynamics respond
+correctly), and the free-tropospheric gradient collapse is a real characteristic
+of this steady moist RCE. The thermal/moisture columns (§22–24) — where the
+comparison to reality *is* fair — validate well; the extratropical circulation is
+where a steady aquaplanet is simply not expected to reproduce ERA5, and chasing
+that with parameterization tuning would be fitting the wrong target. Closing it
+belongs to the capabilities a paleoclimate model needs anyway: a seasonal cycle
+(orbital insolation) and, eventually, land and a dynamical ocean.
