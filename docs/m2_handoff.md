@@ -1,9 +1,26 @@
-# M2 handoff — where to pick up (after the RCE resolution)
+# M2 handoff — where to pick up
 
-Supersedes the earlier M2.5a–d handoff. `main` is pushed (`origin/main`), `make
-all openmp=1` is clean, and **all 18 acceptance tests pass**. This session
-diagnosed and **resolved the M2 RCE runaway** (the long-standing blocker). Detail
-below; the earlier handoff's content is folded in where still relevant.
+Supersedes the earlier M2.5a–e handoff. `main` is pushed (`origin/main`), `make
+all openmp=1` is clean, and **all 18 acceptance tests pass**. Two blockers that
+this doc used to open with are now cleared:
+
+- **The M2 RCE runaway** — diagnosed and resolved (surface momentum drag + dry
+  convective adjustment); detail below, unchanged.
+- **The Tier-2 ERA5 data** — the cloud/RH/u/v fields that were missing are now
+  delivered (`~/data/era5/monthly-{pressure,single}-levels`, 1991–2020 monthly
+  clim on the same 144×73×37 grid as Tier-1). This unblocked the cloudy-sky
+  radiation work.
+
+**Latest work (M2.5f, this doc's most recent): the cloudy-sky radiation branch
+is built and validated offline against ERA5** (m2_results §17–18). All-sky LW
+(`aeros_lw_cloudy_column`, max-overlap run-twice blend) and SW
+(`aeros_sw_cloudy_column`, cloud reflector + blend) operators, resolved per-layer
+grey-cloud optics, opt-in (`cf=0` → clear-sky bit-for-bit, all tests untouched).
+Driven on ERA5's `cc`/`clwc`/`ciwc`, the modelled cloud radiative effect matches
+ERA5 to a few W/m² (TOA LW +18.2/+21.8, SW −44.5/−46.1, net −26.3/−24.2) with
+faithful patterns (`docs/figures/era5_cre_validation.png`). **Not yet wired into
+the coupled model** — that (a diagnostic cloud field in `aeros_radiation_apply`)
+is the next step, see below.
 
 ## The RCE runaway is resolved
 
@@ -47,7 +64,7 @@ Both leave a residual **+15–17 W/m² net TOA** (OLR ~20 W/m² too low — the 
 "too opaque" bias) → slow secondary warming, not a blow-up. Balance it with
 albedo ~0.47 or an LW-opacity fix for a true steady equilibrium.
 
-## What landed this session (all on `main`, pushed)
+## What landed in the RCE-resolution session (all on `main`, pushed)
 
 - **Surface momentum drag** (`surf%c_d`, implicit via vdiff). The rotating-RCE fix.
 - **Dry convective adjustment** (`cnv%dry_adjust`, opt-in, relaxed over τ).
@@ -69,11 +86,19 @@ New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
 2. **Do eddies now grow?** With `c_d>0` + `seed_asym>0`, does the drag-stabilized
    realistic jet develop baroclinic eddies (the `eddy_diag` metrics)? Tells us
    whether T21 supports meaningful eddy transport or T42 is needed.
-3. **Clouds + the OLR −20 bias** (deferred M2.4 radiation piece): the cloudy-sky
-   LW/SW branch fixes TOA balance physically and is needed for Tier-2 anyway.
-4. **ERA5 moist-line (Tier 2):** the bounded-RCE blocker is now cleared, but it is
-   **still blocked on the missing Tier-2 ERA5 fields** (cloud/RH/u/v were not in
-   the delivered data). Tier 1 (clear-sky) is done (§14).
+3. **Wire the cloudy operators into the coupled model** (`aeros_radiation_apply`):
+   the kernels are validated offline (§18) but the apply path still calls only
+   the clear-sky ones. Needs a diagnostic cloud field (cloud fraction + cloud
+   water from the model's T/q/condensate), since no prognostic cloud scheme
+   exists yet. This is the physical route to TOA balance in the RCE.
+4. **The clear-sky OLR −16 W/m² bias** (§14): the broadband water-vapour band is
+   slightly too opaque in the warm moist tropics. It bleeds into the cloudy LW
+   CRE (§18, −3.6 residual). Retuning the LW vapour fit against ERA5 clear-sky is
+   the fix.
+5. **ERA5 moist-line (Tier 2):** now fully unblocked — the bounded-RCE vehicle
+   exists and the Tier-2 data is in hand. Tier 1 (clear-sky, §14) and the CRE
+   validation (§17–18) are done; the moist-line (RH / moist-adiabat / u,v vs
+   ERA5) waits only on a balanced coupled RCE (steps 1–3).
 
 ## Gotchas the next session will want
 
