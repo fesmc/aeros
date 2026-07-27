@@ -1,6 +1,48 @@
 # M2 handoff — where to pick up
 
-Supersedes the earlier M2.5a–e handoff. `main` is pushed (`origin/main`), `make
+## ►► NEXT SESSION: re-validate the coupled RCE on ecCKD (now the default)
+
+**ecCKD correlated-k radiation is now the production default** (§28; `scheme`
+default flipped SESAM→ecCKD, SESAM kept as `scheme=1` fallback). Every earlier
+coupled-RCE result and tuning below — the humidity/`cond_rh_crit` fix (§22–23), the
+moist-line validation (§24), the jet/thermal-wind diagnosis (§25–26) — was done
+under **SESAM**. They need a re-validation pass under ecCKD, because the radiation
+that sets the coupled equilibrium has changed. This is the one deliberate
+consequence of the default switch (bit-reproducibility of pre-ecCKD numbers is
+broken by design).
+
+**First data point (already taken):** the balanced rotating vehicle
+(`logs/rce_revalidate.nml` = rot, `cond_rh_crit=0.93`, clouds on, 100 d) runs
+**NaN-free under ecCKD** with **TOA net +5.6 W/m²** (was +8 under SESAM, §23) —
+stable, and the balance is slightly *tighter*. So no re-tune is obviously forced;
+the job is to confirm/refine, not rebuild.
+
+**Checklist (in order):**
+1. **Coupled TOA + cover sweep under ecCKD.** Is `cond_rh_crit=0.93` still the
+   best joint cover/TOA point, or does ecCKD's more accurate OLR shift it? Re-check
+   cover vs ERA5 0.63 (`rce_long` dump + `scripts/rce_humidity_vs_era5.jl`).
+2. **Moist-line re-validation** (`scripts/rce_validate_era5.jl`, T/u/RH vs ERA5,
+   §24). Watch the **upper-troposphere warm bias** (+12 K at 198 hPa under SESAM):
+   ecCKD's better LW aloft may change it. Jet weakness (§25–26) is a dynamics
+   limit, not radiation — expect it unchanged.
+3. **Humidity comparison** (§22–23) under ecCKD — is the RH/cover story the same?
+4. **Longer run** (200+ d) NaN-free, and a **slab-ocean** equilibrium under ecCKD
+   (SST responds to the new radiation — the balance may re-settle).
+5. Confirm the **clear-sky OLR bias is structurally gone** (ecCKD −5.1, no
+   `LW_VAP_OPAC`) end-to-end in the coupled run, not just offline (§14/§20).
+
+**Tools/gotchas:** `rce_long` now runs ecCKD by default (no scheme knob — it uses
+the class default); for an A/B, SESAM is still `scheme=1` in a namelist. `make
+validate_era5 ... ecckd` selects ecCKD offline (check its default arg — it may
+still default to `sesam` to preserve §14). The worktrees need the **`insol`
+symlink** (→ `~/models/insol`, gitignored like `fesm-utils`) and, in the
+*generated* `Makefile`, `$(INC_INSOL)` in `INCFLAGS` plus the `probe-insol` /
+`ecckd` targets — regenerate via `configme` from the updated `config/` templates,
+or copy the patched `Makefile` in.
+
+---
+
+Supersedes the earlier M2.5a–e handoff. `make
 all openmp=1` is clean, and **all 19 acceptance tests pass**. Two blockers that
 this doc used to open with are now cleared:
 
