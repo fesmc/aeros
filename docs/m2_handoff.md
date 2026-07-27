@@ -86,11 +86,13 @@ New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
 2. **Do eddies now grow?** With `c_d>0` + `seed_asym>0`, does the drag-stabilized
    realistic jet develop baroclinic eddies (the `eddy_diag` metrics)? Tells us
    whether T21 supports meaningful eddy transport or T42 is needed.
-3. **Wire the cloudy operators into the coupled model** (`aeros_radiation_apply`):
-   the kernels are validated offline (§18) but the apply path still calls only
-   the clear-sky ones. Needs a diagnostic cloud field (cloud fraction + cloud
-   water from the model's T/q/condensate), since no prognostic cloud scheme
-   exists yet. This is the physical route to TOA balance in the RCE.
+3. **Tune the diagnostic cloud scheme** (`aeros_cloud`, §19): the operators are
+   now wired into the coupled model (`radiation%clouds`, opt-in) with an
+   RH-based `cf` + T-dependent condensate, but the first-cut parameters
+   (`RH_crit=0.70`, `q_ic=0.04 q_sat`) give near-total overcast in the model's
+   moist RCE state (coupled TOA net swings +88→−100 W/m², planetary albedo
+   ~0.85). Raise `RH_crit`, cut the condensate fraction, and check against ERA5
+   `cc` / the §17 CRE. This is the route to physical TOA balance in the RCE.
 4. **The clear-sky OLR −16 W/m² bias** (§14): the broadband water-vapour band is
    slightly too opaque in the warm moist tropics. It bleeds into the cloudy LW
    CRE (§18, −3.6 residual). Retuning the LW vapour fit against ERA5 clear-sky is
