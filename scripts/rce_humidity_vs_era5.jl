@@ -35,8 +35,9 @@ const ERA5_PL = "/Users/alrobi001/data/era5/monthly-pressure-levels"
 const ERA5_SL = "/Users/alrobi001/data/era5/monthly-single-levels"
 const OUTDIR  = "docs/figures"
 
-rot_nc = length(ARGS) >= 1 ? ARGS[1] : "output/rce_rh_rot.nc"
-uni_nc = length(ARGS) >= 2 ? ARGS[2] : "output/rce_rh_uni.nc"
+rot_nc  = length(ARGS) >= 1 ? ARGS[1] : "output/rce_rh_rot.nc"
+uni_nc  = length(ARGS) >= 2 ? ARGS[2] : "output/rce_rh_uni.nc"
+outname = length(ARGS) >= 3 ? ARGS[3] : "rce_humidity_vs_era5.png"
 
 plc(v) = joinpath(ERA5_PL, "era5_monthly-pressure-levels_$(v)_1991-2020_clim.nc")
 slc(v) = joinpath(ERA5_SL, "era5_monthly-single-levels_$(v)_1991-2020_clim.nc")
@@ -197,5 +198,5 @@ axislegend(ax; position = :lt)
 Label(fig[0, :], "Coupled RCE humidity & cloud vs ERA5 (zonal/annual mean)";
       fontsize = 20, font = :bold)
 
-save(joinpath(OUTDIR, "rce_humidity_vs_era5.png"), fig)
-println("\nwrote $(joinpath(OUTDIR, "rce_humidity_vs_era5.png"))")
+save(joinpath(OUTDIR, outname), fig)
+println("\nwrote $(joinpath(OUTDIR, outname))")

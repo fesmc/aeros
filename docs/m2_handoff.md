@@ -86,13 +86,20 @@ New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
 2. **Do eddies now grow?** With `c_d>0` + `seed_asym>0`, does the drag-stabilized
    realistic jet develop baroclinic eddies (the `eddy_diag` metrics)? Tells us
    whether T21 supports meaningful eddy transport or T42 is needed.
-3. **Model humidity bias in the coupled RCE** (§21): the cloud scheme is now
-   tuned against ERA5 (diagnosed net CRE −23.6 vs −24.2, §21) — but driven by the
-   coupled model it still overcasts (`rce_long` TOA clouds-on −36 W/m², was −100).
-   Since the scheme is validated correct on ERA5 columns, this is a **model**
-   problem: the RCE is too moist (near-saturated over a deep layer → high `cf`).
-   Chase the humidity/RCE state, not the cloud knobs. This is the remaining
-   barrier to a physical coupled TOA balance.
+3. **Model humidity bias in the coupled RCE — RESOLVED for now** (§22–23).
+   Localized against ERA5 (`scripts/rce_humidity_vs_era5.jl`, `rce_long` RH dump):
+   the RCE was near-saturated at nearly all lat/height (+40% RH vs ERA5), both the
+   rotating and the non-rotating-uniform vehicle alike, dried only where deep
+   convection fires — so **column physics, not missing subsidence**. Root cause:
+   convection shuts itself off at equilibrium (`hb < h*_env` everywhere) and
+   large-scale condensation then pins RH at 100% with no drying sink. Fixed by the
+   sub-grid-saturation condensation ceiling `cond_rh_crit` (now an `rce_long`
+   namelist knob; module default stays 1.0). At **`cond_rh_crit = 0.93`** the
+   overcast is gone — rotating-vehicle TOA net −36 → **+8 W/m²**, cover **0.65 vs
+   ERA5 0.63**. *Limitation:* it is a ceiling, not subsidence — it buys balanced
+   TOA + realistic cover but leaves free-trop RH ~85–90% (ERA5 ~45%); the residual
+   RH bias and the cover's flat latitudinal structure need a subsidence-drying
+   treatment (option C), deferred.
 4. **The clear-sky OLR bias** (§14, §20): addressed with a single documented
    `LW_VAP_OPAC` correction (0.80) — OLR bias −15.9 → −7.1, and it improved the
    cloudy LW CRE too (−3.6 → −2.1). A single knob can't null both OLR and

@@ -1085,3 +1085,65 @@ the fix must give the non-convecting free troposphere a way to dry (a subsidence
 / environmental-descent drying, a convective downdraft/detrainment that removes
 column water, or a re-evaporation path that can pull q below saturation), not a
 cloud-scheme knob.
+
+## 23. Fixing the overcast: a sub-grid-saturation condensation ceiling (M2.5k)
+
+Two side diagnostics narrowed the fix before it was made. **(1) Convection is
+dormant at equilibrium.** The `rce_long` buoyancy diagnostic (`l_diag`) shows the
+boundary-layer parcel MSE below the saturated environmental MSE at *every* level
+(`hb − h*_env < 0`, surface −1.5 kJ/kg) once the column has equilibrated, so
+SBM's trigger never fires (`cnv = 0` at all levels) — though at the RH-90% initial
+state it *is* buoyant (levels 3–11, +7 to +29 kJ/kg) and fires during spin-up.
+Convection runs, saturates the column, and thereby raises `h*_env` (the `L·q_sat`
+term) until it shuts *itself* off; large-scale condensation then holds the column
+at RH~100% because it removes only the excess above saturation. So a convective
+downdraft (the first-choice fix) is moot — there is no active convection at
+equilibrium to carry one. **(2) Boundary-layer diffusion is a minor, low-level
+contributor.** Confining vdiff (`vdiff_sigma` 0.7→0.9) dries only ~800 hPa
+(RH 80→57%) and leaves the mid/upper troposphere saturated and the planet
+overcast (cover 0.96–1.00 throughout the sweep); it never reaches the levels that
+set the cover.
+
+**The fix is the drying sink the column lacks, and it already existed as a
+dormant knob.** `aeros_condensation` relaxes q toward `rh_crit·q_sat` (module
+default 1.0 = true saturation adjustment); a value below 1 is the standard
+sub-grid-saturation stand-in — condensation removes water before the *grid mean*
+saturates, representing the saturated fraction of a partly-cloudy box. `rce_long`
+had hard-coded it to 1.0; it is now a namelist knob (`cond_rh_crit`). Lowering it
+gives the free troposphere the sink it was missing: q can no longer sit above
+`cond_rh_crit`, and — by keeping the environment sub-saturated — it also lets
+convection stay active. On the uniform (single-column) vehicle the sweep is a
+clean monotone control on RH, cover and energy:
+
+| `cond_rh_crit` | free-trop RH | cover (uni) | TOA net (uni) |
+|---|---|---|---|
+| 1.0 (was) | ~98% | 0.96 | −29 |
+| 0.9  | ~90% | 0.60 | +7.9 |
+| 0.8  | ~80% | 0.44 | +25.7 |
+| 0.7  | ~70% | 0.31 | +38.9 |
+
+**Chosen value `cond_rh_crit = 0.93`**, verified on the rotating vehicle (the
+−36 W/m² case of §22):
+
+| vehicle | TOA net | cover | (ERA5) |
+|---|---|---|---|
+| rot, was (1.0) | −36 | ~1.0 | — |
+| rot, 0.93 | **+8** | **0.65** | cover 0.63 |
+| uni, 0.93 | **+0.7** | 0.66 | — |
+
+The overcast is gone: cover 0.65 against ERA5's 0.63, and the TOA net is +8
+(rot) / +0.7 (uni), from −36. Figure `docs/figures/rce_humidity_fixed.png` (same
+layout as §22's `rce_humidity_vs_era5.png`, the "before").
+
+**The honest limitation — what `cond_rh_crit` does and does not fix.** It is a
+*ceiling*, not subsidence drying, and it cannot match cover and the RH profile at
+once. At 0.93 the cover and TOA are right, but the free-troposphere RH is still
+~85–90% against ERA5's ~45%; driving RH to ERA5 values (`cond_rh_crit ≈ 0.6`)
+under-clouds the planet (cover 0.31) and swings the TOA to +30. This trade-off is
+the fingerprint of the genuinely-missing process — large-scale subsidence, which
+would dry RH while cloud cover is set independently. `cond_rh_crit = 0.93` buys a
+physically-balanced coupled TOA and a realistic global cloud cover *now*; closing
+the residual RH bias (and the cover's flat latitudinal structure, which the RCE's
+weak circulation cannot shape into ERA5's dry-subtropic / moist-storm-track
+pattern) is deferred to a subsidence-drying treatment (§22's option C). The knob
+default stays 1.0 (bit-reproducible); 0.93 is set per-run in the RCE configs.

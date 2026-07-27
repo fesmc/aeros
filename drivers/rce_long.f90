@@ -67,6 +67,12 @@ program rce_long
     real(wp) :: seed_asym = 0.0_wp    ! zonal-asymmetry seed amplitude [K-ish]
     real(wp) :: albedo = 0.06_wp      ! surface broadband albedo (cloud proxy knob)
     real(wp) :: co2_ppm = 280.0_wp
+    ! Critical RH for large-scale condensation: q relaxes to cond_rh_crit*q_sat,
+    ! so the column cannot equilibrate wetter than this where condensation is the
+    ! moisture sink. 1.0 = true saturation adjustment (the model default); a lower
+    ! value is the sub-grid-saturation stand-in for the missing subsidence drying
+    ! that otherwise leaves the free troposphere pinned at RH~100% (m2_results §23).
+    real(wp) :: cond_rh_crit = 1.0_wp
     integer  :: ocean_mode = 0       ! 0 prescribed SST, 1 slab
     real(wp) :: ocean_depth = 10.0_wp
 
@@ -119,7 +125,7 @@ program rce_long
     call aeros_timestep_init(ts, par, pool, grd, vg)
 
     ts%cnd%enabled = l_cnd
-    ts%cnd%rh_crit = 1.0_wp
+    ts%cnd%rh_crit = cond_rh_crit
     ts%cnv%enabled = l_cnv
     ts%cnv%tau = conv_tau
     ts%cnv%dry_adjust = l_dry_adjust
@@ -355,6 +361,7 @@ contains
         call nml_read(nmlfile, "rce", "seed_asym", seed_asym)
         call nml_read(nmlfile, "rce", "albedo", albedo)
         call nml_read(nmlfile, "rce", "co2_ppm", co2_ppm)
+        call nml_read(nmlfile, "rce", "cond_rh_crit", cond_rh_crit)
         call nml_read(nmlfile, "rce", "ocean_mode", ocean_mode)
         call nml_read(nmlfile, "rce", "ocean_depth", ocean_depth)
         return
