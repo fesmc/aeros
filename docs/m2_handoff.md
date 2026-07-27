@@ -86,13 +86,13 @@ New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
 2. **Do eddies now grow?** With `c_d>0` + `seed_asym>0`, does the drag-stabilized
    realistic jet develop baroclinic eddies (the `eddy_diag` metrics)? Tells us
    whether T21 supports meaningful eddy transport or T42 is needed.
-3. **Tune the diagnostic cloud scheme** (`aeros_cloud`, §19): the operators are
-   now wired into the coupled model (`radiation%clouds`, opt-in) with an
-   RH-based `cf` + T-dependent condensate, but the first-cut parameters
-   (`RH_crit=0.70`, `q_ic=0.04 q_sat`) give near-total overcast in the model's
-   moist RCE state (coupled TOA net swings +88→−100 W/m², planetary albedo
-   ~0.85). Raise `RH_crit`, cut the condensate fraction, and check against ERA5
-   `cc` / the §17 CRE. This is the route to physical TOA balance in the RCE.
+3. **Model humidity bias in the coupled RCE** (§21): the cloud scheme is now
+   tuned against ERA5 (diagnosed net CRE −23.6 vs −24.2, §21) — but driven by the
+   coupled model it still overcasts (`rce_long` TOA clouds-on −36 W/m², was −100).
+   Since the scheme is validated correct on ERA5 columns, this is a **model**
+   problem: the RCE is too moist (near-saturated over a deep layer → high `cf`).
+   Chase the humidity/RCE state, not the cloud knobs. This is the remaining
+   barrier to a physical coupled TOA balance.
 4. **The clear-sky OLR bias** (§14, §20): addressed with a single documented
    `LW_VAP_OPAC` correction (0.80) — OLR bias −15.9 → −7.1, and it improved the
    cloudy LW CRE too (−3.6 → −2.1). A single knob can't null both OLR and
