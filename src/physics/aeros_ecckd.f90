@@ -86,11 +86,16 @@ module aeros_ecckd
     !
     ! All-sky LW/SW (aeros_ecckd_{lw,sw}_cloudy_column) fold SESAM's validated
     ! grey per-layer cloud optics into the ecCKD g-point transmissions -- NO new
-    ! spectral points. LW: run-twice-and-blend (clear + overcast), the grey cloud
-    ! optical depth from the in-cloud water paths added into every g-point's
-    ! transmission, maximum overlap. SW: SESAM's cloud reflector (two-stream) on
-    ! the ecCKD clear-sky base, blended by cloud fraction. cf=0 returns clear-sky
-    ! bit-for-bit. On ERA5 (observed-cloud CRE, §17-18) with zero cloud tuning:
+    ! spectral points. LW: clear + overcast blended at maximum overlap, the grey
+    ! cloud optical depth from the in-cloud water paths added into every g-point's
+    ! transmission. The clear and overcast columns are solved in a SINGLE pass
+    ! (ecckd_lw_flux_allsky): the shared gas setup and the per-g-point gas
+    ! transmission are built once and reused for both (overcast just multiplies by
+    ! the g-point-independent grey cloud transmission), so the all-sky LW is ~2x
+    ! cheaper per column than the old run-the-transfer-twice, fluxes unchanged. SW:
+    ! SESAM's cloud reflector (two-stream) on the ecCKD clear-sky base, blended by
+    ! cloud fraction. cf=0 returns clear-sky bit-for-bit. On ERA5 (observed-cloud
+    ! CRE, §17-18) with zero cloud tuning:
     !   TOA LW CRE  +21.4 W/m2 (bias -0.4; SESAM -2.1 -- the accurate ecCKD
     !               clear-sky OLR leaves more headroom for cloud)
     !   TOA SW CRE  -44.6 W/m2 (bias +1.5)
@@ -235,12 +240,21 @@ contains
     subroutine aeros_ecckd_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
                                             q_co2, l_o3, cf, clwc, ciwc, &
                                             fnet, heat, olr, fdw_sur)
-        ! All-sky longwave: SESAM's run-twice-and-blend (aeros_lw_cloudy_column),
-        ! but on the ecCKD gas g-points. A clear column and an overcast column
-        ! (clear-sky gas g-points times a per-layer grey cloud transmission built
-        ! from the IN-CLOUD water paths = grid-mean/CF) are blended by the column
-        ! cloud fraction at maximum overlap. The grey cloud folds into the g-point
-        ! transmissions -- no new spectral points. cf=0 returns clear bit-for-bit.
+        ! All-sky longwave: the clear column and the overcast column (clear-sky gas
+        ! g-points times a per-layer grey cloud transmission built from the IN-CLOUD
+        ! water paths = grid-mean/CF) are blended by the column cloud fraction at
+        ! maximum overlap. The grey cloud folds into the g-point transmissions -- no
+        ! new spectral points. cf=0 returns clear bit-for-bit.
+        !
+        ! The two columns share EVERYTHING except the cloud transmission: same
+        ! k-table, same absorber paths, same Planck sources, same per-g-point gas
+        ! optical depth. So they are solved together in a single pass
+        ! (ecckd_lw_flux_allsky) -- the gas transmission is exponentiated ONCE per
+        ! g-point and reused for both clear and overcast (overcast just multiplies
+        ! by the grey cloud transmission, itself built once as it is g-point
+        ! independent). This replaces the former "run the whole transfer twice"
+        ! (two ecckd_lw_flux calls) and roughly halves the all-sky LW cost, exact
+        ! to floating-point roundoff on the overcast term (clear is unchanged).
         integer,  intent(in)  :: nlev
         real(wp), intent(in)  :: t(:), q(:), o3(:), dp_lev(:)
         real(wp), intent(in)  :: z_half(0:)  ! (kept for signature parity; unused)
@@ -249,21 +263,20 @@ contains
         real(wp), intent(in)  :: cf(:), clwc(:), ciwc(:)
         real(wp), intent(out) :: fnet(0:), heat(:), olr, fdw_sur
 
-        real(wp) :: cloud_od(nlev), fnet_cs(0:nlev), fnet_ov(0:nlev)
-        real(wp) :: olr_cs, fdw_cs, olr_ov, fdw_ov, cff, lwp, iwp
+        real(wp) :: cloud_od(nlev), cff, lwp, iwp
         integer  :: k
-
-        ! clear-sky reference
-        cloud_od = 0.0_wp
-        call ecckd_lw_flux(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, cloud_od, &
-                           fnet_cs, olr_cs, fdw_cs)
 
         cff = 0.0_wp
         do k = 1, nlev
             cff = max(cff, min(1.0_wp, max(0.0_wp, cf(k))))
         end do
+
+        ! clear column (also the no-cloud short-circuit): the unchanged clear-sky
+        ! worker, so cf=0 returns bit-for-bit identical to aeros_ecckd_lw_clearsky.
         if (cff <= CLD_CF_FLOOR) then
-            fnet = fnet_cs; olr = olr_cs; fdw_sur = fdw_cs
+            cloud_od = 0.0_wp
+            call ecckd_lw_flux(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, cloud_od, &
+                               fnet, olr, fdw_sur)
             do k = 1, nlev
                 heat(k) = (grav/cp_d) * (fnet(k) - fnet(k-1))/dp_lev(k)
             end do
@@ -276,19 +289,139 @@ contains
             iwp = 1.0e3_wp * max(0.0_wp, ciwc(k)) * dp_lev(k)/grav / cff
             cloud_od(k) = LW_KABS_LIQ*lwp + LW_KABS_ICE*iwp
         end do
-        call ecckd_lw_flux(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, cloud_od, &
-                           fnet_ov, olr_ov, fdw_ov)
 
-        ! blend clear and overcast by the column cloud fraction (maximum overlap)
-        do k = 0, nlev
-            fnet(k) = (1.0_wp-cff)*fnet_cs(k) + cff*fnet_ov(k)
-        end do
-        olr     = (1.0_wp-cff)*olr_cs + cff*olr_ov
-        fdw_sur = (1.0_wp-cff)*fdw_cs + cff*fdw_ov
+        ! solve clear + overcast together and blend by the column cloud fraction
+        call ecckd_lw_flux_allsky(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, &
+                                  cloud_od, cff, fnet, olr, fdw_sur)
         do k = 1, nlev
             heat(k) = (grav/cp_d) * (fnet(k) - fnet(k-1))/dp_lev(k)
         end do
     end subroutine aeros_ecckd_lw_cloudy_column
+
+    subroutine ecckd_lw_flux_allsky(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, &
+                                    cloud_od, cff, fnet, olr, fdw_sur)
+        ! Combined clear + overcast LW transfer, blended by the column cloud
+        ! fraction cff (maximum overlap). Structurally the same emissivity-method
+        ! solve as ecckd_lw_flux, but run ONCE: the shared gas setup (k-table,
+        ! absorber paths, Planck sources) is built a single time, the grey cloud
+        ! transmission matrix is built once (it is g-point independent), and for
+        ! each g-point the gas transmission matrix is exponentiated once and reused
+        ! for both the clear solve (gas only) and the overcast solve (gas times
+        ! cloud). Outputs the blended fnet/olr/fdw_sur; the caller forms the heating
+        ! rate. The clear component is bit-for-bit the former clear pass; the
+        ! overcast component differs only by exp(a)*exp(b) vs exp(a+b) roundoff.
+        !
+        ! Local convention (as ecckd_lw_flux): interface i=0 surface .. i=nlev TOA;
+        ! local layer l (surface->top) is model layer k = nlev-l+1.
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: t(:), q(:), o3(:), dp_lev(:)
+        real(wp), intent(in)  :: ts, q_co2
+        logical,  intent(in)  :: l_o3
+        real(wp), intent(in)  :: cloud_od(:)  ! (nlev) grey LW cloud optical depth, model order
+        real(wp), intent(in)  :: cff          ! column cloud fraction (max overlap)
+        real(wp), intent(out) :: fnet(0:), olr, fdw_sur
+
+        real(wp) :: kj(NB,NGAS,NGT), gw(NB,NGT)
+        real(wp) :: umass(nlev,NGAS), pratio(nlev), tlay(nlev)
+        real(wp) :: pf_layer(nlev,NB), bsrc(nlev), bsurf_b(NB)
+        real(wp) :: ctau(0:nlev), ccld(0:nlev)
+        real(wp) :: tcld(0:nlev,0:nlev), tgas(0:nlev,0:nlev), tov(0:nlev,0:nlev)
+        real(wp) :: fup_cs(0:nlev), fdw_cs(0:nlev), fup_ov(0:nlev), fdw_ov(0:nlev)
+        real(wp) :: fnet_cs(0:nlev), fnet_ov(0:nlev)
+        real(wp) :: olr_cs, olr_ov, fds_cs, fds_ov
+        real(wp) :: p_half, pfl, tau_l
+        integer  :: k, l, i, j, ib, ig, igas
+
+        call build_ktable(kj, gw)
+
+        ! --- per-layer absorber paths, pressure ratio, temperature, Planck ------
+        p_half = 0.0_wp
+        do k = 1, nlev                       ! model order, k=1 top
+            l   = nlev - k + 1               ! local order, l=1 surface
+            pfl = p_half + 0.5_wp*dp_lev(k)
+            p_half = p_half + dp_lev(k)
+            umass(l,1) = 0.1_wp * max(0.0_wp, q(k))  * dp_lev(k)/grav
+            umass(l,2) = 0.1_wp * max(0.0_wp, q_co2) * dp_lev(k)/grav
+            if (l_o3) then
+                umass(l,3) = 0.1_wp * max(0.0_wp, o3(k)) * dp_lev(k)/grav
+            else
+                umass(l,3) = 0.0_wp
+            end if
+            pratio(l) = pfl/p0
+            tlay(l)   = t(k)
+            bsrc(l)   = sigma_sb*t(k)**4
+            do ib = 1, NB
+                pf_layer(l,ib) = planck_frac(ib, t(k))
+            end do
+        end do
+        do ib = 1, NB
+            bsurf_b(ib) = planck_frac(ib, ts)*sigma_sb*ts**4
+        end do
+
+        ! cumulative grey cloud optical depth, local surface->top order
+        ccld(0) = 0.0_wp
+        do l = 1, nlev
+            ccld(l) = ccld(l-1) + max(0.0_wp, cloud_od(nlev - l + 1))
+        end do
+
+        ! grey cloud transmission matrix: g-point independent, built once. Symmetric
+        ! with unit diagonal; ccld is monotone so |ccld(j)-ccld(i)| = ccld(j)-ccld(i).
+        do i = 0, nlev
+            tcld(i,i) = 1.0_wp
+            do j = i+1, nlev
+                tcld(i,j) = exp(-(ccld(j) - ccld(i)))
+                tcld(j,i) = tcld(i,j)
+            end do
+        end do
+
+        ! --- accumulate clear and overcast net-upward flux together ------------
+        fnet_cs = 0.0_wp; olr_cs = 0.0_wp; fds_cs = 0.0_wp
+        fnet_ov = 0.0_wp; olr_ov = 0.0_wp; fds_ov = 0.0_wp
+        do ib = 1, NB
+            do ig = 1, NGB(ib)
+                ctau(0) = 0.0_wp
+                do l = 1, nlev
+                    tau_l = 0.0_wp
+                    do igas = 1, NGAS
+                        if (kj(ib,igas,ig) <= 0.0_wp) cycle
+                        tau_l = tau_l + kj(ib,igas,ig) * umass(l,igas) &
+                              * pratio(l)**KAPPA(ib,igas) &
+                              * (TREF/tlay(l))**NST(ib,igas)
+                    end do
+                    ctau(l) = ctau(l-1) + tau_l
+                end do
+                ! gas transmission for this g-point: exponentiated once, reused for
+                ! clear (gas only) and overcast (gas times grey cloud).
+                do i = 0, nlev
+                    tgas(i,i) = 1.0_wp
+                    tov(i,i)  = 1.0_wp
+                    do j = i+1, nlev
+                        tgas(i,j) = exp(-BETA0*(ctau(j) - ctau(i)))
+                        tgas(j,i) = tgas(i,j)
+                        tov(i,j)  = tgas(i,j)*tcld(i,j)
+                        tov(j,i)  = tov(i,j)
+                    end do
+                end do
+                call band_flux_mat(nlev, gw(ib,ig), pf_layer(:,ib), bsrc, &
+                                   bsurf_b(ib), tgas, fup_cs, fdw_cs)
+                call band_flux_mat(nlev, gw(ib,ig), pf_layer(:,ib), bsrc, &
+                                   bsurf_b(ib), tov,  fup_ov, fdw_ov)
+                do i = 0, nlev
+                    fnet_cs(nlev - i) = fnet_cs(nlev - i) + (fup_cs(i) - fdw_cs(i))
+                    fnet_ov(nlev - i) = fnet_ov(nlev - i) + (fup_ov(i) - fdw_ov(i))
+                end do
+                olr_cs = olr_cs + fup_cs(nlev); fds_cs = fds_cs + fdw_cs(0)
+                olr_ov = olr_ov + fup_ov(nlev); fds_ov = fds_ov + fdw_ov(0)
+            end do
+        end do
+
+        ! blend clear and overcast by the column cloud fraction (maximum overlap)
+        do i = 0, nlev
+            fnet(i) = (1.0_wp-cff)*fnet_cs(i) + cff*fnet_ov(i)
+        end do
+        olr     = (1.0_wp-cff)*olr_cs + cff*olr_ov
+        fdw_sur = (1.0_wp-cff)*fds_cs + cff*fds_ov
+    end subroutine ecckd_lw_flux_allsky
 
     subroutine ecckd_lw_flux(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, cloud_od, &
                              fnet, olr, fdw_sur)
@@ -634,6 +767,46 @@ contains
             x = exp(-BETA0*(ctau(hi) - ctau(lo)) - (ccld(hi) - ccld(lo)))
         end function tr
     end subroutine band_flux
+
+    subroutine band_flux_mat(nlev, wg, pf_layer, bsrc, bsurf, tmat, fup, fdw)
+        ! Emissivity-method net LW flux for one band+g-point, identical to band_flux
+        ! but taking a PRECOMPUTED interface-pair transmission matrix tmat(a,b)
+        ! instead of exponentiating on the fly. tmat is symmetric with unit diagonal;
+        ! tmat(a,b) is the flux transmission between local interfaces a and b (gas,
+        ! or gas times grey cloud). Passing tmat = exp(-BETA0*(ctau(hi)-ctau(lo)))
+        ! reproduces band_flux with ccld=0 bit-for-bit. Used by the all-sky worker so
+        ! the gas exponential is shared between the clear and overcast solves.
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: wg
+        real(wp), intent(in)  :: pf_layer(:)      ! (nlev) band Planck fraction, local order
+        real(wp), intent(in)  :: bsrc(:)          ! (nlev) grey layer source sigma T^4, local order
+        real(wp), intent(in)  :: bsurf            ! band Planck fraction * sigma Ts^4
+        real(wp), intent(in)  :: tmat(0:,0:)      ! (0:nlev,0:nlev) interface-pair transmission
+        real(wp), intent(out) :: fup(0:), fdw(0:)
+
+        real(wp) :: b(nlev), bs
+        integer  :: l, i
+
+        do l = 1, nlev
+            b(l) = wg*pf_layer(l)*bsrc(l)
+        end do
+        bs = wg*bsurf
+
+        fup(0) = bs
+        do i = 1, nlev
+            fup(i) = bs*tmat(0, i)
+            do l = 1, i
+                fup(i) = fup(i) + b(l)*(tmat(l, i) - tmat(l-1, i))
+            end do
+        end do
+        fdw(nlev) = 0.0_wp
+        do i = nlev-1, 0, -1
+            fdw(i) = 0.0_wp
+            do l = i+1, nlev
+                fdw(i) = fdw(i) + b(l)*(tmat(l-1, i) - tmat(l, i))
+            end do
+        end do
+    end subroutine band_flux_mat
 
     ! === Correlated-k table construction ===================================
 
