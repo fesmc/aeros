@@ -89,12 +89,20 @@ module aeros_cloud_prog
         integer  :: nlon = 0, nlat = 0
 
         ! Critical-RH profile endpoints (sigma = 1 surface, sigma = 0 top). The
-        ! classic profile is higher aloft than near the surface.
-        real(wp) :: rhc_sfc = 0.70_wp
-        real(wp) :: rhc_top = 0.90_wp
+        ! classic profile is higher aloft than near the surface. Calibrated on
+        ! the aquaplanet (see below) to a realistic ~0.55 equilibrium cover.
+        real(wp) :: rhc_sfc = 0.40_wp
+        real(wp) :: rhc_top = 0.60_wp
 
-        real(wp) :: tau_form = 3600.0_wp   ! formation relaxation timescale [s]
-        real(wp) :: tau_evap = 3600.0_wp   ! evaporation relaxation timescale [s]
+        ! Formation/evaporation timescales. Deliberately several hours, not one:
+        ! at a 1 h timescale the local source/sink re-establishes a patchy cloud
+        ! field faster than the grid transport (aeros_transport) can homogenize
+        ! it, and over zonally-asymmetric land forcing that patchy cloud-
+        ! radiative heating spins up a runaway near-equatorial jet (m2_results).
+        ! Slowing the budget to ~3 h lets advection de-patchify the field, which
+        ! keeps the coupled land+cloud aquaplanet stable at realistic cover.
+        real(wp) :: tau_form = 10800.0_wp  ! formation relaxation timescale [s]
+        real(wp) :: tau_evap = 10800.0_wp  ! evaporation relaxation timescale [s]
         real(wp) :: c_detr   = 0.5_wp      ! convective detrainment anvil ceiling [-]
     end type aeros_cloud_prog_class
 
@@ -136,10 +144,10 @@ contains
         real(wp) :: rhc_sfc, rhc_top, tau_form, tau_evap, c_detr
 
         enabled  = .FALSE.
-        rhc_sfc  = 0.70_wp
-        rhc_top  = 0.90_wp
-        tau_form = 3600.0_wp
-        tau_evap = 3600.0_wp
+        rhc_sfc  = 0.40_wp
+        rhc_top  = 0.60_wp
+        tau_form = 10800.0_wp
+        tau_evap = 10800.0_wp
         c_detr   = 0.5_wp
 
         call nml_read(filename, "aeros_cloud", "l_cloud_prog",  enabled,  defaults_file=defaults_file)

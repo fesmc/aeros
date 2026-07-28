@@ -1,4 +1,4 @@
-program test_moisture
+program test_transport
     ! Acceptance test for the positive-definite humidity transport.
     !
     ! There is no physics here yet -- condensation is the next commit -- so what
@@ -39,7 +39,7 @@ program test_moisture
     use aeros_spectral
     use aeros_grid
     use aeros_vertical
-    use aeros_moisture
+    use aeros_transport
 
     implicit none
 
@@ -49,7 +49,7 @@ program test_moisture
     type(aeros_sht_pool_class), target :: pool
     type(aeros_grid_class)  :: grd
     type(aeros_vgrid_class) :: vg
-    type(aeros_moist_class) :: mst
+    type(aeros_transport_class) :: mst
 
     real(wp), allocatable :: lnps(:,:), u(:,:,:), v(:,:,:), q(:,:,:)
     integer :: nlon, nlat, nfail
@@ -59,11 +59,11 @@ program test_moisture
     call aeros_sht_pool_init(pool, trunc, quick=.TRUE.)
     call aeros_grid_init(grd, pool%sht(1))
     call aeros_vgrid_init(vg, nlev)
-    call aeros_moisture_init(mst, grd, nlev)
+    call aeros_transport_init(mst, grd, nlev)
 
     nlon = grd%nlon; nlat = grd%nlat
 
-    write(*,"(a,i0,a,i0,a,i0,a,i0)") " test_moisture:: T", trunc, " L", nlev, &
+    write(*,"(a,i0,a,i0,a,i0,a,i0)") " test_transport:: T", trunc, " L", nlev, &
                                         "  grid ", nlon, "x", nlat
 
     allocate(lnps(nlon,nlat), u(nlon,nlat,nlev), v(nlon,nlat,nlev), q(nlon,nlat,nlev))
@@ -79,16 +79,16 @@ program test_moisture
     call test_polar_substep(nfail)
     call test_accuracy(nfail)
 
-    call aeros_moisture_end(mst)
+    call aeros_transport_end(mst)
     call aeros_vgrid_end(vg)
     call aeros_grid_end(grd)
     call aeros_sht_pool_end(pool)
 
     write(*,*) ""
     if (nfail == 0) then
-        write(*,*) "test_moisture:: PASS"
+        write(*,*) "test_transport:: PASS"
     else
-        write(*,*) "test_moisture:: FAIL, ", nfail, " check(s) failed"
+        write(*,*) "test_transport:: FAIL, ", nfail, " check(s) failed"
         stop 1
     end if
 
@@ -196,7 +196,7 @@ contains
         q = qc
 
         do n = 1, 50
-            call aeros_moisture_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
+            call aeros_transport_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
         end do
 
         worst = maxval(abs(q - qc))
@@ -231,11 +231,11 @@ contains
         call solid_body(grd, u, v, 60.0_wp)
         call blob(grd, q, 0.001_wp, 0.02_wp)
 
-        w0 = aeros_moisture_water(mst, grd, vg, exp(lnps), q)
+        w0 = aeros_transport_water(mst, grd, vg, exp(lnps), q)
         do n = 1, 100
-            call aeros_moisture_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
+            call aeros_transport_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
         end do
-        w1 = aeros_moisture_water(mst, grd, vg, exp(lnps), q)
+        w1 = aeros_transport_water(mst, grd, vg, exp(lnps), q)
 
         rel = abs(w1 - w0)/w0
         write(*,"(a40,es12.3,a)") "   initial water                 ", w0, " kg"
@@ -262,7 +262,7 @@ contains
 
         qmin_ever = minval(q)
         do n = 1, 200
-            call aeros_moisture_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
+            call aeros_transport_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
             qmin = minval(q)
             qmin_ever = min(qmin_ever, qmin)
         end do
@@ -292,13 +292,13 @@ contains
         v = 0.0_wp
         call blob(grd, q, 0.0_wp, 0.02_wp)
 
-        w0 = aeros_moisture_water(mst, grd, vg, exp(lnps), q)
+        w0 = aeros_transport_water(mst, grd, vg, exp(lnps), q)
         qmin_ever = minval(q)
         do n = 1, 50
-            call aeros_moisture_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
+            call aeros_transport_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
             qmin_ever = min(qmin_ever, minval(q))
         end do
-        w1 = aeros_moisture_water(mst, grd, vg, exp(lnps), q)
+        w1 = aeros_transport_water(mst, grd, vg, exp(lnps), q)
         rel = abs(w1 - w0)/w0
 
         write(*,"(a40,i8)")       "   sub-steps forced              ", mst%last_nsub
@@ -342,7 +342,7 @@ contains
         ! One full rotation: angular velocity u0/a, period 2*pi*a/u0.
         nrot = nint(2.0_wp*real(pi,wp)*real(6.371e6_wp,wp)/u0/1800.0_wp)
         do n = 1, nrot
-            call aeros_moisture_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
+            call aeros_transport_transport(mst, vg, u, v, lnps, q, 1800.0_wp)
         end do
 
         peak1  = maxval(q)
@@ -397,4 +397,4 @@ contains
         return
     end subroutine check
 
-end program test_moisture
+end program test_transport

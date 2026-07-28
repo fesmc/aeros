@@ -117,10 +117,10 @@ program rce_long
     ! Default off = the diagnostic RH->cover scheme, bit-for-bit unchanged. When
     ! on, radiation consumes the Sundqvist prognostic cf (aeros_cloud_prog).
     logical  :: l_cloud_prog   = .FALSE.
-    real(wp) :: cloud_rhc_sfc  = 0.70_wp    ! critical RH at the surface
-    real(wp) :: cloud_rhc_top  = 0.90_wp    ! critical RH at the model top (higher aloft)
-    real(wp) :: cloud_tau_form = 3600.0_wp  ! formation timescale [s]
-    real(wp) :: cloud_tau_evap = 3600.0_wp  ! evaporation timescale [s]
+    real(wp) :: cloud_rhc_sfc  = 0.40_wp    ! critical RH at the surface (calibrated)
+    real(wp) :: cloud_rhc_top  = 0.60_wp    ! critical RH at the model top (higher aloft)
+    real(wp) :: cloud_tau_form = 10800.0_wp ! formation timescale [s] (~3 h; de-patchifies)
+    real(wp) :: cloud_tau_evap = 10800.0_wp ! evaporation timescale [s] (~3 h)
     real(wp) :: cloud_c_detr   = 0.5_wp     ! convective detrainment anvil ceiling [-]
 
     ! --- checkpoint / restart ------------------------------------------------

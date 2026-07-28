@@ -1,21 +1,30 @@
-module aeros_moisture
-    ! Prognostic specific humidity: positive-definite finite-volume transport.
+module aeros_transport
+    ! General positive-definite finite-volume tracer transport on the grid.
     !
-    ! This is the first prognostic in aeros that does NOT live in spectral space,
-    ! and the reason is the whole point of the module. Spectral advection of a
-    ! positive field is not positive: truncating exp-shaped humidity gradients at
-    ! fronts and the ITCZ produces Gibbs ringing and negative water (design.md
-    ! section 4.2). So humidity is carried and advected ON THE GRID, by a
-    ! finite-volume scheme that cannot make a positive field negative, and it
-    ! never touches the spherical-harmonic transform.
+    ! This is the transport engine for any prognostic that must be carried OFF
+    ! the spectral core: it advects a positive tracer -- specific humidity was
+    ! the first (see below), cloud fraction is another -- by a finite-volume
+    ! scheme that cannot make a positive field negative and never touches the
+    ! spherical-harmonic transform. It transports whatever field it is handed;
+    ! nothing here is specific to what the tracer means.
+    !
+    ! The motivating case, and the running example throughout this header, is
+    ! specific humidity q. Spectral advection of a positive field is not
+    ! positive: truncating exp-shaped humidity gradients at fronts and the ITCZ
+    ! produces Gibbs ringing and negative water (design.md section 4.2). So q is
+    ! carried and advected on the grid instead -- and the same argument holds for
+    ! any bounded positive tracer (a [0,1] cloud fraction overshoots out of range
+    ! under the transform for exactly the same reason).
     !
     ! === What "positive-definite" costs, and how it is bought ================
     !
-    ! Three properties are required and each is provable rather than hoped for:
+    ! Three properties are required and each is provable rather than hoped for.
+    ! They are stated for a generic tracer q; "water" below is just the humidity
+    ! example of the conserved tracer mass.
     !
-    !   CONSERVATION. Total water is conserved to machine precision. The scheme
-    !   is flux-form with single-valued face fluxes, so every internal flux
-    !   appears once with each sign and the global sum telescopes; the only
+    !   CONSERVATION. Total tracer mass is conserved to machine precision. The
+    !   scheme is flux-form with single-valued face fluxes, so every internal
+    !   flux appears once with each sign and the global sum telescopes; the only
     !   faces that do not cancel are the poles, where cos(lat) = 0 makes the
     !   meridional flux identically zero, and the top and bottom, where the
     !   vertical mass flux is zero by the coordinate's construction.
@@ -26,12 +35,16 @@ module aeros_moisture
     !   is asked to give away more than it holds in one step -- the Courant
     !   condition, enforced by sub-stepping (see `nsub` below).
     !
-    !   CONSTANCY. q = const stays const, to machine precision. The tracer and
-    !   the air mass are advanced by the SAME face fluxes, so for q = 1 the
-    !   tracer equation IS the air-mass equation and the ratio is unchanged.
-    !   This is the property a tracer scheme most easily violates and the one
-    !   that matters most: a scheme that fails it manufactures humidity
-    !   gradients out of a uniform field wherever the wind diverges.
+    !   CONSTANCY / MAX-PRINCIPLE. q = const stays const, to machine precision,
+    !   and more generally a q that starts in [a,b] stays in [a,b]. The tracer
+    !   and the air mass are advanced by the SAME face fluxes, so for q = 1 the
+    !   tracer equation IS the air-mass equation and the ratio is unchanged, and
+    !   the monotone reconstruction introduces no new extremum. This is the
+    !   property a tracer scheme most easily violates and the one that matters
+    !   most: a scheme that fails it manufactures gradients out of a uniform
+    !   field wherever the wind diverges. It is also what lets a [0,1] field
+    !   (cloud fraction) transport safely with no clipping -- a clamp would break
+    !   the conservative form and is not needed.
     !
     ! === Mass consistency: the design decision (option ii) ===================
     !
@@ -51,24 +64,21 @@ module aeros_moisture
     ! step, so the difference is a per-step consistency error bounded by the
     ! truncation, and the max-principle division keeps q bounded regardless. It
     ! is the price of positivity on a spectral core, and it is diagnosable --
-    ! aeros_moisture_report prints the gap.
+    ! mass_consistency records the gap.
     !
     ! This is the LGMR "option (ii)": a two-time-level forward scheme on the
-    ! grid with its own FV air budget, chosen over leapfrogging q with a water
-    ! mass-fixer (option i) precisely so there is no fixer and no leapfrog
-    ! computational mode in the humidity.
+    ! grid with its own FV air budget, chosen over leapfrogging q with a mass-
+    ! fixer (option i) precisely so there is no fixer and no leapfrog
+    ! computational mode in the transported tracer.
     !
-    ! === Accuracy: first-order now, limited later ============================
+    ! === Accuracy: van Leer horizontal, upwind vertical =====================
     !
-    ! The fluxes here are FIRST-ORDER upwind (donor cell). That is deliberately
-    ! the correct-and-provable baseline, not the finished scheme: donor cell is
-    ! the scheme whose conservation, positivity and constancy are unconditional
-    ! (under the Courant limit), and those are exactly what tests/test_moisture
-    ! checks. It is also diffusive -- too diffusive for a real humidity field --
-    ! so a van Leer / MC flux limiter is the next commit, dropped into
-    ! `face_upwind` without changing anything else. The invariants above do not
-    ! depend on the accuracy of the reconstruction, only on its monotonicity, so
-    ! the limiter inherits them.
+    ! The horizontal sweeps use a van Leer limiter (second order, monotone); the
+    ! vertical stays first-order upwind (donor cell). Donor cell is the scheme
+    ! whose conservation, positivity and constancy are unconditional (under the
+    ! Courant limit), and those are exactly what tests/test_transport checks. The
+    ! invariants above do not depend on the accuracy of the reconstruction, only
+    ! on its monotonicity, so the limiter inherits them.
     !
     ! === The polar Courant problem ==========================================
     !
@@ -97,7 +107,7 @@ module aeros_moisture
 
     private
 
-    type aeros_moist_class
+    type aeros_transport_class
         ! The transport's fixed geometry and its scratch, allocated once.
 
         integer :: nlon = 0, nlat = 0, nlev = 0
@@ -116,38 +126,38 @@ module aeros_moisture
         real(wp), allocatable :: qm(:,:,:)      ! tracer mass  q*dp        [Pa]
         real(wp), allocatable :: dp0(:,:,:)     ! layer air mass before the horizontal sweeps [Pa]
 
-        ! Diagnostics, retained between calls for aeros_moisture_report.
+        ! Diagnostics, retained between calls for aeros_transport_report.
         real(wp) :: last_cfl   = 0.0_wp        ! max total Courant last call
         integer  :: last_nsub  = 0             ! sub-steps taken last call
         real(dp) :: mass_consistency = 0.0_dp  ! |FV - spectral| ps tendency gap
-    end type aeros_moist_class
+    end type aeros_transport_class
 
     ! Courant target per sub-step. Below 1 for the donor-cell max principle;
     ! 0.9 leaves a margin against the estimate being a hair low.
     real(wp), parameter :: CFL_MAX = 0.9_wp
 
-    public :: aeros_moist_class
-    public :: aeros_moisture_init
-    public :: aeros_moisture_end
-    public :: aeros_moisture_transport
-    public :: aeros_moisture_water
-    public :: aeros_moisture_report
+    public :: aeros_transport_class
+    public :: aeros_transport_init
+    public :: aeros_transport_end
+    public :: aeros_transport_transport
+    public :: aeros_transport_water
+    public :: aeros_transport_report
 
 contains
 
-    subroutine aeros_moisture_init(mst, grd, nlev)
+    subroutine aeros_transport_init(mst, grd, nlev)
         ! Precompute the grid metric and allocate the scratch.
 
         implicit none
 
-        type(aeros_moist_class), intent(inout) :: mst
+        type(aeros_transport_class), intent(inout) :: mst
         type(aeros_grid_class),  intent(in)    :: grd
         integer,                 intent(in)    :: nlev
 
         real(dp) :: muh
         integer  :: j
 
-        call aeros_moisture_end(mst)
+        call aeros_transport_end(mst)
 
         mst%nlon = grd%nlon
         mst%nlat = grd%nlat
@@ -183,13 +193,13 @@ contains
 
         return
 
-    end subroutine aeros_moisture_init
+    end subroutine aeros_transport_init
 
-    subroutine aeros_moisture_end(mst)
+    subroutine aeros_transport_end(mst)
 
         implicit none
 
-        type(aeros_moist_class), intent(inout) :: mst
+        type(aeros_transport_class), intent(inout) :: mst
 
         if (allocated(mst%dmu))      deallocate(mst%dmu)
         if (allocated(mst%coslat))   deallocate(mst%coslat)
@@ -203,9 +213,9 @@ contains
 
         return
 
-    end subroutine aeros_moisture_end
+    end subroutine aeros_transport_end
 
-    subroutine aeros_moisture_transport(mst, vg, u, v, lnps, q, dt)
+    subroutine aeros_transport_transport(mst, vg, u, v, lnps, q, dt)
         ! Advance q one dynamics step, forward in time, on the grid.
         !
         ! u, v, lnps are the wind and (log) surface pressure at the CURRENT time
@@ -216,7 +226,7 @@ contains
 
         implicit none
 
-        type(aeros_moist_class), intent(inout) :: mst
+        type(aeros_transport_class), intent(inout) :: mst
         type(aeros_vgrid_class), intent(in)    :: vg
         real(wp), intent(in)    :: u(:,:,:), v(:,:,:)   ! (nlon,nlat,nlev) [m s-1]
         real(wp), intent(in)    :: lnps(:,:)            ! (nlon,nlat)      ln[Pa]
@@ -267,7 +277,7 @@ contains
 
         return
 
-    end subroutine aeros_moisture_transport
+    end subroutine aeros_transport_transport
 
     subroutine transport_substep(mst, vg, u, v, dt)
         ! One forward sub-step, operator-split: a zonal sweep, then a meridional
@@ -286,7 +296,7 @@ contains
 
         implicit none
 
-        type(aeros_moist_class), intent(inout) :: mst
+        type(aeros_transport_class), intent(inout) :: mst
         type(aeros_vgrid_class), intent(in)    :: vg
         real(wp), intent(in) :: u(:,:,:), v(:,:,:)
         real(wp), intent(in) :: dt
@@ -361,7 +371,7 @@ contains
 
         implicit none
 
-        type(aeros_moist_class), intent(inout) :: mst
+        type(aeros_transport_class), intent(inout) :: mst
         real(wp), intent(in) :: u(:,:,:)
         real(wp), intent(in) :: dt
 
@@ -425,7 +435,7 @@ contains
 
         implicit none
 
-        type(aeros_moist_class), intent(inout) :: mst
+        type(aeros_transport_class), intent(inout) :: mst
         real(wp), intent(in) :: v(:,:,:)
         real(wp), intent(in) :: dt
 
@@ -615,7 +625,7 @@ contains
 
         implicit none
 
-        type(aeros_moist_class), intent(in) :: mst
+        type(aeros_transport_class), intent(in) :: mst
         real(wp), intent(in) :: u(:,:,:), v(:,:,:), lnps(:,:)
         type(aeros_vgrid_class), intent(in) :: vg
         real(wp), intent(in) :: dt
@@ -660,14 +670,14 @@ contains
 
     end function max_courant
 
-    real(dp) function aeros_moisture_water(mst, grd, vg, ps, q) result(water)
+    real(dp) function aeros_transport_water(mst, grd, vg, ps, q) result(water)
         ! Global water mass, int q dp/g dA [kg], for the conservation check.
         ! Accumulated in dp for the same reason aeros_budget is: a machine-
         ! precision statement cannot be made in an sp sum over the grid.
 
         implicit none
 
-        type(aeros_moist_class), intent(in) :: mst
+        type(aeros_transport_class), intent(in) :: mst
         type(aeros_grid_class),  intent(in) :: grd
         type(aeros_vgrid_class), intent(in) :: vg
         real(wp), intent(in) :: ps(:,:), q(:,:,:)
@@ -696,15 +706,15 @@ contains
 
         return
 
-    end function aeros_moisture_water
+    end function aeros_transport_water
 
-    subroutine aeros_moisture_report(mst, io_unit)
+    subroutine aeros_transport_report(mst, io_unit)
         ! What the transport is doing: sub-steps forced by the polar Courant,
         ! and the FV-vs-spectral mass-consistency gap.
 
         implicit none
 
-        type(aeros_moist_class), intent(in) :: mst
+        type(aeros_transport_class), intent(in) :: mst
         integer, intent(in), optional :: io_unit
 
         integer :: iou
@@ -713,13 +723,13 @@ contains
         if (present(io_unit)) iou = io_unit
 
         write(iou,*) ""
-        write(iou,"(a)")        " == moisture transport =="
-        write(iou,"(a)")        "   scheme                      FV flux-form, upwind, positive-definite"
+        write(iou,"(a)")        " == tracer transport =="
+        write(iou,"(a)")        "   scheme                      FV flux-form, van Leer, positive-definite"
         write(iou,"(a,es12.3)") "   last max Courant           ", mst%last_cfl
         write(iou,"(a,i9)")     "   last sub-steps             ", mst%last_nsub
 
         return
 
-    end subroutine aeros_moisture_report
+    end subroutine aeros_transport_report
 
-end module aeros_moisture
+end module aeros_transport

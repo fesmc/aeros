@@ -174,10 +174,10 @@ correction : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_correction.x is ready."
 
-moisture : aeros-static
-		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_moisture.x $(testdir)/test_moisture.f90 \
+transport : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_transport.x $(testdir)/test_transport.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
-		@echo "    test_moisture.x is ready."
+		@echo "    test_transport.x is ready."
 
 condensation : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_condensation.x $(testdir)/test_condensation.f90 \
@@ -250,7 +250,7 @@ cloud-prog : aeros-static
 		@echo "    test_cloud_prog.x is ready."
 
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography land cloud-prog seaice
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction transport condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography land cloud-prog seaice
 
 # Driver executables
 drivers : run bench held-suarez
