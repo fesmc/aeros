@@ -76,7 +76,7 @@ program rce_long
     real(wp) :: cond_rh_crit = 1.0_wp
     integer  :: ocean_mode = 0       ! 0 prescribed SST, 1 slab
     real(wp) :: ocean_depth = 10.0_wp
-    real(wp) :: rad_interval = 10800.0_wp   ! radiation recompute cadence [s]
+    real(wp) :: rad_interval = 21600.0_wp   ! radiation recompute cadence [s]; default 6 h
     integer  :: rad_scheme = SCHEME_ECCKD   ! LW/SW scheme (2=ecCKD default, 1=SESAM)
 
     type(aeros_sht_pool_class), target :: pool
@@ -379,8 +379,12 @@ contains
         call nml_read(nmlfile, "rce", "cond_rh_crit", cond_rh_crit)
         call nml_read(nmlfile, "rce", "ocean_mode", ocean_mode)
         call nml_read(nmlfile, "rce", "ocean_depth", ocean_depth)
-        call nml_read(nmlfile, "rce", "rad_interval", rad_interval)
-        call nml_read(nmlfile, "rce", "rad_scheme", rad_scheme)
+        ! Optional overrides: a namelist that omits these inherits input/rce_defaults.nml
+        ! (6 h / ecCKD) instead of erroring. Every other key above stays required.
+        call nml_read(nmlfile, "rce", "rad_interval", rad_interval, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "rad_scheme", rad_scheme, &
+                      defaults_file="input/rce_defaults.nml")
         return
     end subroutine read_config
 

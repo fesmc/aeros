@@ -220,7 +220,7 @@ module aeros_radiation
 
         ! Call cadence: recompute the full transfer every `interval` seconds and
         ! hold the heating rate fixed between, per design.md section 5.
-        real(wp) :: interval = 10800.0_wp    ! 3 h
+        real(wp) :: interval = 21600.0_wp    ! 6 h (radiation recompute cadence)
 
         ! Per-latitude insolation (nlat): annual-mean, or refreshed per call in
         ! seasonal mode.
