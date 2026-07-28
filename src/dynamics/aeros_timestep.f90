@@ -178,6 +178,8 @@ module aeros_timestep
                                 aeros_ocean_step, aeros_ocean_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
+    use ncio,             only : nc_create, nc_write, nc_write_dim, &
+                                nc_write_attr, nc_read_attr, nc_read
 
     implicit none
 
@@ -324,6 +326,8 @@ module aeros_timestep
     public :: aeros_timestep_enable_diag
     public :: aeros_timestep_set_sponge
     public :: aeros_timestep_print
+    public :: aeros_timestep_write_restart
+    public :: aeros_timestep_read_restart
 
 contains
 
@@ -941,6 +945,247 @@ contains
         return
 
     end subroutine aeros_timestep_set_mass_target
+
+    subroutine aeros_timestep_write_restart(ts, now, time, filename)
+        ! Write the full integrator state to a self-describing netCDF restart
+        ! file, from which aeros_timestep_read_restart resumes bit-identically.
+        !
+        ! WHAT IS SAVED, and why exactly this and no more:
+        !   - BOTH persistent spectral time levels -- X^n (now%spec) and
+        !     X^(n-1) (ts%old). Leapfrog needs n and n-1 to take its 2 dt step;
+        !     ts%new is scratch rewritten every step, so it is NOT saved.
+        !   - now%qv_g, the gridpoint humidity prognostic. It is never
+        !     transformed to spectral space (aeros_defs), so there is nothing
+        !     else to reconstruct it from -- it MUST be saved.
+        !   - the ocean's SST and net-flux fields and its mode: the spun-up
+        !     lower boundary the restart exists to reuse.
+        !   - ts%nstep and the model `time`. nstep drives the leapfrog start-up
+        !     branch AND the radiation recompute cadence (mod(nstep,nrad)), so
+        !     restoring it is what makes the cached radiative heating correct.
+        !   - mass_target / lnr_cum / lnr_last. mass_target MUST be carried:
+        !     recapturing it from the restarted state would ratify the drift
+        !     (see aeros_timestep_class and aeros_timestep_set_mass_target).
+        !   - ts%rad%heat, the cached heating applied every step between
+        !     recomputes. The radiation cadence has no internal "last recompute"
+        !     accumulator -- it is purely mod(nstep,nrad) -- so nstep + this
+        !     cache are together sufficient for a bit-exact first restarted step.
+        !   - the cached radiative surface/TOA fluxes (sw_net_sur, lw_dw_sur,
+        !     sw_dw_sur, olr, sw_up_toa). These, like rad%heat, are refreshed
+        !     ONLY on a recompute step and held between; the slab ocean consumes
+        !     sw_net_sur and lw_dw_sur every step (aeros_ocean_step), so a
+        !     restart landing on a non-recompute step must carry them or the
+        !     first SST update -- and everything downstream of it -- diverges.
+        !
+        ! Grid diagnostics (now%u/v/temp_g/ps) are recomputed from spectral each
+        ! step and are deliberately NOT saved.
+        !
+        ! Complex spectral arrays are stored as separate real/imag components.
+        ! Metadata (nlm, nlev, nlon, nlat) goes in as global attributes and the
+        ! read routine errors on any mismatch.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(in) :: ts
+        type(aeros_state_class),    intent(in) :: now
+        real(wp),                   intent(in) :: time
+        character(len=*),           intent(in) :: filename
+
+        integer :: nlm, nlev, nlon, nlat, rad_present
+
+        nlm  = now%spec%nlm
+        nlev = now%spec%nlev
+        nlon = ts%ocn%nlon
+        nlat = ts%ocn%nlat
+        rad_present = 0
+        if (allocated(ts%rad%heat)) rad_present = 1
+
+        call nc_create(filename)
+
+        ! Plain index dimensions; the restart is not a viewable field file.
+        call nc_write_dim(filename,"lon",x=1,dx=1,nx=nlon,units="1")
+        call nc_write_dim(filename,"lat",x=1,dx=1,nx=nlat,units="1")
+        call nc_write_dim(filename,"lev",x=1,dx=1,nx=nlev,units="1")
+        call nc_write_dim(filename,"nlm",x=1,dx=1,nx=nlm,units="1")
+
+        ! Validation metadata and scalars, as global attributes.
+        call nc_write_attr(filename,"nlm",              nlm)
+        call nc_write_attr(filename,"nlev",             nlev)
+        call nc_write_attr(filename,"nlon",             nlon)
+        call nc_write_attr(filename,"nlat",             nlat)
+        call nc_write_attr(filename,"nstep",            ts%nstep)
+        call nc_write_attr(filename,"ocn_mode",         ts%ocn%mode)
+        call nc_write_attr(filename,"rad_heat_present", rad_present)
+        call nc_write_attr(filename,"time",             real(time,dp))
+        call nc_write_attr(filename,"mass_target",      ts%mass_target)
+        call nc_write_attr(filename,"lnr_cum",          ts%lnr_cum)
+        call nc_write_attr(filename,"lnr_last",         ts%lnr_last)
+
+        ! The two persistent spectral time levels.
+        call write_spec("now", now%spec)   ! X^n
+        call write_spec("old", ts%old)     ! X^(n-1)
+
+        ! Gridpoint humidity prognostic.
+        call nc_write(filename,"qv_g", now%qv_g, dim1="lon",dim2="lat",dim3="lev", &
+                        units="kg kg-1", long_name="specific humidity (prognostic)")
+
+        ! Ocean lower boundary.
+        call nc_write(filename,"ocn_sst", ts%ocn%sst, dim1="lon",dim2="lat", &
+                        units="K", long_name="sea surface temperature")
+        call nc_write(filename,"ocn_fnet", ts%ocn%fnet, dim1="lon",dim2="lat", &
+                        units="W m-2", long_name="net surface energy flux")
+
+        ! Cached radiative heating (only if it has been computed).
+        if (rad_present == 1) &
+            call nc_write(filename,"rad_heat", ts%rad%heat, &
+                            dim1="lon",dim2="lat",dim3="lev", &
+                            units="K s-1", long_name="cached radiative heating rate")
+
+        ! Cached radiative surface/TOA fluxes, refreshed only on a recompute
+        ! and consumed between recomputes (the slab ocean reads sw_net_sur and
+        ! lw_dw_sur every step). Always allocated once radiation is initialised.
+        call nc_write(filename,"rad_sw_net_sur", ts%rad%sw_net_sur, &
+                        dim1="lon",dim2="lat",units="W m-2")
+        call nc_write(filename,"rad_lw_dw_sur",  ts%rad%lw_dw_sur, &
+                        dim1="lon",dim2="lat",units="W m-2")
+        call nc_write(filename,"rad_sw_dw_sur",  ts%rad%sw_dw_sur, &
+                        dim1="lon",dim2="lat",units="W m-2")
+        call nc_write(filename,"rad_olr",        ts%rad%olr, &
+                        dim1="lon",dim2="lat",units="W m-2")
+        call nc_write(filename,"rad_sw_up_toa",  ts%rad%sw_up_toa, &
+                        dim1="lon",dim2="lat",units="W m-2")
+
+        return
+
+    contains
+
+        subroutine write_spec(prefix, spec)
+            ! Write one spectral level set as real/imag component variables.
+            character(len=*),       intent(in) :: prefix
+            type(aeros_spec_class), intent(in) :: spec
+
+            call nc_write(filename, prefix//"_vor_re",  real(spec%vor,dp), &
+                            dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_vor_im",  aimag(spec%vor), &
+                            dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_div_re",  real(spec%div,dp), &
+                            dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_div_im",  aimag(spec%div), &
+                            dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_temp_re", real(spec%temp,dp), &
+                            dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_temp_im", aimag(spec%temp), &
+                            dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_lnps_re", real(spec%lnps,dp), &
+                            dim1="nlm")
+            call nc_write(filename, prefix//"_lnps_im", aimag(spec%lnps), &
+                            dim1="nlm")
+            return
+        end subroutine write_spec
+
+    end subroutine aeros_timestep_write_restart
+
+    subroutine aeros_timestep_read_restart(ts, now, time, filename)
+        ! Overwrite an already-initialised timestep and state with a restart
+        ! file written by aeros_timestep_write_restart, resuming bit-identically.
+        !
+        ! CONTRACT: the caller must have built `ts` and `now` normally first
+        ! (same trunc/nlev/grid), so every array is already allocated to the
+        ! right shape; this routine only overwrites values. The metadata in the
+        ! file is validated against the live shapes and any mismatch is fatal.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_state_class),    intent(inout) :: now
+        real(wp),                   intent(out)   :: time
+        character(len=*),           intent(in)    :: filename
+
+        integer  :: nlm, nlev, nlon, nlat, rad_present
+        integer  :: nlm_f, nlev_f, nlon_f, nlat_f
+        real(dp) :: time_f
+
+        nlm  = now%spec%nlm
+        nlev = now%spec%nlev
+        nlon = ts%ocn%nlon
+        nlat = ts%ocn%nlat
+
+        call nc_read_attr(filename,"nlm",  nlm_f)
+        call nc_read_attr(filename,"nlev", nlev_f)
+        call nc_read_attr(filename,"nlon", nlon_f)
+        call nc_read_attr(filename,"nlat", nlat_f)
+
+        if (nlm_f /= nlm .or. nlev_f /= nlev .or. &
+            nlon_f /= nlon .or. nlat_f /= nlat) then
+            write(io_unit_err,*) "aeros_timestep_read_restart:: error: restart file "// &
+                                    "metadata does not match the current model."
+            write(io_unit_err,*) "  file  (nlm,nlev,nlon,nlat) = ", &
+                                    nlm_f, nlev_f, nlon_f, nlat_f
+            write(io_unit_err,*) "  model (nlm,nlev,nlon,nlat) = ", &
+                                    nlm, nlev, nlon, nlat
+            error stop 1
+        end if
+
+        call nc_read_attr(filename,"nstep",            ts%nstep)
+        call nc_read_attr(filename,"ocn_mode",         ts%ocn%mode)
+        call nc_read_attr(filename,"rad_heat_present", rad_present)
+        call nc_read_attr(filename,"time",             time_f)
+        call nc_read_attr(filename,"mass_target",      ts%mass_target)
+        call nc_read_attr(filename,"lnr_cum",          ts%lnr_cum)
+        call nc_read_attr(filename,"lnr_last",         ts%lnr_last)
+
+        time = real(time_f, wp)
+
+        call read_spec("now", now%spec)   ! X^n
+        call read_spec("old", ts%old)     ! X^(n-1)
+
+        call nc_read(filename,"qv_g",     now%qv_g)
+        call nc_read(filename,"ocn_sst",  ts%ocn%sst)
+        call nc_read(filename,"ocn_fnet", ts%ocn%fnet)
+
+        if (rad_present == 1) then
+            ! ts%rad%heat is allocated lazily on the first apply; a restart must
+            ! fill it BEFORE the first restarted step so the cached heating is
+            ! the one the continuous run would have applied.
+            if (.not. allocated(ts%rad%heat)) &
+                allocate(ts%rad%heat(nlon, nlat, nlev))
+            call nc_read(filename,"rad_heat", ts%rad%heat)
+        end if
+
+        ! Cached radiative surface/TOA fluxes (always allocated by init).
+        call nc_read(filename,"rad_sw_net_sur", ts%rad%sw_net_sur)
+        call nc_read(filename,"rad_lw_dw_sur",  ts%rad%lw_dw_sur)
+        call nc_read(filename,"rad_sw_dw_sur",  ts%rad%sw_dw_sur)
+        call nc_read(filename,"rad_olr",        ts%rad%olr)
+        call nc_read(filename,"rad_sw_up_toa",  ts%rad%sw_up_toa)
+
+        return
+
+    contains
+
+        subroutine read_spec(prefix, spec)
+            ! Read one spectral level set from its real/imag component variables.
+            character(len=*),       intent(in)    :: prefix
+            type(aeros_spec_class), intent(inout) :: spec
+
+            real(dp) :: re2(spec%nlm, spec%nlev), im2(spec%nlm, spec%nlev)
+            real(dp) :: re1(spec%nlm), im1(spec%nlm)
+
+            call nc_read(filename, prefix//"_vor_re",  re2)
+            call nc_read(filename, prefix//"_vor_im",  im2)
+            spec%vor  = cmplx(re2, im2, wp_sh)
+            call nc_read(filename, prefix//"_div_re",  re2)
+            call nc_read(filename, prefix//"_div_im",  im2)
+            spec%div  = cmplx(re2, im2, wp_sh)
+            call nc_read(filename, prefix//"_temp_re", re2)
+            call nc_read(filename, prefix//"_temp_im", im2)
+            spec%temp = cmplx(re2, im2, wp_sh)
+            call nc_read(filename, prefix//"_lnps_re", re1)
+            call nc_read(filename, prefix//"_lnps_im", im1)
+            spec%lnps = cmplx(re1, im1, wp_sh)
+            return
+        end subroutine read_spec
+
+    end subroutine aeros_timestep_read_restart
 
     subroutine sponge(ts, sht, h)
         ! Implicit model-top sponge (C1 Rayleigh drag + C2 Newtonian cooling),
