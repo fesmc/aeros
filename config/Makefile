@@ -249,8 +249,13 @@ cloud-prog : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_cloud_prog.x is ready."
 
+adaptive-diff : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_adaptive_diff.x $(testdir)/test_adaptive_diff.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_adaptive_diff.x is ready."
+
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency semiimp timestep correction transport condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography land cloud-prog seaice
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction transport condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography land cloud-prog seaice adaptive-diff
 
 # Driver executables
 drivers : run bench held-suarez
