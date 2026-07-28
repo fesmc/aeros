@@ -197,7 +197,28 @@ program rce_long
     if (l_topography) then
         call aeros_topography_load(topo_file, grd%lon, grd%lat, phis_full)
         write(*,"(a,a)") " rce_long:: topography from ", trim(topo_file)
-        write(*,"(a,es11.3,a,es11.3,a,f6.1,a)") " rce_long:: phis min ", &
+        write(*,"(a,es11.3,a,es11.3)") " rce_long:: raw   phis min ", &
+            minval(phis_full), "  max ", maxval(phis_full)
+        ! Spectrally truncate to the model resolution (T21). A spectral core can
+        ! only carry the surface geopotential at its resolved scales: the raw
+        ! interpolated field still has grid-scale structure at coastlines and
+        ! mountain flanks, which aliases in the transforms and rings (Gibbs),
+        ! destabilizing the lowest layer. Band-limiting via one analysis ->
+        ! synthesis round-trip (SHTns truncates at T21) gives the smooth
+        ! orography the dynamics is consistent with. Standard spectral-model
+        ! practice.
+        block
+            complex(wp_sh), allocatable :: phis_lm(:)
+            real(dp),       allocatable :: gwork(:,:)
+            allocate(phis_lm(pool%sht(1)%nlm))
+            allocate(gwork(grd%nlon, grd%nlat))
+            gwork = real(phis_full, dp)
+            call aeros_sht_analysis(pool%sht(1), gwork, phis_lm)   ! grid -> T21 spectral (overwrites gwork)
+            call aeros_sht_synthesis(pool%sht(1), phis_lm, gwork)  ! T21 spectral -> band-limited grid
+            phis_full = real(gwork, wp)
+            deallocate(phis_lm, gwork)
+        end block
+        write(*,"(a,es11.3,a,es11.3,a,f6.1,a)") " rce_long:: T21   phis min ", &
             minval(phis_full), "  max ", maxval(phis_full), " m2/s2   ramp ", &
             topo_ramp_days, " days"
     end if
