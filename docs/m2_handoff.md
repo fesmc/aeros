@@ -1,6 +1,60 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION: topography — the first real boundary-condition forcing
+## ►► NEXT SESSION: Wave 2 — land surface / prognostic clouds / sea ice
+
+**Wave 1 landed (on `main`, integrated + verified together).** Two features were
+built in parallel worktrees, merged, and validated as a pair:
+
+- **Topography (orography) forcing — DONE.** `src/aeros_bcinput.f90` (a general,
+  reusable lon/lat→Gaussian bilinear regridder — the foundation for *all* future
+  changing boundary conditions: LSM, albedo, SST, ice topo) + `src/physics/
+  aeros_topography.f90` (ERA5 `z` → phis, no ÷g). Wired into `rce_long` behind
+  `l_topography` (default `.false.` → flat aquaplanet, bit-for-bit unchanged),
+  `topo_file`, `topo_ramp_days`. The orography is **spectrally truncated to T21**
+  before it feeds the dynamics (raw grid-scale phis aliases and rings the model
+  top — standard spectral-model practice), and ramped in over `topo_ramp_days` via
+  a **pure function of absolute model time** (restart-safe). A 2-yr real-Earth run
+  is NaN-free, TOA net ~−2 W/m² with no secular drift; `docs/figures/topo_phis.png`
+  shows continents/mountains in the right places. **Gotcha:** topography-on needs
+  *stronger top damping* than the aquaplanet (blow-up recurs at ~0.88 of full
+  amplitude regardless of ramp length — the lever is top damping, not ramp
+  duration). The validation run used `tau_diff=3.0`, `sponge_sigma=0.20`,
+  `sponge_kr/kt ×2` — a run-config choice; **code defaults are untouched.** A
+  proper gravity-wave-drag / higher-top fix is the durable answer (Wave 2+).
+- **Restart / checkpoint — DONE.** `aeros_timestep_write_restart` /
+  `aeros_timestep_read_restart` (in `aeros_timestep.f90`) serialize the *complete*
+  integrator state to one netCDF file: both leapfrog spectral levels
+  (`now`=Xⁿ, `old`=Xⁿ⁻¹), grid humidity `qv_g`, **ocean SST+fnet (spun-up ocean)**,
+  the scalars `nstep`/`mass_target`/`lnr_cum`/`lnr_last`/time, and the radiation
+  cache. Note the cache is more than `rad%heat`: the slab ocean consumes the cached
+  radiative *surface fluxes* every step, so those are saved too. Wired into
+  `rce_long` behind `restart_in` / `restart_out` / `restart_interval` (all default
+  to cold-start). Metadata (nlm/nlev/nlon/nlat) is validated on read; `mass_target`
+  is restored explicitly (not recaptured).
+- **Both verified — separately and together.** `test_restart` (bit-exact split-run)
+  and `test_topography` (regridder exactness + ramp) are acceptance tests **20 and
+  21**; all 21 pass, `make all openmp=1` clean. Integration check: a continuous
+  40-step topo-on run vs. a 20-step + checkpoint + resume-to-40 run are
+  **bit-identical** across all 29 restart fields with the topography ramp active
+  across the checkpoint boundary.
+
+**Wave 2 (recommended order, unchanged from the leverage analysis below):**
+1. **Land surface + land–sea mask** — reuse `aeros_bcinput` to read the ERA5 `lsm`
+   / `fal` fields; add land albedo/roughness/heat-capacity maps + a soil-moisture/
+   temperature scheme (bucket is the pragmatic first cut) + evapotranspiration.
+   This is what creates monsoons and the subtropical dry zones.
+2. **Prognostic cloud fraction** — replace the diagnostic RH→cover that runs away
+   (0.66→0.86) in slab runs. Sundqvist-type prognostic `cf` (source = large-scale
+   + convective detrainment, sink = evaporation) fits the L12 column physics.
+3. **Sea-ice thermodynamics + albedo** — replace the ocean freeze-floor clamp;
+   note this edits `aeros_ocean`, whose state is now serialized by restart — extend
+   `write/read_restart` when ice state is added.
+
+Original leverage analysis and full M2 detail follow, unchanged.
+
+---
+
+## Topography (Wave 1) — original brief, now DONE
 
 The ecCKD revalidation and the radiation-cost fix are **done** (§29, on `main`,
 pushed). Short version: ecCKD is the fast default, the coupled RCE needed **no
