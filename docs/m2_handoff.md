@@ -1,6 +1,42 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION: calibrate/stabilize the prognostic cloud scheme (land×cloud blow-up)
+## ►► NEXT SESSION: free-tropospheric drying — fix the dormant Simplified Betts–Miller
+
+**Full scope in [`docs/frierson_sbm_scope.md`](frierson_sbm_scope.md).** The near-saturated
+moist bias (RH ~85–100% vs ERA5 ~45%, m2_results §23) is the highest-leverage fix left — it
+drives the overcast/cloud runaway, the OLR bias, and the coupled TOA imbalance. Key finding
+from this session: **aeros already implements the Frierson (2007) Simplified Betts–Miller
+scheme** (`sbm_adjust`, the default); it just **goes dormant at RCE equilibrium** (`hb −
+h*_env < 0` everywhere → no convection → nothing dries the free troposphere), whereas
+SpeedyWeather's implementation of the same scheme stays active. So the task is diagnose-and-
+fix the dormancy (parcel/trigger/surface-coupling), not reimplement. Acceptance: RH → ~45%,
+cover → ~0.63, TOA toward balance, and the `cond_rh_crit` crutch can retire. This should
+improve clouds + OLR + TOA together.
+
+### Landed this session (all on `main`, pushed)
+- **Land×cloud blow-up FIXED.** Root cause was *not* the ocean/model-top (my first handoff
+  framing was wrong — corrected below): it is a **land × prognostic-cloud interaction** — the
+  thin, patchy Sundqvist cover over land's zonal asymmetry drove a near-equatorial jet.
+  Fixed by **calibrating** the cloud scheme (cover 0.07 → 0.56 ≈ ERA5 0.63; slower 3 h
+  timescale de-patchifies the field). `cf` advection was added too (it's correct physics but
+  was stability-neutral here — calibration is what fixed it).
+- **`aeros_moisture` → `aeros_transport`** — the FV moisture core generalized into a reusable
+  positive-definite tracer engine (qv bit-identical); `cf` now advects through it. Restart is
+  bit-identical with land+cloud+sea-ice all active.
+- **Adaptive hyperdiffusion** (`diff_adapt`, `diff_taper`; both default OFF, bit-for-bit) — a
+  SpeedyWeather-style numerical safety net (vorticity-scaled strength + σ-tapered order). It
+  independently holds the land×cloud jet bounded (max|u| ~10 m/s); the **order-taper** is what
+  bites (a thermally-driven mode; vorticity-scaling alone can't touch it). Available if the
+  Frierson work needs a top-stability net.
+- **Suite now 25 tests**, all pass; `make all openmp=1` clean.
+- **Reference studies:** `docs/refs/speedy_comparison.md` (SpeedyWeather/SPEEDY vs aeros) and
+  `docs/refs/reduced_grid_feasibility.md` (reduced grid = **NO-GO**: SHTns is regular-grid-
+  only; and the coupled model is physics-bound, not transform-bound, so the reachable speed
+  lever is physics, established by profiling — not the transform).
+
+---
+
+## Superseded: the land×cloud "cloud calibration" task (DONE — see above)
 
 **CORRECTION (diagnosed 2026-07-28, supersedes the "slab model-top instability"
 framing that was here):** the coupled blow-up is **not** an ocean/model-top
