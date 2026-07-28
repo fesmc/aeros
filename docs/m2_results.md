@@ -1389,3 +1389,82 @@ divergence) is exact by construction, LW and SW.
 reduce-to-SESAM SW property. `validate_era5` gained a scheme arg (`sesam|ecckd`)
 and a CO2 arg. ecCKD is the recommended scheme going forward; SESAM is retained as
 the fast, bit-reproducible default until the switch is made deliberately.
+
+## 29. Coupled-RCE revalidation under ecCKD, and the radiation-cost fix (M3c)
+
+ecCKD was made the production default (`scheme` default flipped SESAM→ecCKD, §28
+follow-up). Because the radiation that sets the coupled equilibrium changed, every
+earlier coupled-RCE result and tuning (§22–26, all under SESAM) needed a
+revalidation pass. Vehicle throughout: the balanced rotating slab, `cond_rh_crit
+= 0.93`, clouds on (`logs/rce_revalidate.nml`). All runs NaN-free.
+
+**Revalidation — nothing forced a re-tune.**
+
+1. **Coupled TOA + cover sweep.** `cond_rh_crit` ∈ {0.88, 0.90, 0.93, 0.96}, 100 d:
+   OLR falls / cover rises monotonically with crit (169.0/0.555, 164.3/0.590,
+   154.9/0.658, 143.8/0.735 W/m²·—). **0.93 stays the best joint point** — cover
+   0.658 vs ERA5 0.63 (+0.03), TOA net **+5.6 W/m²** (was +8 under SESAM, §23).
+   TOA only closes at 0.96 (+0.4) but that overcasts to 0.735 (+0.11 vs ERA5); the
+   residual is the Tier-1 opacity/albedo term, not a cloud-tuning target.
+2. **Moist-line vs ERA5** (`scripts/rce_validate_era5.jl`,
+   `docs/figures/rce_validate_era5_ecckd.png`). Upper-trop warm bias **eased ~2 K**
+   by ecCKD's more accurate LW aloft: 198 hPa +9.9 K (was +12 K, §24); mid-trop
+   ±1 K. **Jet unchanged** — 8.6 vs ERA5 27 m/s at 198 hPa: a dynamics/resolution
+   limit (§25–26), radiation-independent, as predicted.
+3. **Humidity/cover** (`rce_humidity_vs_era5.jl`,
+   `docs/figures/rce_humidity_vs_era5_ecckd.png`). Story unchanged from SESAM:
+   near-saturated free troposphere (RH +40 to +42% vs ERA5's 40–55% mid-trop),
+   ~ERA5 cover (0.66 vs 0.63) because the cover diagnostic saturates. This is a
+   missing-circulation signature (no eddies, weak Hadley — §25/§26), not a
+   closure-only bias; a calibration target only once topography/land/eddies exist.
+4. **Slab-ocean equilibrium** (`logs/rce_slab5yr.nml`, `ocean_mode=1`, 10 m, 5 yr;
+   264.8 s wall = **53 s/model-yr threaded**, confirming the throughput below).
+   From the fixed-SST +5.46 W/m² start the slab warms, OLR climbs 157→174 W/m²,
+   and TOA net crosses zero at ~yr 1 — then **overshoots to a quasi-steady net
+   ≈ −13.5 W/m² by ~yr 3** (plateau, not drift). This is **not a clean
+   energy-balanced equilibrium**, and the cause is diagnostic gold: cloud cover
+   runs away **0.66 → 0.86** (heavily overcast) as free SST warms the tropics
+   (surface-level T max ~307 K) and evaporation surges (LH 43→66 W/m²) — the
+   near-saturated moist bias (item 3) means the cover diagnostic saturates *upward*,
+   over-reflecting SW and pulling net negative. The freeze-floor slab (no sea ice)
+   compounds it at high latitudes (surface-level T min ~212 K at 80°), preventing
+   TOA closure. **The fixed-SST `cond_rh_crit=0.93` tuning does not survive slab
+   coupling** — the cloud–SW feedback is too strong without subsidence drying. A
+   real cloud-fraction scheme and sea ice (both listed below) are prerequisites for
+   a physical slab equilibrium; this is not a re-tune of `cond_rh_crit`.
+5. **Clear-sky OLR bias structurally gone** (`validate_era5 ... ecckd`): ecCKD
+   **−5.07 W/m²** vs SESAM −7.07, with **no `LW_VAP_OPAC` fudge** (§20 fudge
+   retired). Consistent offline (−5.1) ↔ coupled all-sky residual (+5.6, item 1).
+
+**The radiation-cost fix — the real story of the session.** §28's "radiation runs
+on the cadence, so the runtime share stays small" was **wrong**. A profile (T21L12,
+single-thread, 10 model-days) showed radiation was **~90% of runtime**: dynamics
+1.16 s, +non-rad physics 2.54 s, +clear-sky radiation 13.5 s, +cloud all-sky
+24.7 s — despite the 3 h cadence. Root cause: the ecCKD reference k-table (an
+80-iteration inverse-Gaussian bisection per g-point) was **rebuilt for every one of
+the 2048 columns**, though it depends only on compile-time Malkmus parameters.
+
+Fix (committed, bit-exact): build it once into a module cache (`aeros_ecckd_init`
+primes it serially before the OpenMP region; `ensure_ktable` is the lazy fallback).
+Full-run **~6× single-thread** (24.7 → 4.0 s / 10 d), radiation output
+byte-for-byte unchanged, 19/19 green. The cadence default was also raised **3 h →
+6 h** (`aeros_rad_class%interval`; near-linear speedup, coupled TOA net drift only
+−0.15 W/m², within run-to-run noise); `rce_long` exposes `rad_interval`/`rad_scheme`
+as optional overrides (`input/rce_defaults.nml`).
+
+Measured throughput (T21L12, 10-core): **487 → 1656 model-yr/day** at 6 h (≈52 s
+/model-yr), a **3.4×** wall-clock win. (Threaded scaling is only ~2.8× on 10 cores
+now that radiation — the parallel-heavy term — is cheap; the dynamical core is the
+floor. The design-target 5000 yr/day is not reached at this thread efficiency.)
+
+A parallel single-pass all-sky-LW rewrite (clear+overcast sharing one transfer) was
+prototyped and **rejected**: the k-table cache already collapses the run-twice cost,
+so it gave no measurable full-run gain, and its `exp(a)·exp(b)` overcast is
+roundoff-different from `exp(a+b)`, shifting the coupled day-100 net by +0.11 W/m².
+The bit-exact run-twice path was kept.
+
+**Bottom line:** ecCKD holds the coupled equilibrium together with no re-tune,
+modestly improves both the clear-sky OLR bias (−7.1→−5.1) and the upper-trop warm
+bias (−2 K), and is now the fast default. The revalidation is a *stability +
+radiation-physics* confirmation under idealized boundary conditions — **not** an
+ERA5 climate calibration, which is gated on the missing forcings (below).
