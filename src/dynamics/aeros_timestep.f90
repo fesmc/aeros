@@ -170,6 +170,9 @@ module aeros_timestep
     use aeros_radiation,  only : aeros_rad_class, aeros_radiation_init, &
                                 aeros_radiation_load, aeros_radiation_end, &
                                 aeros_radiation_apply, aeros_radiation_report
+    use aeros_cloud_prog, only : aeros_cloud_prog_class, aeros_cloud_prog_init, &
+                                aeros_cloud_prog_load, aeros_cloud_prog_end, &
+                                aeros_cloud_prog_apply
     use aeros_vdiff,      only : aeros_vdiff_class, aeros_vdiff_init, &
                                 aeros_vdiff_load, aeros_vdiff_end, &
                                 aeros_vdiff_apply, aeros_vdiff_report
@@ -243,6 +246,14 @@ module aeros_timestep
         ! Uses the surface module's prescribed SST as the skin temperature. Off
         ! unless a namelist turns it on.
         type(aeros_rad_class) :: rad
+
+        ! Prognostic cloud fraction (aeros_cloud_prog): the opt-in Sundqvist
+        ! source/sink budget for now%cf_g, applied at the grid seam AFTER
+        ! convection and condensation and BEFORE radiation, so radiation's
+        ! all-sky path consumes the just-updated prognostic fraction. Off unless
+        ! a namelist turns it on; when off, radiation uses the diagnostic
+        ! RH->cover path and every current result is bit-for-bit unchanged.
+        type(aeros_cloud_prog_class) :: cpr
 
         ! Sea surface temperature (aeros_ocean): prescribed or a slab. Owns the
         ! SST that the surface fluxes and radiation are evaluated against; in slab
@@ -424,6 +435,7 @@ contains
             call aeros_surface_load(ts%surf, filename, grd, defaults_file=defaults_file)
             call aeros_ocean_load(ts%ocn, filename, grd, defaults_file=defaults_file)
             call aeros_radiation_load(ts%rad, filename, grd, defaults_file=defaults_file)
+            call aeros_cloud_prog_load(ts%cpr, filename, grd, defaults_file=defaults_file)
             call aeros_vdiff_load(ts%vd, filename, grd, defaults_file=defaults_file)
         else
             call aeros_condensation_init(ts%cnd, grd, .FALSE.)
@@ -431,6 +443,7 @@ contains
             call aeros_surface_init(ts%surf, grd, .FALSE.)
             call aeros_ocean_init(ts%ocn, grd)
             call aeros_radiation_init(ts%rad, grd, .FALSE.)
+            call aeros_cloud_prog_init(ts%cpr, grd, .FALSE.)
             call aeros_vdiff_init(ts%vd, grd, .FALSE.)
         end if
 
@@ -536,6 +549,7 @@ contains
         call aeros_surface_end(ts%surf)
         call aeros_ocean_end(ts%ocn)
         call aeros_radiation_end(ts%rad)
+        call aeros_cloud_prog_end(ts%cpr)
         call aeros_vdiff_end(ts%vd)
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
@@ -662,16 +676,41 @@ contains
                                         ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
         if (ts%wrk%diag) ts%wrk%dt_cnd = ts%wrk%dt_phys
 
+        ! Prognostic cloud fraction (aeros_cloud_prog), at the same grid seam and
+        ! AFTER convection and condensation so it sees the grid-box saturation
+        ! state the step ends in, and the convective precip for its detrainment
+        ! source. Advances now%cf_g in place (genuine prognostic state, persisted
+        ! across steps); radiation below consumes it. Off unless enabled -- when
+        ! off, now%cf_g stays zero and radiation uses the diagnostic RH->cover.
+        if (ts%cpr%enabled) then
+            if (ts%cnv%enabled) then
+                call aeros_cloud_prog_apply(ts%cpr, vg, ts%wrk%t_g, now%qv_g, &
+                    ts%wrk%lnps_g, now%cf_g, ts%dt, precip=ts%cnv%precip)
+            else
+                call aeros_cloud_prog_apply(ts%cpr, vg, ts%wrk%t_g, now%qv_g, &
+                    ts%wrk%lnps_g, now%cf_g, ts%dt)
+            end if
+        end if
+
         ! Radiation, at the same grid seam: clear-sky LW+SW heating, recomputed
         ! on a multi-hour cadence and cached, accumulated into wrk%dt_phys as a
         ! forward increment (NOT the centered path -- its top-of-atmosphere
         ! cooling is sharp and stiff). Uses the ocean's SST as the skin
         ! temperature (always allocated, even when the surface fluxes are off).
+        ! When the prognostic cloud scheme is on it consumes now%cf_g; otherwise
+        ! it diagnoses the cloud fraction from RH (bit-for-bit unchanged).
         ! Off unless enabled.
-        if (ts%rad%enabled) &
-            call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
-                                        ts%wrk%lnps_g, ts%ocn%sst, ts%nstep, &
-                                        ts%dt, ts%wrk%dt_phys)
+        if (ts%rad%enabled) then
+            if (ts%cpr%enabled) then
+                call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
+                                            ts%wrk%lnps_g, ts%ocn%sst, ts%nstep, &
+                                            ts%dt, ts%wrk%dt_phys, cf_prog=now%cf_g)
+            else
+                call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
+                                            ts%wrk%lnps_g, ts%ocn%sst, ts%nstep, &
+                                            ts%dt, ts%wrk%dt_phys)
+            end if
+        end if
         if (ts%wrk%diag) ts%wrk%dt_rad = ts%wrk%dt_phys
         ! Difference the cumulative snapshots into per-term increments [K/step].
         ! Top-down so each subtraction still sees the earlier cumulative value;
@@ -990,7 +1029,7 @@ contains
         real(wp),                   intent(in) :: time
         character(len=*),           intent(in) :: filename
 
-        integer :: nlm, nlev, nlon, nlat, rad_present
+        integer :: nlm, nlev, nlon, nlat, rad_present, cf_present
 
         nlm  = now%spec%nlm
         nlev = now%spec%nlev
@@ -998,6 +1037,8 @@ contains
         nlat = ts%ocn%nlat
         rad_present = 0
         if (allocated(ts%rad%heat)) rad_present = 1
+        cf_present = 0
+        if (ts%cpr%enabled) cf_present = 1
 
         call nc_create(filename)
 
@@ -1054,6 +1095,18 @@ contains
         call nc_write(filename,"rad_sw_up_toa",  ts%rad%sw_up_toa, &
                         dim1="lon",dim2="lat",units="W m-2")
 
+        ! === prognostic cloud state (feat/clouds) ===========================
+        ! now%cf_g is new prognostic state (aeros_cloud_prog): a gridpoint field
+        ! never reconstructed from anything else, so it MUST be saved when the
+        ! scheme is on or the run diverges on restart. Gated by cf_present so a
+        ! diagnostic-cloud run writes only the flag (=0) and no field, leaving
+        ! its restart otherwise unchanged. Append-only block; see rad_present.
+        call nc_write_attr(filename,"cf_present", cf_present)
+        if (cf_present == 1) &
+            call nc_write(filename,"cf_g", now%cf_g, &
+                            dim1="lon",dim2="lat",dim3="lev", &
+                            units="1", long_name="prognostic cloud fraction")
+
         return
 
     contains
@@ -1100,7 +1153,7 @@ contains
         real(wp),                   intent(out)   :: time
         character(len=*),           intent(in)    :: filename
 
-        integer  :: nlm, nlev, nlon, nlat, rad_present
+        integer  :: nlm, nlev, nlon, nlat, rad_present, cf_present
         integer  :: nlm_f, nlev_f, nlon_f, nlat_f
         real(dp) :: time_f
 
@@ -1157,6 +1210,13 @@ contains
         call nc_read(filename,"rad_sw_dw_sur",  ts%rad%sw_dw_sur)
         call nc_read(filename,"rad_olr",        ts%rad%olr)
         call nc_read(filename,"rad_sw_up_toa",  ts%rad%sw_up_toa)
+
+        ! === prognostic cloud state (feat/clouds) ===========================
+        ! Restore now%cf_g when the file carries it (cf_present == 1). cf_g is
+        ! always allocated by aeros_state_alloc, so a diagnostic-cloud restart
+        ! simply leaves it at zero. Append-only block; see rad_present.
+        call nc_read_attr(filename,"cf_present", cf_present)
+        if (cf_present == 1) call nc_read(filename,"cf_g", now%cf_g)
 
         return
 
