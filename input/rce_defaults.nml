@@ -32,4 +32,11 @@
     cloud_tau_form   = 3600.0
     cloud_tau_evap   = 3600.0
     cloud_c_detr     = 0.5
+    ! Sea ice off = freeze-floor slab, the bit-for-bit default. When on (needs a
+    ! slab ocean, ocean_mode = 1) the mixed-layer deficit forms ice instead of
+    ! being clamped, and the ice albedo feeds back into the radiation.
+    l_seaice         = .false.
+    ice_albedo       = 0.60
+    k_ice            = 2.0
+    t_frz            = 271.35
 /

@@ -78,6 +78,15 @@ program rce_long
     real(wp) :: cond_rh_crit = 1.0_wp
     integer  :: ocean_mode = 0       ! 0 prescribed SST, 1 slab
     real(wp) :: ocean_depth = 10.0_wp
+    ! --- thermodynamic sea ice (feat/seaice) --------------------------------
+    ! Default .FALSE. keeps the freeze-floor slab, bit-for-bit unchanged. When on
+    ! (with a slab ocean) the mixed-layer deficit forms ice, ice grows/melts from
+    ! the Semtner 0-layer surface balance, and the ice albedo feeds back into the
+    ! radiation. Optional overrides like the rad/topo/restart knobs below.
+    logical  :: l_seaice   = .FALSE.
+    real(wp) :: ice_albedo = 0.60_wp   ! surface albedo over ice [-]
+    real(wp) :: k_ice      = 2.0_wp    ! ice thermal conductivity [W m-1 K-1]
+    real(wp) :: t_frz      = 271.35_wp ! seawater freezing point [K]
     real(wp) :: rad_interval = 21600.0_wp   ! radiation recompute cadence [s]; default 6 h
     integer  :: rad_scheme = SCHEME_ECCKD   ! LW/SW scheme (2=ecCKD default, 1=SESAM)
     ! --- real surface topography (orography) --------------------------------
@@ -205,7 +214,12 @@ program rce_long
     ts%rad%scheme   = rad_scheme
     ts%ocn%mode     = ocean_mode
     ts%ocn%depth    = ocean_depth
-    call aeros_ocean_init(ts%ocn, grd)   ! recompute C for the chosen depth/mode
+    ts%ocn%l_seaice   = l_seaice
+    ts%ocn%ice_albedo = ice_albedo
+    ts%ocn%ocn_albedo = albedo        ! open-water albedo = the `albedo` knob (one source of truth)
+    ts%ocn%k_ice      = k_ice
+    ts%ocn%t_frz      = t_frz
+    call aeros_ocean_init(ts%ocn, grd)   ! recompute C, (re)allocate ice state
 
     ! Land surface (feat/land). Configure the land state from the namelist and
     ! init it (reads the land-sea mask and albedo maps when on). Then compose the
@@ -539,6 +553,16 @@ contains
         call nml_read(nmlfile, "rce", "cond_rh_crit", cond_rh_crit)
         call nml_read(nmlfile, "rce", "ocean_mode", ocean_mode)
         call nml_read(nmlfile, "rce", "ocean_depth", ocean_depth)
+        ! Sea-ice knobs (feat/seaice): optional (inherit input/rce_defaults.nml)
+        ! so existing rce_*.nml files that omit them keep the freeze-floor slab.
+        call nml_read(nmlfile, "rce", "l_seaice", l_seaice, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "ice_albedo", ice_albedo, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "k_ice", k_ice, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "t_frz", t_frz, &
+                      defaults_file="input/rce_defaults.nml")
         ! Optional overrides: a namelist that omits these inherits input/rce_defaults.nml
         ! (6 h / ecCKD) instead of erroring. Every other key above stays required.
         call nml_read(nmlfile, "rce", "rad_interval", rad_interval, &
