@@ -91,10 +91,10 @@ $(objdir)/aeros_correction.o: $(dyndir)/aeros_correction.f90 \
 							$(objdir)/aeros_tendency.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
-# M2.3: prognostic humidity, transported on the grid by a positive-definite
-# finite-volume scheme. Off the spectral core entirely -- it needs only the
-# vertical coordinate (to diagnose layer masses) and the grid geometry.
-$(objdir)/aeros_moisture.o: $(dyndir)/aeros_moisture.f90 \
+# M2.3: general positive-definite finite-volume tracer transport on the grid
+# (humidity, cloud fraction, ...). Off the spectral core entirely -- it needs
+# only the vertical coordinate (to diagnose layer masses) and the grid geometry.
+$(objdir)/aeros_transport.o: $(dyndir)/aeros_transport.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
@@ -106,7 +106,7 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_state.o $(objdir)/aeros_vertical.o \
 							$(objdir)/aeros_vordiv.o $(objdir)/aeros_tendency.o \
 							$(objdir)/aeros_semiimp.o $(objdir)/aeros_held_suarez.o \
-							$(objdir)/aeros_correction.o $(objdir)/aeros_moisture.o \
+							$(objdir)/aeros_correction.o $(objdir)/aeros_transport.o \
 							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o \
 							$(objdir)/aeros_convection.o $(objdir)/aeros_surface.o \
 							$(objdir)/aeros_radiation.o $(objdir)/aeros_cloud_prog.o \
@@ -265,7 +265,7 @@ aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_vordiv.o \
                  $(objdir)/aeros_tendency.o \
                  $(objdir)/aeros_correction.o \
-                 $(objdir)/aeros_moisture.o \
+                 $(objdir)/aeros_transport.o \
                  $(objdir)/aeros_semiimp.o
 
 aeros_physics =  $(objdir)/aeros_held_suarez.o \
