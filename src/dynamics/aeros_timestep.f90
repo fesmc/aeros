@@ -176,6 +176,12 @@ module aeros_timestep
     use aeros_ocean,      only : aeros_ocean_class, aeros_ocean_init, &
                                 aeros_ocean_load, aeros_ocean_end, &
                                 aeros_ocean_step, aeros_ocean_report
+    ! Land surface (feat/land): the second lower-boundary type. Composes the
+    ! skin temperature/beta the surface+radiation see and steps the soil.
+    use aeros_land,       only : aeros_land_class, aeros_land_init, &
+                                aeros_land_load, aeros_land_end, &
+                                aeros_land_pre, aeros_land_step, &
+                                aeros_land_couple_radiation, aeros_land_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
     use ncio,             only : nc_create, nc_write, nc_write_dim, &
@@ -256,6 +262,13 @@ module aeros_timestep
         ! layer builds a warm/moist inversion that convection turns into a
         ! grid-scale hot spot -- the M2 RCE instability (aeros_vdiff header).
         type(aeros_vdiff_class) :: vd
+
+        ! === land state (feat/land) ==========================================
+        ! Land surface as a second boundary type under the same flux seam as the
+        ! ocean: a land-sea mask, a bucket soil moisture and a slab soil
+        ! temperature (the land skin temperature). Disabled by default, so an
+        ! all-ocean run is bit-for-bit and its prognostics are never allocated.
+        type(aeros_land_class) :: land
 
         ! [ l(l+1) / lmax(lmax+1) ]^(ndiff/2), precomputed per degree. The
         ! step-dependent part is one multiply, so this never needs rebuilding.
@@ -425,6 +438,7 @@ contains
             call aeros_ocean_load(ts%ocn, filename, grd, defaults_file=defaults_file)
             call aeros_radiation_load(ts%rad, filename, grd, defaults_file=defaults_file)
             call aeros_vdiff_load(ts%vd, filename, grd, defaults_file=defaults_file)
+            call aeros_land_load(ts%land, filename, grd, defaults_file=defaults_file)   ! feat/land
         else
             call aeros_condensation_init(ts%cnd, grd, .FALSE.)
             call aeros_convection_init(ts%cnv, grd, .FALSE.)
@@ -432,6 +446,7 @@ contains
             call aeros_ocean_init(ts%ocn, grd)
             call aeros_radiation_init(ts%rad, grd, .FALSE.)
             call aeros_vdiff_init(ts%vd, grd, .FALSE.)
+            call aeros_land_init(ts%land, grd, .FALSE.)   ! feat/land
         end if
 
         allocate(ts%dratio(0:lmax))
@@ -537,6 +552,7 @@ contains
         call aeros_ocean_end(ts%ocn)
         call aeros_radiation_end(ts%rad)
         call aeros_vdiff_end(ts%vd)
+        call aeros_land_end(ts%land)   ! feat/land
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
         if (allocated(ts%sponge_kr_lev)) deallocate(ts%sponge_kr_lev)
@@ -627,15 +643,31 @@ contains
         ! with vdiff off reports 0 rather than the previous step's value.
         if (ts%wrk%diag) ts%wrk%dt_vdiff = 0.0_wp
 
+        ! Land (feat/land): compose the skin temperature and evaporation
+        ! efficiency the surface fluxes and radiation are driven against -- the
+        ! ocean SST/beta=1 over sea, the prognostic soil temperature and the
+        ! moisture-limited beta on land. A no-op when land is off, so the ocean
+        ! path below is bit-for-bit.
+        if (ts%land%enabled) call aeros_land_pre(ts%land, ts%ocn%sst)
+
         ! Surface turbulent fluxes, before convection: sensible heat warms the
         ! lowest layer (a forward increment to wrk%dt_phys) and evaporation
         ! moistens it (a forward increment to now%qv_g). This is the
         ! boundary-layer source that vertical diffusion then mixes up the column.
-        ! Off unless enabled.
-        if (ts%surf%enabled) &
-            call aeros_surface_apply(ts%surf, vg, ts%ocn%sst, ts%wrk%t_g, now%qv_g, &
-                                        ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
-                                        ts%wrk%dt_phys, ts%dt)
+        ! Off unless enabled. With land on, the fluxes see the composed skin
+        ! temperature and the beta evaporation efficiency; the ocean-only path is
+        ! the untouched call.
+        if (ts%surf%enabled) then
+            if (ts%land%enabled) then
+                call aeros_surface_apply(ts%surf, vg, ts%land%skin, ts%wrk%t_g, now%qv_g, &
+                                            ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
+                                            ts%wrk%dt_phys, ts%dt, evap_eff=ts%land%beta)
+            else
+                call aeros_surface_apply(ts%surf, vg, ts%ocn%sst, ts%wrk%t_g, now%qv_g, &
+                                            ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
+                                            ts%wrk%dt_phys, ts%dt)
+            end if
+        end if
         ! Diagnostic split: snapshot the CUMULATIVE dt_phys after each term (each
         ! only adds to it), differenced back into per-term increments after
         ! radiation. A disabled term leaves dt_phys unchanged, so its increment is
@@ -668,10 +700,20 @@ contains
         ! cooling is sharp and stiff). Uses the ocean's SST as the skin
         ! temperature (always allocated, even when the surface fluxes are off).
         ! Off unless enabled.
-        if (ts%rad%enabled) &
-            call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
-                                        ts%wrk%lnps_g, ts%ocn%sst, ts%nstep, &
-                                        ts%dt, ts%wrk%dt_phys)
+        ! With land on, radiation reads the same composed skin temperature (soil
+        ! temperature on land, SST over sea) and, through rad%alb_map, the land
+        ! albedo on land points. Ocean-only is the untouched SST/scalar-albedo call.
+        if (ts%rad%enabled) then
+            if (ts%land%enabled) then
+                call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
+                                            ts%wrk%lnps_g, ts%land%skin, ts%nstep, &
+                                            ts%dt, ts%wrk%dt_phys)
+            else
+                call aeros_radiation_apply(ts%rad, vg, grd, ts%wrk%t_g, now%qv_g, &
+                                            ts%wrk%lnps_g, ts%ocn%sst, ts%nstep, &
+                                            ts%dt, ts%wrk%dt_phys)
+            end if
+        end if
         if (ts%wrk%diag) ts%wrk%dt_rad = ts%wrk%dt_phys
         ! Difference the cumulative snapshots into per-term increments [K/step].
         ! Top-down so each subtraction still sees the earlier cumulative value;
@@ -690,6 +732,16 @@ contains
         ! A no-op in prescribed mode (guarded inside).
         call aeros_ocean_step(ts%ocn, ts%rad%sw_net_sur, ts%rad%lw_dw_sur, &
                                 ts%surf%shf, ts%surf%lhf, ts%dt)
+
+        ! Land (feat/land): step the soil temperature and the bucket soil
+        ! moisture from the fluxes just computed, over land points -- the soil
+        ! analogue of the slab-ocean update above. Precipitation reaching the
+        ! ground is the convective plus large-scale condensate. Guarded so the
+        ! ocean run neither steps the soil nor forms the precip-sum temporary.
+        if (ts%land%enabled) &
+            call aeros_land_step(ts%land, ts%rad%sw_net_sur, ts%rad%lw_dw_sur, &
+                                    ts%surf%shf, ts%surf%lhf, ts%surf%evap, &
+                                    ts%cnv%precip + ts%cnd%precip, ts%dt)
 
         call aeros_tendency_spectral(pool, vg, ts%wrk, ts%tnd)
 
@@ -990,7 +1042,7 @@ contains
         real(wp),                   intent(in) :: time
         character(len=*),           intent(in) :: filename
 
-        integer :: nlm, nlev, nlon, nlat, rad_present
+        integer :: nlm, nlev, nlon, nlat, rad_present, land_present
 
         nlm  = now%spec%nlm
         nlev = now%spec%nlev
@@ -998,6 +1050,8 @@ contains
         nlat = ts%ocn%nlat
         rad_present = 0
         if (allocated(ts%rad%heat)) rad_present = 1
+        land_present = 0
+        if (ts%land%enabled .and. allocated(ts%land%w)) land_present = 1   ! feat/land
 
         call nc_create(filename)
 
@@ -1015,6 +1069,7 @@ contains
         call nc_write_attr(filename,"nstep",            ts%nstep)
         call nc_write_attr(filename,"ocn_mode",         ts%ocn%mode)
         call nc_write_attr(filename,"rad_heat_present", rad_present)
+        call nc_write_attr(filename,"land_present",     land_present)   ! feat/land
         call nc_write_attr(filename,"time",             real(time,dp))
         call nc_write_attr(filename,"mass_target",      ts%mass_target)
         call nc_write_attr(filename,"lnr_cum",          ts%lnr_cum)
@@ -1053,6 +1108,19 @@ contains
                         dim1="lon",dim2="lat",units="W m-2")
         call nc_write(filename,"rad_sw_up_toa",  ts%rad%sw_up_toa, &
                         dim1="lon",dim2="lat",units="W m-2")
+
+        ! === land state (feat/land) ==========================================
+        ! The two land prognostics -- bucket soil moisture and slab soil
+        ! temperature -- are new state with no spectral counterpart; a restart
+        ! must carry them or a resumed land run diverges silently. Written only
+        ! when land is on; the mask and albedo maps are static and rebuilt from
+        ! file on init, so they are not saved.
+        if (land_present == 1) then
+            call nc_write(filename,"land_w", ts%land%w, dim1="lon",dim2="lat", &
+                            units="m", long_name="bucket soil moisture")
+            call nc_write(filename,"land_t_soil", ts%land%t_soil, dim1="lon",dim2="lat", &
+                            units="K", long_name="slab soil temperature")
+        end if
 
         return
 
@@ -1100,7 +1168,7 @@ contains
         real(wp),                   intent(out)   :: time
         character(len=*),           intent(in)    :: filename
 
-        integer  :: nlm, nlev, nlon, nlat, rad_present
+        integer  :: nlm, nlev, nlon, nlat, rad_present, land_present
         integer  :: nlm_f, nlev_f, nlon_f, nlat_f
         real(dp) :: time_f
 
@@ -1157,6 +1225,21 @@ contains
         call nc_read(filename,"rad_sw_dw_sur",  ts%rad%sw_dw_sur)
         call nc_read(filename,"rad_olr",        ts%rad%olr)
         call nc_read(filename,"rad_sw_up_toa",  ts%rad%sw_up_toa)
+
+        ! === land state (feat/land) ==========================================
+        ! Restore the two land prognostics. The caller must already have built
+        ! ts%land the same way (same namelist/files) so the mask, albedo and the
+        ! arrays are allocated; this only overwrites the prognostic values.
+        call nc_read_attr(filename,"land_present", land_present)
+        if (land_present == 1) then
+            if (.not. allocated(ts%land%w)) then
+                write(io_unit_err,*) "aeros_timestep_read_restart:: error: restart has land "// &
+                                        "state but ts%land is not allocated (land disabled?)."
+                error stop 1
+            end if
+            call nc_read(filename,"land_w",      ts%land%w)
+            call nc_read(filename,"land_t_soil", ts%land%t_soil)
+        end if
 
         return
 
