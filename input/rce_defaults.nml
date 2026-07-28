@@ -12,4 +12,11 @@
     restart_in       = ""
     restart_out      = ""
     restart_interval = 0
+    ! Sea ice off = freeze-floor slab, the bit-for-bit default. When on (needs a
+    ! slab ocean, ocean_mode = 1) the mixed-layer deficit forms ice instead of
+    ! being clamped, and the ice albedo feeds back into the radiation.
+    l_seaice         = .false.
+    ice_albedo       = 0.60
+    k_ice            = 2.0
+    t_frz            = 271.35
 /

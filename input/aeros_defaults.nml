@@ -241,6 +241,17 @@
     freeze_floor = .TRUE.
     sst_eq       = 27.0
     sst_lat      = 60.0
+    ! Thermodynamic sea ice (opt-in). l_seaice on REPLACES the freeze floor with a
+    ! Semtner 0-layer ice model (needs a slab, mode=1): the mixed-layer deficit
+    ! forms ice, ice grows/melts from the surface balance, and the surface albedo
+    ! rises to ice_albedo where ice is present (the high-latitude feedback). k_ice
+    ! is the ice conductivity, t_frz the seawater freezing point, ocn_albedo the
+    ! open-water albedo. Off by default -> exact freeze-floor behaviour.
+    l_seaice     = .FALSE.
+    ice_albedo   = 0.60
+    ocn_albedo   = 0.06
+    k_ice        = 2.0
+    t_frz        = 271.35
 /
 
 &radiation
