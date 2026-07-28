@@ -25,12 +25,16 @@
     ! RH->cover scheme, bit-for-bit unchanged. When on, radiation consumes the
     ! Sundqvist prognostic cf instead. rhc_* is the critical-RH profile (higher
     ! aloft than at the surface); tau_form/tau_evap are the formation/evaporation
-    ! timescales [s]; c_detr weights the convective detrainment source.
+    ! timescales [s]; c_detr weights the convective detrainment source. The knobs
+    ! are calibrated (m2_results) to a realistic ~0.55 aquaplanet cloud cover; the
+    ! several-hour timescales let cf transport de-patchify the field, which keeps
+    ! the coupled land+cloud run stable (a 1 h timescale leaves it patchy enough
+    ! to spin up a runaway near-equatorial jet).
     l_cloud_prog     = .false.
-    cloud_rhc_sfc    = 0.70
-    cloud_rhc_top    = 0.90
-    cloud_tau_form   = 3600.0
-    cloud_tau_evap   = 3600.0
+    cloud_rhc_sfc    = 0.40
+    cloud_rhc_top    = 0.60
+    cloud_tau_form   = 10800.0
+    cloud_tau_evap   = 10800.0
     cloud_c_detr     = 0.5
     ! Sea ice off = freeze-floor slab, the bit-for-bit default. When on (needs a
     ! slab ocean, ocean_mode = 1) the mixed-layer deficit forms ice instead of
