@@ -40,3 +40,6 @@ maps/
 shtns_cfg
 shtns_cfg_fftw
 insol
+
+# Claude Code worktrees / local session data
+.claude/
