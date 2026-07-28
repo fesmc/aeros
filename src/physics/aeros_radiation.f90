@@ -213,6 +213,11 @@ module aeros_radiation
         ! Insolation / shortwave.
         real(wp) :: tsi      = S0            ! total solar irradiance [W m-2]
         real(wp) :: albedo   = 0.06_wp       ! surface broadband albedo (ocean)
+        ! Optional per-cell surface albedo (nlon,nlat). When allocated it overrides
+        ! the scalar `albedo` in the column transfer -- the seam the sea-ice albedo
+        ! feedback drives (aeros_ocean fills it via ocn%alb). Unallocated => the
+        ! scalar `albedo` is used everywhere (bit-for-bit unchanged).
+        real(wp), allocatable :: alb_sfc(:,:)
         logical  :: seasonal = .FALSE.       ! .FALSE. = annual-mean insolation
         real(wp) :: doy0     = 0.0_wp        ! start day-of-year (seasonal mode)
         real(dp) :: time_bp  = 0.0_dp        ! orbital year before present (Laskar); 0 = present-day
@@ -356,6 +361,7 @@ contains
         if (allocated(rad%sw_dw_sur)) deallocate(rad%sw_dw_sur)
         if (allocated(rad%sw_net_sur)) deallocate(rad%sw_net_sur)
         if (allocated(rad%sw_up_toa)) deallocate(rad%sw_up_toa)
+        if (allocated(rad%alb_sfc))   deallocate(rad%alb_sfc)
         call aeros_insol_end(rad%ins)
         rad%enabled = .FALSE.
         rad%nlon = 0; rad%nlat = 0
@@ -1056,7 +1062,7 @@ contains
         real(wp) :: o3col(vg%nlev)
         real(wp) :: cf(vg%nlev), clwc(vg%nlev), ciwc(vg%nlev)
         real(wp) :: fnet(0:vg%nlev), heat_lw(vg%nlev), heat_sw(vg%nlev)
-        real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net, doy, cz, sw
+        real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net, doy, cz, sw, alb_ij
         integer  :: i, j, k, nlev, nrad
 
         if (.not. rad%enabled) return
@@ -1081,11 +1087,17 @@ contains
             end if
 
             !$omp parallel do collapse(2) schedule(static) &
-            !$omp   private(i,j,phalf,pfull,dpc,phi_full,phi_half,z_half,o3col, &
+            !$omp   private(i,j,phalf,pfull,dpc,phi_full,phi_half,z_half,o3col,alb_ij, &
             !$omp           cf,clwc,ciwc,fnet,heat_lw,heat_sw,olr,fdw_lw,sw_up,sw_dw,sw_net)
             do j = 1, rad%nlat
                 do i = 1, rad%nlon
                     call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
+
+                    ! Per-cell surface albedo when a field is supplied (sea-ice
+                    ! feedback), otherwise the scalar albedo. Same value for the
+                    ! visible and near-IR bands (broadband albedo).
+                    alb_ij = rad%albedo
+                    if (allocated(rad%alb_sfc)) alb_ij = rad%alb_sfc(i,j)
 
                     if (rad%l_o3) then
                         call aeros_ozone_profile(pfull, o3col)
@@ -1110,15 +1122,15 @@ contains
                                 qv_g(i,j,:), o3col, dpc, z_half, t_s(i,j), rad%q_co2, &
                                 rad%l_o3, cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw)
                             call aeros_ecckd_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
-                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
-                                rad%albedo, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
+                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb_ij, &
+                                alb_ij, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
                         else
                             call aeros_lw_cloudy_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
                                 o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
                                 cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw)
                             call aeros_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
-                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
-                                rad%albedo, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
+                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb_ij, &
+                                alb_ij, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
                         end if
                     else
                         ! Clear-sky longwave: dispatch on the scheme selector.
@@ -1131,14 +1143,14 @@ contains
                                 rad%q_co2, rad%l_o3, fnet, heat_lw, olr, fdw_lw)
                             call aeros_ecckd_sw_clearsky_column(nlev, qv_g(i,j,:), &
                                 o3col, rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), &
-                                rad%albedo, rad%albedo, heat_sw, sw_up, sw_dw, sw_net)
+                                alb_ij, alb_ij, heat_sw, sw_up, sw_dw, sw_net)
                         else
                             call aeros_lw_clearsky_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
                                 o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
                                 fnet, heat_lw, olr, fdw_lw)
                             call aeros_sw_clearsky_column(nlev, qv_g(i,j,:), o3col, &
-                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
-                                rad%albedo, heat_sw, sw_up, sw_dw, sw_net)
+                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb_ij, &
+                                alb_ij, heat_sw, sw_up, sw_dw, sw_net)
                         end if
                     end if
 
