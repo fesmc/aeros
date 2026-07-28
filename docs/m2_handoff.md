@@ -1,44 +1,60 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION: re-validate the coupled RCE on ecCKD (now the default)
+## ►► NEXT SESSION: topography — the first real boundary-condition forcing
 
-**ecCKD correlated-k radiation is now the production default** (§28; `scheme`
-default flipped SESAM→ecCKD, SESAM kept as `scheme=1` fallback). Every earlier
-coupled-RCE result and tuning below — the humidity/`cond_rh_crit` fix (§22–23), the
-moist-line validation (§24), the jet/thermal-wind diagnosis (§25–26) — was done
-under **SESAM**. They need a re-validation pass under ecCKD, because the radiation
-that sets the coupled equilibrium has changed. This is the one deliberate
-consequence of the default switch (bit-reproducibility of pre-ecCKD numbers is
-broken by design).
+The ecCKD revalidation and the radiation-cost fix are **done** (§29, on `main`,
+pushed). Short version: ecCKD is the fast default, the coupled RCE needed **no
+re-tune** (`cond_rh_crit=0.93` still best, TOA net +5.6 W/m², clear-sky OLR −5.1
+with no `LW_VAP_OPAC`), and radiation is now **~6× faster / bit-exact** (the
+per-column k-table was cached; cadence 3 h→6 h). **~1656 model-yr/day** at T21L12
+on 10 cores — a multi-decade coupled run is minutes.
 
-**First data point (already taken):** the balanced rotating vehicle
-(`logs/rce_revalidate.nml` = rot, `cond_rh_crit=0.93`, clouds on, 100 d) runs
-**NaN-free under ecCKD** with **TOA net +5.6 W/m²** (was +8 under SESAM, §23) —
-stable, and the balance is slightly *tighter*. So no re-tune is obviously forced;
-the job is to confirm/refine, not rebuild.
+**The model is a validated aquaplanet with no Earth forcing.** Every ERA5
+mismatch that remains (near-saturated RH, weak jet, and the slab-ocean cloud
+runaway below) traces to **missing boundary conditions**, not to the column
+physics or radiation. So stop tuning against ERA5 and start adding the forcings —
+in leverage order.
 
-**Checklist (in order):**
-1. **Coupled TOA + cover sweep under ecCKD.** Is `cond_rh_crit=0.93` still the
-   best joint cover/TOA point, or does ecCKD's more accurate OLR shift it? Re-check
-   cover vs ERA5 0.63 (`rce_long` dump + `scripts/rce_humidity_vs_era5.jl`).
-2. **Moist-line re-validation** (`scripts/rce_validate_era5.jl`, T/u/RH vs ERA5,
-   §24). Watch the **upper-troposphere warm bias** (+12 K at 198 hPa under SESAM):
-   ecCKD's better LW aloft may change it. Jet weakness (§25–26) is a dynamics
-   limit, not radiation — expect it unchanged.
-3. **Humidity comparison** (§22–23) under ecCKD — is the RH/cover story the same?
-4. **Longer run** (200+ d) NaN-free, and a **slab-ocean** equilibrium under ecCKD
-   (SST responds to the new radiation — the balance may re-settle).
-5. Confirm the **clear-sky OLR bias is structurally gone** (ecCKD −5.1, no
-   `LW_VAP_OPAC`) end-to-end in the coupled run, not just offline (§14/§20).
+**Do topography first.** Highest leverage, and the hook already exists:
+`aeros_timestep_set_phis(ts, phis2)` is called in `drivers/rce_long.f90` but fed
+**zeros** (`phis2 = 0.0`). Feeding a real surface-geopotential field unlocks
+stationary waves, orographic precip, and regional structure — the first thing that
+makes zonal-mean comparisons to ERA5 fair.
+- Read an orography field (ERA5 `z`/geopotential at the surface, on the same
+  144×73 grid as the Tier-1/2 data) → `phis2`.
+- Balance the initial state to the topography (avoid a spin-up shock); check the
+  run stays NaN-free and mass/energy close.
+- For paleo (the insol/Laskar orbital path, §27), this is also where LGM ice-sheet
+  topography enters.
 
-**Tools/gotchas:** `rce_long` now runs ecCKD by default (no scheme knob — it uses
-the class default); for an A/B, SESAM is still `scheme=1` in a namelist. `make
-validate_era5 ... ecckd` selects ecCKD offline (check its default arg — it may
-still default to `sesam` to preserve §14). The worktrees need the **`insol`
-symlink** (→ `~/models/insol`, gitignored like `fesm-utils`) and, in the
-*generated* `Makefile`, `$(INC_INSOL)` in `INCFLAGS` plus the `probe-insol` /
-`ecckd` targets — regenerate via `configme` from the updated `config/` templates,
-or copy the patched `Makefile` in.
+**Then, in order:** land surface + land–sea mask (the real build — soil
+moisture/temp, land albedo/roughness, evapotranspiration; this is what creates
+monsoons and the subtropical dry zones) → **seasonal cycle *on*** in coupled runs
+(infrastructure exists, §27/M3a; RCE currently runs annual-mean) → resolution
+bump + eddy deficit (T21 jet ~25% of ERA5; §25–26 showed T42 alone didn't fix it)
+→ gravity-wave drag → cloud/sea-ice/aerosol/ozone refinement.
+
+**Two gaps are now on the critical path (not deferrable), exposed by §29 item 4.**
+The 5-yr slab-ocean run does **not** reach a physical equilibrium: free SST warms
+the tropics, and the **near-saturated moist bias makes cloud cover run away
+0.66→0.86** (SW over-reflection → TOA net −13.5 W/m²), while the **freeze-floor
+slab (no sea ice)** blocks high-latitude closure. So:
+- **A real cloud-fraction scheme** (prognostic, not the diagnostic RH→cover that
+  saturates) is needed before any slab/coupled climate is trustworthy.
+- **Sea-ice thermodynamics + albedo** (replacing the freeze-floor clamp).
+These were "Tier-3 refinements"; the slab run promotes them.
+
+**Tools/gotchas (still current):** `rce_long` runs ecCKD by default; cadence and
+scheme are now namelist-optional (`rad_interval`, `rad_scheme`) defaulting to
+6 h/ecCKD via `input/rce_defaults.nml` (a keyless namelist inherits them, doesn't
+error). For a SESAM A/B set `rad_scheme = 1`. `validate_era5 ... ecckd` selects
+ecCKD offline (arg 3 defaults to `sesam`). Worktrees need the **`insol`** and
+**`fesm-utils`** symlinks (→ `~/models/`, gitignored) and a copy of the generated
+`Makefile` — and **parallel worktree agents must not use `git stash`** (the stash
+stack is global across worktrees and collides; build a separate baseline binary
+instead). Always **build + run the merged tree yourself** after integrating agent
+branches — a clean auto-merge can still be semantically broken or a silent
+perf regression (both happened in §29).
 
 ---
 
