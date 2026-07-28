@@ -224,8 +224,13 @@ ecckd : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_ecckd.x is ready."
 
+restart : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_restart.x $(testdir)/test_restart.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_restart.x is ready."
+
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart
 
 # Driver executables
 drivers : run bench held-suarez
