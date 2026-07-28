@@ -2,12 +2,14 @@ module aeros_condensation
     ! Large-scale (stratiform) condensation: the first moist physics.
     !
     ! Where the air is supersaturated, the excess vapour condenses, the latent
-    ! heat warms the air, and the condensate falls out as precipitation. That is
-    ! the whole of it at M2.3b -- no cloud water is stored, nothing re-evaporates,
-    ! there is no convection (the next commit) and no ice phase (condensate is
-    ! liquid, latent heat L_v, everywhere). It is the minimum that closes a moist
-    ! energy and water budget, and it is built to be exactly that budget rather
-    ! than more.
+    ! heat warms the air, and the condensate falls out as precipitation. No cloud
+    ! water is stored and there is no ice phase (condensate is liquid, latent heat
+    ! L_v, everywhere). Condensation removes vapour down to rh_crit*q_sat (default
+    ! 0.95, not full saturation), and the falling precipitation RE-EVAPORATES into
+    ! sub-saturated layers below (moistening + latent cooling) before what remains
+    ! reaches the surface -- both following SpeedyWeather's ImplicitCondensation,
+    ! and both drying sinks the column would otherwise lack (see the rh_crit and
+    ! reevap notes below).
     !
     ! === The two seams it has to touch ======================================
     !
@@ -77,11 +79,21 @@ module aeros_condensation
 
         logical :: enabled = .FALSE.
 
-        ! Critical relative humidity for condensation. 1.0 is true saturation
-        ! adjustment; a lower value (large-scale condensation before gridbox-mean
-        ! saturation, standing in for sub-grid variability) is left as a knob but
-        ! defaults to 1.0 -- the honest, parameter-free choice for a first cut.
-        real(wp) :: rh_crit = 1.0_wp
+        ! Critical relative humidity for condensation: condensation removes vapour
+        ! down to rh_crit*q_sat, not full saturation, standing in for the saturated
+        ! fraction of a partly-cloudy gridbox. Default 0.95 (SpeedyWeather's
+        ! ImplicitCondensation threshold); 1.0 recovers exact saturation
+        ! adjustment. Pinning the grid mean at 100% (rh_crit=1) is a major cause of
+        ! the overcast moist bias, so the sub-saturating default is deliberate.
+        real(wp) :: rh_crit = 0.95_wp
+
+        ! Reevaporation efficiency [1/(kg/kg)] of falling precipitation into
+        ! sub-saturated layers below (SpeedyWeather's `reevaporation`): the
+        ! fraction of the falling flux evaporated in a layer is
+        ! min(reevap*(q_sat - q), 1), moistening the layer toward rh_crit*q_sat and
+        ! cooling it by the latent heat. 0 disables it (all condensate falls
+        ! straight to the surface).
+        real(wp) :: reevap = 30.0_wp
 
         integer :: nlon = 0, nlat = 0
 
@@ -112,7 +124,8 @@ contains
         call aeros_condensation_end(cnd)
 
         cnd%enabled = enabled
-        cnd%rh_crit = 1.0_wp
+        cnd%rh_crit = 0.95_wp
+        cnd%reevap  = 30.0_wp
         cnd%nlon    = grd%nlon
         cnd%nlat    = grd%nlat
 
@@ -134,12 +147,14 @@ contains
         type(aeros_grid_class), intent(in)    :: grd
 
         logical  :: moist
-        real(wp) :: rh_crit
+        real(wp) :: rh_crit, reevap
 
         moist   = .FALSE.
-        rh_crit = 1.0_wp
+        rh_crit = 0.95_wp
+        reevap  = 30.0_wp
         call nml_read(filename, "aeros_moisture", "moist",   moist, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "rh_crit", rh_crit, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "reevap",  reevap, defaults_file=defaults_file)
 
         call aeros_condensation_init(cnd, grd, moist)
 
@@ -148,7 +163,12 @@ contains
                                     rh_crit
             error stop 1
         end if
+        if (reevap < 0.0_wp) then
+            write(io_unit_err,*) "aeros_condensation_load:: error: reevap must be >= 0, got ", reevap
+            error stop 1
+        end if
         cnd%rh_crit = rh_crit
+        cnd%reevap  = reevap
 
         return
 
@@ -189,7 +209,7 @@ contains
         real(wp), intent(in)    :: dt             ! [s]
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
-        real(wp) :: qs, dqsdt, gam, dqc, pcol, hcp
+        real(wp) :: qs, dqsdt, gam, dqc, pfall, hcp, qthr, frac, dqe
         integer  :: i, j, k, it
 
         if (.not. cnd%enabled) return
@@ -197,20 +217,46 @@ contains
         hcp = real(L_v, wp)/real(cp_d, wp)
 
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,k,it,phalf,pfull,dpc,qs,dqsdt,gam,dqc,pcol)
+        !$omp   private(i,j,k,it,phalf,pfull,dpc,qs,dqsdt,gam,dqc,pfall,qthr,frac,dqe)
         do j = 1, cnd%nlat
             do i = 1, cnd%nlon
                 call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
-                pcol = 0.0_wp
+
+                ! Sweep top-to-bottom carrying the falling precipitation flux
+                ! pfall [kg kg-1 Pa] (= g x mass/area): each layer first
+                ! reevaporates some of the rain falling from above, then condenses
+                ! its own supersaturation into it.
+                pfall = 0.0_wp
 
                 do k = 1, vg%nlev
+                    call aeros_qsat(t_g(i,j,k), pfull(k), qs, dqsdt)
+                    qthr = cnd%rh_crit*qs
+
+                    ! Reevaporation: rain falling into a layer below the
+                    ! condensation threshold evaporates, moistening it toward the
+                    ! threshold and cooling it by the latent heat. The evaporated
+                    ! fraction of the falling flux scales with the dryness
+                    ! (SpeedyWeather's min(reevap*(q_sat - q), 1)), capped so it
+                    ! never overshoots the threshold (which would just re-condense).
+                    if (pfall > 0.0_wp .and. cnd%reevap > 0.0_wp .and. &
+                        qv_g(i,j,k) < qthr) then
+                        frac = min(cnd%reevap*(qs - qv_g(i,j,k)), 1.0_wp)
+                        dqe  = frac*pfall/dpc(k)                 ! [kg kg-1]
+                        dqe  = min(dqe, qthr - qv_g(i,j,k))
+                        if (dqe > 0.0_wp) then
+                            qv_g(i,j,k)    = qv_g(i,j,k) + dqe
+                            dt_phys(i,j,k) = dt_phys(i,j,k) - hcp*dqe  ! latent cooling
+                            pfall          = pfall - dqe*dpc(k)
+                        end if
+                    end if
+
                     ! Newton iterations of the saturation adjustment, each
                     ! against the temperature the accumulated heating implies.
                     ! Three, not two: per step the supersaturation is tiny
                     ! (radiative/adiabatic cooling is a fraction of a kelvin) and
                     ! one iteration would do, but the extra pair is cheap
                     ! insurance for the larger excursions of a spin-up, where the
-                    ! quadratic convergence still lands it at saturation.
+                    ! quadratic convergence still lands it at the threshold.
                     dqc = 0.0_wp
                     do it = 1, 3
                         call aeros_qsat(t_g(i,j,k) + hcp*dqc, pfull(k), qs, dqsdt)
@@ -224,13 +270,13 @@ contains
                     if (dqc > 0.0_wp) then
                         qv_g(i,j,k)    = qv_g(i,j,k) - dqc
                         dt_phys(i,j,k) = dt_phys(i,j,k) + hcp*dqc   ! [K] increment
-                        pcol           = pcol + dqc*dpc(k)
+                        pfall          = pfall + dqc*dpc(k)
                     end if
                 end do
 
-                ! Column condensate falls out immediately: mass per area per
-                ! time. dp/g is the layer mass per area.
-                cnd%precip(i,j) = pcol/(real(grav, wp)*dt)
+                ! Whatever rain survives to the surface is the precipitation:
+                ! mass per area per time. dp/g is the layer mass per area.
+                cnd%precip(i,j) = pfall/(real(grav, wp)*dt)
             end do
         end do
         !$omp end parallel do
@@ -293,6 +339,7 @@ contains
         if (cnd%enabled) then
             write(iou,"(a)")        "   large-scale condensation    ON"
             write(iou,"(a,f9.3)")   "   critical relative humidity ", cnd%rh_crit
+            write(iou,"(a,f9.3)")   "   reevaporation efficiency   ", cnd%reevap
         else
             write(iou,"(a)")        "   large-scale condensation    off (dry)"
         end if

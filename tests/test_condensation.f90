@@ -73,6 +73,7 @@ program test_condensation
     call test_qsat(nfail)
     call test_subsaturated_untouched(nfail)
     call test_budgets(nfail)
+    call test_reevaporation(nfail)
 
     call aeros_condensation_end(cnd)
     call aeros_vgrid_end(vg)
@@ -205,10 +206,10 @@ contains
                                 abs(real(cp_d,wp)*dt_phys(i,j,k) - real(L_v,wp)*dqc) &
                                     /(real(L_v,wp)*dqc))
 
-                    ! saturation: where it condensed, q sits at q_sat(T + heating)
+                    ! saturation: where it condensed, q sits at rh_crit*q_sat(T + heating)
                     if (dqc > 0.0_wp) then
                         call aeros_qsat(t_g(i,j,k) + hcp*dqc, pfull(k), qs, dqsdt)
-                        resid = abs(qv(i,j,k) - qs)
+                        resid = abs(qv(i,j,k) - cnd%rh_crit*qs)
                         worst_sat = max(worst_sat, resid)
                     end if
                 end do
@@ -236,7 +237,7 @@ contains
         call check(worst_en < 1.0e-13_wp, &
                     "heating equals L times the vapour condensed, per cell", nfail)
         call check(worst_sat < 1.0e-6_wp, &
-                    "condensing cells are brought to saturation", nfail)
+                    "condensing cells are brought to rh_crit * q_sat", nfail)
         call check(abs(water_removed - precip_water)/water_removed < 1.0e-12_dp, &
                     "the vapour removed equals the precipitation", nfail)
         call check(minval(qv) >= 0.0_wp, "q never goes negative", nfail)
@@ -246,6 +247,78 @@ contains
         call check(colw > 0.0_dp, "and something did condense (the test is not vacuous)", nfail)
         return
     end subroutine test_budgets
+
+    ! === 6. Reevaporation of falling precip ==================================
+
+    subroutine test_reevaporation(nfail)
+        ! Rain condensed aloft falls into dry layers below and reevaporates:
+        ! it moistens them, reduces the surface precip, and closes the column
+        ! water and energy budgets exactly (the evaporated water leaves the flux
+        ! and enters the vapour; its latent heat cools the air).
+        implicit none
+        integer, intent(inout) :: nfail
+        real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev)
+        real(wp) :: qs, dqsdt, w0, w1, precip_m, en_heat, dry0, dry1
+        real(wp) :: precip_off, precip_on
+        integer  :: k
+
+        write(*,*) ""
+        write(*,*) " -- reevaporation: rain moistens dry layers below and conserves"
+
+        call aeros_vgrid_pressure(vg, real(p0,wp), phalf, pfull, dpc)
+        call set_temperature(t_g)
+
+        ! supersaturate the top third (the rain source); dry the layers below it
+        ! (the reevaporation sink)
+        do k = 1, nlev
+            call aeros_qsat(t_g(1,1,k), pfull(k), qs, dqsdt)
+            if (k <= nlev/3) then
+                qv(:,:,k) = 1.6_wp*qs
+            else
+                qv(:,:,k) = 0.2_wp*qs
+            end if
+        end do
+        qv0  = qv
+        dry0 = qv0(1,1,nlev)
+
+        ! baseline: reevaporation off -> all condensate reaches the surface
+        cnd%reevap = 0.0_wp
+        dt_phys = 0.0_wp; qv = qv0
+        call aeros_condensation_apply(cnd, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
+        precip_off = cnd%precip(1,1)
+
+        ! reevaporation on
+        cnd%reevap = 30.0_wp
+        dt_phys = 0.0_wp; qv = qv0
+        call aeros_condensation_apply(cnd, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
+        precip_on = cnd%precip(1,1)
+        dry1 = qv(1,1,nlev)
+
+        ! column water and energy budgets (reevaporation on)
+        w0 = 0.0_wp; w1 = 0.0_wp; en_heat = 0.0_wp
+        do k = 1, nlev
+            w0 = w0 + qv0(1,1,k)*dpc(k)/real(grav,wp)
+            w1 = w1 + qv(1,1,k)*dpc(k)/real(grav,wp)
+            en_heat = en_heat + real(cp_d,wp)*dt_phys(1,1,k)*dpc(k)/real(grav,wp)
+        end do
+        precip_m = precip_on*1800.0_wp    ! kg m-2 over the step
+
+        write(*,"(a40,es12.3,a)") "   precip, reevap off             ", precip_off*86400.0_wp, " mm/day"
+        write(*,"(a40,es12.3,a)") "   precip, reevap on              ", precip_on*86400.0_wp, " mm/day"
+        write(*,"(a40,es12.3)")   "   dry lowest layer, dq (moisten) ", dry1 - dry0
+        write(*,"(a40,es12.3)")   "   |water in - (vapour+precip)|/in", abs(w0 - (w1 + precip_m))/w0
+        write(*,"(a40,es12.3)")   "   |heating - L*precip|/(L*precip)", &
+                                    abs(en_heat - real(L_v,wp)*precip_m)/abs(real(L_v,wp)*precip_m)
+
+        call check(abs(w0 - (w1 + precip_m))/w0 < 1.0e-12_wp, &
+                    "column water conserved (vapour + surface precip)", nfail)
+        call check(dry1 > dry0, "reevaporation moistens a dry layer below the rain", nfail)
+        call check(precip_on < precip_off, "reevaporation reduces the surface precip", nfail)
+        call check(abs(en_heat - real(L_v,wp)*precip_m)/abs(real(L_v,wp)*precip_m) < 1.0e-12_wp, &
+                    "net latent heating equals L * surface precip", nfail)
+        call check(minval(qv) >= 0.0_wp, "q stays non-negative", nfail)
+        return
+    end subroutine test_reevaporation
 
     subroutine check(ok, label, nfail)
         implicit none

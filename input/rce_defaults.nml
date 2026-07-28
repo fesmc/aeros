@@ -9,6 +9,20 @@
     l_topography     = .false.
     topo_file        = "/Users/alrobi001/data/era5/era5_orography.nc"
     topo_ramp_days   = 20.0
+    ! Convection scheme. "sbm" (default) = Simplified Betts-Miller with the
+    ! strictly-buoyant band; "sbm_frierson" = the same closure with Frierson's
+    ! surface-to-LZB depth + integrated Pt/Pq trigger (stays active at RCE, dries
+    ! the free troposphere); "manabe" = the reference pairwise scheme.
+    conv_scheme      = "sbm_frierson"
+    ! Boundary-layer vertical diffusion. richardson = .true. diagnoses the mixed-
+    ! layer depth from the bulk Richardson number (Frierson 2006 / SpeedyWeather);
+    ! .false. uses the legacy fixed vdiff_sigma depth. Both diffuse dry static
+    ! energy. ri_crit is the critical bulk Richardson number.
+    vdiff_richardson = .true.
+    vdiff_ri_crit    = 10.0
+    ! Reevaporation efficiency of falling large-scale precip into sub-saturated
+    ! layers (SpeedyWeather's ImplicitCondensation reevaporation; 0 disables it).
+    cond_reevap      = 30.0
     ! Land surface + land-sea mask (feat/land). l_land off = all-ocean
     ! aquaplanet, the bit-for-bit default. Files are ERA5 climatologies.
     l_land           = .false.

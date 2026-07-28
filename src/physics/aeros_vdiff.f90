@@ -61,7 +61,7 @@ module aeros_vdiff
     ! next to the horizontal diffusion and the sponge, all three implicit on the
     ! same state. Humidity is a gridpoint field and is diffused in place directly.
 
-    use aeros_defs,     only : dp, wp, io_unit_err, R_d, grav, aeros_grid_class
+    use aeros_defs,     only : dp, wp, io_unit_err, R_d, cp_d, grav, aeros_grid_class
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure, &
                                aeros_hydrostatic
     use nml,            only : nml_read
@@ -75,8 +75,27 @@ module aeros_vdiff
 
         integer :: nlon = 0, nlat = 0
 
+        ! Boundary-layer scheme. .TRUE. (default) = the Richardson-number
+        ! diagnosed depth of Frierson (2006) -- the mixed layer is the contiguous
+        ! stack of layers up from the surface whose bulk Richardson number is
+        ! below `ri_crit`, and K follows the Frierson K-profile that vanishes at
+        ! the diagnosed top (this is SpeedyWeather's BulkRichardsonDiffusion).
+        ! .FALSE. = the legacy fixed-depth scheme: a single K0 tapered linearly in
+        ! sigma to zero at `sigma`. Retained so the value of the diagnosis can be
+        ! measured against a fixed depth. BOTH diffuse dry static energy
+        ! s = cp T + Phi (not T), so the mixing relaxes toward the dry adiabat
+        ! (neutral), never toward isothermal (spuriously stable).
+        logical  :: richardson = .TRUE.
+
+        ! Fixed-depth knobs (used only when richardson = .FALSE.).
         real(wp) :: k0    = 10.0_wp     ! eddy diffusivity [m2 s-1]
         real(wp) :: sigma = 0.7_wp      ! boundary-layer top [sigma]; K=0 above
+
+        ! Richardson-scheme knobs (Frierson 2006 eq. 12-20; SpeedyWeather defaults).
+        real(wp) :: ri_crit    = 10.0_wp     ! critical bulk Richardson number
+        real(wp) :: z0         = 3.21e-5_wp  ! roughness length [m]
+        real(wp) :: von_karman = 0.4_wp      ! von Karman constant
+        real(wp) :: surf_frac  = 0.1_wp      ! surface-layer fraction f_b
     end type aeros_vdiff_class
 
     public :: aeros_vdiff_init
@@ -107,17 +126,21 @@ contains
         character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class),  intent(in)    :: grd
 
-        logical  :: enabled
-        real(wp) :: k0, sigma
+        logical  :: enabled, richardson
+        real(wp) :: k0, sigma, ri_crit
 
         enabled = vd%enabled
         k0 = vd%k0; sigma = vd%sigma
+        richardson = vd%richardson; ri_crit = vd%ri_crit
 
-        call nml_read(filename, "vdiff", "enabled", enabled, defaults_file=defaults_file)
-        call nml_read(filename, "vdiff", "k0",      k0, defaults_file=defaults_file)
-        call nml_read(filename, "vdiff", "sigma",   sigma, defaults_file=defaults_file)
+        call nml_read(filename, "vdiff", "enabled",    enabled, defaults_file=defaults_file)
+        call nml_read(filename, "vdiff", "k0",         k0, defaults_file=defaults_file)
+        call nml_read(filename, "vdiff", "sigma",      sigma, defaults_file=defaults_file)
+        call nml_read(filename, "vdiff", "richardson", richardson, defaults_file=defaults_file)
+        call nml_read(filename, "vdiff", "ri_crit",    ri_crit, defaults_file=defaults_file)
 
         vd%k0 = k0; vd%sigma = sigma
+        vd%richardson = richardson; vd%ri_crit = ri_crit
 
         call aeros_vdiff_init(vd, grd, enabled)
         return
@@ -160,19 +183,21 @@ contains
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: phi_full(vg%nlev), phi_half(0:vg%nlev), zf(vg%nlev)
         real(wp) :: cface(vg%nlev)              ! C_{k+1/2}, k=1..nlev-1
+        real(wp) :: kfull(vg%nlev)              ! K at full levels [m2 s-1]
         real(wp) :: sub(vg%nlev), dia(vg%nlev), sup(vg%nlev)
         real(wp) :: diam(vg%nlev), col(vg%nlev), out(vg%nlev)
-        real(wp) :: ps, rmk, rhof, thalf, dz, ramp, kface
-        real(wp) :: rho_s, wind, drag
-        integer  :: i, j, k, nlev
+        real(wp) :: ps, rmk, rhof, thalf, dz, ramp, kface, sig
+        real(wp) :: rho_s, wind, drag, cp
+        integer  :: i, j, k, nlev, kh
 
         if (.not. vd%enabled) return
 
         nlev = vg%nlev
+        cp   = real(cp_d, wp)
 
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,k,phalf,pfull,dpc,phi_full,phi_half,zf,cface, &
-        !$omp           sub,dia,sup,diam,col,out,ps,rmk,rhof,thalf,dz,ramp,kface, &
+        !$omp   private(i,j,k,phalf,pfull,dpc,phi_full,phi_half,zf,cface,kfull,kh, &
+        !$omp           sub,dia,sup,diam,col,out,ps,rmk,rhof,thalf,dz,ramp,kface,sig, &
         !$omp           rho_s,wind,drag)
         do j = 1, vd%nlat
             do i = 1, vd%nlon
@@ -186,12 +211,28 @@ contains
                     zf(k) = phi_full(k)/grav
                 end do
 
-                ! interface conductances C_{k+1/2} = rho K / dz, k=1..nlev-1;
-                ! zero-flux top (no C above layer 1) and surface (none below nlev)
+                ! Full-level diffusivity K(k) [m2 s-1]. Richardson: the Frierson
+                ! (2006) K-profile over the bulk-Ri-diagnosed mixed layer. Fixed:
+                ! K0 tapered linearly in sigma to zero at vd%sigma.
+                if (vd%richardson) then
+                    call richardson_kprofile(nlev, t(i,j,:), qv(i,j,:), &
+                            u(i,j,:), v(i,j,:), phi_full, zf, vd%ri_crit, &
+                            vd%z0, vd%von_karman, vd%surf_frac, cp, kfull, kh)
+                else
+                    do k = 1, nlev
+                        sig  = pfull(k)/ps
+                        ramp = (sig - vd%sigma)/(1.0_wp - vd%sigma)
+                        ramp = max(0.0_wp, min(1.0_wp, ramp))
+                        kfull(k) = vd%k0*ramp
+                    end do
+                end if
+
+                ! interface conductances C_{k+1/2} = rho K_face / dz, k=1..nlev-1;
+                ! zero-flux top (no C above layer 1) and surface (none below nlev).
+                ! K_face is the mean of the two adjacent full-level K, so an
+                ! interface at the mixed-layer top (K=0 just above) carries no flux.
                 do k = 1, nlev-1
-                    ramp = (vg%sigma_half(k) - vd%sigma)/(1.0_wp - vd%sigma)
-                    ramp = max(0.0_wp, min(1.0_wp, ramp))
-                    kface = vd%k0*ramp
+                    kface = 0.5_wp*(kfull(k) + kfull(k+1))
                     if (kface <= 0.0_wp) then
                         cface(k) = 0.0_wp
                         cycle
@@ -218,9 +259,21 @@ contains
                     dia(k) = 1.0_wp - sub(k) - sup(k)
                 end do
 
-                ! Heat and moisture: zero-flux surface, the shared matrix.
-                col = t(i,j,:);  call tridiag(sub, dia, sup, col, out, nlev)
-                t(i,j,:)  = out
+                ! Heat: diffuse DRY STATIC ENERGY s = cp T + Phi, not T. Mixing s
+                ! relaxes the column toward the dry adiabat (neutral); mixing T
+                ! would relax toward isothermal (spuriously stable) and build a
+                ! warm, convection-choking lower troposphere. Phi is held fixed
+                ! across the solve, so conserving int s dp conserves the enthalpy
+                ! int cp T dp exactly. Convert back with the same Phi.
+                do k = 1, nlev
+                    col(k) = cp*t(i,j,k) + phi_full(k)
+                end do
+                call tridiag(sub, dia, sup, col, out, nlev)
+                do k = 1, nlev
+                    t(i,j,k) = (out(k) - phi_full(k))/cp
+                end do
+
+                ! Moisture: zero-flux surface, the shared matrix.
                 col = qv(i,j,:); call tridiag(sub, dia, sup, col, out, nlev)
                 qv(i,j,:) = out          ! positivity-preserving for this M-matrix
 
@@ -247,6 +300,84 @@ contains
 
         return
     end subroutine aeros_vdiff_apply
+
+    subroutine richardson_kprofile(nlev, tcol, qcol, ucol, vcol, phi, zf, &
+                                   ri_crit, z0, kappa, fb, cp, kfull, kh)
+        ! Frierson (2006) boundary-layer K-profile with the bulk Richardson-number
+        ! mixed-layer depth of Frierson (2007) -- SpeedyWeather's
+        ! BulkRichardsonDiffusion. The mixed layer is the contiguous stack of
+        ! layers up from the surface with bulk Ri < ri_crit; K is zero above it.
+        !
+        !   Ri(k) = Phi_k (s_v,k - s_v,sfc) / (s_v,sfc |U_k|^2),  s_v = cp T_v + Phi
+        !   K0    = kappa |U_sfc| (kappa/ln(Z/z0))(1 - Ri_sfc/ri_crit)   (~ kappa u*)
+        !   K(z)  = K0 min(z, fb h) * [z<fb h ? 1 : zfac] * [Ri(kh)>0 ? Rifac : 1]
+        ! with h the mixed-layer-top height, fb the surface-layer fraction, and
+        ! zfac (eq. 18) / Rifac (eq. 20) the Frierson (2006) shape factors. Ri uses
+        ! virtual dry static energy s_v = cp T_v + Phi referenced to the surface.
+
+        implicit none
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: tcol(:), qcol(:), ucol(:), vcol(:)
+        real(wp), intent(in)  :: phi(:), zf(:)
+        real(wp), intent(in)  :: ri_crit, z0, kappa, fb, cp
+        real(wp), intent(out) :: kfull(:)
+        integer,  intent(out) :: kh
+
+        real(wp), parameter :: v2min = 1.0e-4_wp   ! |U|^2 floor [m2 s-2]
+        real(wp) :: ri(nlev), tv, sv, v2, theta0, theta1, ri_n, sqrtc
+        real(wp) :: logzz0, usfc, k0, h, z, zm, kk, rr
+        integer  :: k
+
+        ! bulk Richardson number of each level relative to the surface (k=nlev)
+        tv       = tcol(nlev)*(1.0_wp + 0.608_wp*qcol(nlev))
+        theta0   = cp*tv
+        theta1   = theta0 + phi(nlev)
+        v2       = max(ucol(nlev)**2 + vcol(nlev)**2, v2min)
+        ri(nlev) = phi(nlev)*(theta1 - theta0)/(theta0*v2)
+        do k = 1, nlev-1
+            tv    = tcol(k)*(1.0_wp + 0.608_wp*qcol(k))
+            sv    = cp*tv + phi(k)
+            v2    = max(ucol(k)**2 + vcol(k)**2, v2min)
+            ri(k) = phi(k)*(sv - theta1)/(theta1*v2)
+        end do
+
+        ! mixed-layer top: uppermost layer reached by a contiguous run of
+        ! Ri < ri_crit up from the surface
+        kh = nlev
+        do while (kh > 0)
+            if (ri(kh) < ri_crit) then
+                kh = kh - 1
+            else
+                exit
+            end if
+        end do
+        kh = kh + 1
+
+        kfull = 0.0_wp
+        if (kh > nlev) return              ! surface layer already stable: no BL
+
+        h      = max(zf(kh), z0)
+        logzz0 = log(max(zf(nlev), z0)/z0)
+        ri_n   = min(max(ri(nlev), 0.0_wp), ri_crit)
+        sqrtc  = (kappa/logzz0)*(1.0_wp - ri_n/ri_crit)
+        usfc   = sqrt(max(ucol(nlev)**2 + vcol(nlev)**2, v2min))
+        k0     = kappa*usfc*sqrtc
+
+        do k = kh, nlev
+            z  = max(zf(k), z0)
+            zm = min(z, fb*h)
+            kk = k0*zm
+            if (z >= fb*h) &
+                kk = kk*(z/(fb*h))*(1.0_wp - (z - fb*h)/((1.0_wp - fb)*h))**2
+            if (ri(kh) > 0.0_wp) then
+                rr = ri(kh)/ri_crit
+                kk = kk/(1.0_wp + rr*logzz0/(1.0_wp - rr))
+            end if
+            kfull(k) = max(kk, 0.0_wp)
+        end do
+
+        return
+    end subroutine richardson_kprofile
 
     pure subroutine tridiag(a, b, c, d, x, n)
         ! Thomas algorithm for a tridiagonal system with sub-diagonal a, diagonal
@@ -280,8 +411,15 @@ contains
         write(io_unit, '(a)')    "  vdiff:"
         write(io_unit, '(a,l1)') "    enabled = ", vd%enabled
         if (.not. vd%enabled) return
-        write(io_unit, '(a,f8.2,a)') "    k0      = ", vd%k0, " m2/s"
-        write(io_unit, '(a,f8.3)')   "    sigma   = ", vd%sigma
+        write(io_unit, '(a,l1)') "    diffuses dry static energy s = cp T + Phi"
+        if (vd%richardson) then
+            write(io_unit, '(a)')      "    BL depth = Richardson-diagnosed (Frierson 2006)"
+            write(io_unit, '(a,f8.2)') "    ri_crit = ", vd%ri_crit
+        else
+            write(io_unit, '(a)')      "    BL depth = fixed"
+            write(io_unit, '(a,f8.2,a)') "    k0      = ", vd%k0, " m2/s"
+            write(io_unit, '(a,f8.3)')   "    sigma   = ", vd%sigma
+        end if
         return
     end subroutine aeros_vdiff_report
 

@@ -41,8 +41,8 @@ module aeros_convection
     ! pass, so a deep column converges only over tens of passes. It is kept as
     ! the parameter-free reference scheme (conv_scheme = "manabe").
     !
-    ! The default, and the scheme built for a stable-but-fast running model, is
-    ! Simplified Betts-Miller (Frierson 2007; conv_scheme = "sbm"): see
+    ! The scheme built for a stable-but-fast running model is Simplified
+    ! Betts-Miller (Frierson 2007; conv_scheme = "sbm" / "sbm_frierson"): see
     ! sbm_adjust below. One Newton solve per level, no iteration to neutrality,
     ! and it relaxes toward the reference over a finite timescale rather than
     ! adjusting instantaneously -- gentler on the integrator and tunable once
@@ -50,6 +50,34 @@ module aeros_convection
     ! has a `scheme` selector, aeros_convection_apply dispatches per column to
     ! adjust_column, and adjust_column branches on the scheme. The apply loop,
     ! the tendency plumbing and the precipitation accounting are shared.
+    !
+    ! === sbm vs sbm_frierson: the trigger and the convecting depth ===========
+    !
+    ! sbm_adjust defines the convecting band as the strictly-buoyant levels
+    ! (hb > h*_env(k), the first contiguous band scanning up from the surface).
+    ! At radiative-convective equilibrium that band collapses to a thin, often
+    ! surface-DISCONNECTED elevated sliver (the tropical upper troposphere) or
+    ! empties entirely (the extratropics): once convection has warmed the column
+    ! to near-neutral, no level is strictly buoyant, so the scheme goes dormant
+    ! and stops drying -- leaving the free troposphere pinned at saturation by
+    ! large-scale condensation (m2_results section 23). This is the moist-bias /
+    ! overcast root cause.
+    !
+    ! sbm_frierson (conv_scheme = "sbm_frierson") is the same Frierson (2007)
+    ! closure with the trigger and depth SpeedyWeather's BettsMillerConvection
+    ! uses, which does NOT go dormant: the convecting layer is the whole column
+    ! from the surface up to the level of zero buoyancy of a lifted surface
+    ! parcel (a connected layer anchored at the surface, never an elevated
+    ! sliver), and the deep/shallow branch is gated on the column-INTEGRATED
+    ! Pt = int cp(T_ref - T)dp and Pq = int(q - q_ref)dp signs. Pt > 0 (column
+    ! colder than the reference adiabat) is replenished every step by radiative
+    ! cooling, so convection re-fires every step and the deep branch relaxes q
+    ! toward rh_ref*q_sat over the whole layer continuously -- pinning the free
+    ! troposphere near rh_ref instead of at saturation. The reference profiles,
+    ! the enthalpy-conserving deep closure and the implicit relaxation are
+    ! identical to sbm_adjust. sbm_frierson is now the DEFAULT scheme (it is what
+    ! SpeedyWeather runs); "sbm" (the strictly-buoyant band) and "manabe" remain
+    ! selectable via conv_scheme. See docs/frierson_sbm_scope.md.
     !
     ! === Coupling: forward-split, NOT through the centered leapfrog =========
     !
@@ -78,8 +106,9 @@ module aeros_convection
 
     private
 
-    integer, parameter :: SCHEME_MANABE = 1
-    integer, parameter :: SCHEME_SBM    = 2
+    integer, parameter :: SCHEME_MANABE       = 1
+    integer, parameter :: SCHEME_SBM          = 2
+    integer, parameter :: SCHEME_SBM_FRIERSON = 3
 
     ! Column sweeps for the pairwise relaxation to converge.
     !
@@ -105,7 +134,7 @@ module aeros_convection
 
     type aeros_conv_class
         logical :: enabled = .FALSE.
-        integer :: scheme  = SCHEME_SBM
+        integer :: scheme  = SCHEME_SBM_FRIERSON
 
         ! Simplified Betts-Miller knobs (unused by Manabe). tau is the
         ! convective relaxation timescale; rh_ref the reference relative
@@ -134,7 +163,7 @@ module aeros_convection
     end type aeros_conv_class
 
     public :: aeros_conv_class
-    public :: SCHEME_MANABE, SCHEME_SBM     ! exposed for the test to select
+    public :: SCHEME_MANABE, SCHEME_SBM, SCHEME_SBM_FRIERSON  ! exposed for the test
     public :: aeros_convection_init
     public :: aeros_convection_load
     public :: aeros_convection_end
@@ -154,7 +183,7 @@ contains
         call aeros_convection_end(cnv)
 
         cnv%enabled = enabled
-        cnv%scheme  = SCHEME_SBM
+        cnv%scheme  = SCHEME_SBM_FRIERSON
         cnv%tau     = 7200.0_wp
         cnv%rh_ref  = 0.7_wp
         cnv%nlon    = grd%nlon
@@ -186,7 +215,7 @@ contains
         real(wp)           :: conv_tau, conv_rhref
 
         convect     = .FALSE.
-        conv_scheme = "sbm"
+        conv_scheme = "sbm_frierson"
         conv_tau    = 7200.0_wp
         conv_rhref  = 0.7_wp
         call nml_read(filename, "aeros_moisture", "convect",     convect, defaults_file=defaults_file)
@@ -199,11 +228,13 @@ contains
         select case (trim(conv_scheme))
         case ("sbm")
             cnv%scheme = SCHEME_SBM
+        case ("sbm_frierson")
+            cnv%scheme = SCHEME_SBM_FRIERSON
         case ("manabe")
             cnv%scheme = SCHEME_MANABE
         case default
             write(io_unit_err,*) "aeros_convection_load:: error: unknown conv_scheme '"// &
-                                    trim(conv_scheme)//"' (expected 'sbm' or 'manabe')"
+                                    trim(conv_scheme)//"' (expected 'sbm', 'sbm_frierson' or 'manabe')"
             error stop 1
         end select
 
@@ -315,6 +346,8 @@ contains
         select case (scheme)
         case (SCHEME_SBM)
             call sbm_adjust(t, q, pfull, dp, nlev, tau, rh_ref, dt)
+        case (SCHEME_SBM_FRIERSON)
+            call sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, dt)
         case (SCHEME_MANABE)
             call manabe_adjust(t, q, pfull, dp, nlev)
         case default
@@ -462,6 +495,125 @@ contains
         return
 
     end subroutine sbm_adjust
+
+    subroutine sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, dt)
+        ! Simplified Betts-Miller with the Frierson (2007) / SpeedyWeather trigger
+        ! and convecting depth -- the variant that stays active at RCE. It differs
+        ! from sbm_adjust (above) in exactly two places; the reference profiles,
+        ! the enthalpy-conserving deep closure and the implicit relaxation are the
+        ! same.
+        !
+        !   DEPTH. The convecting layer runs from the surface (nlev) up to the
+        !   level of zero buoyancy of a lifted surface parcel -- the topmost level
+        !   the parcel stays buoyant, scanning CONTINUOUSLY up from the surface
+        !   and stopping at the first non-buoyant level. Unlike sbm_adjust, it
+        !   never skips a stable lower-tropospheric layer to select an elevated,
+        !   surface-disconnected band: the layer is always anchored at the surface
+        !   and the whole of it is relaxed toward the reference (so the saturated
+        !   lower/mid troposphere is dried, not left untouched). MSE buoyancy
+        !   hb > h*_env(k) is equivalent to the lifted parcel being warmer than
+        !   the environment, so the existing MSE machinery does the parcel lift.
+        !
+        !   TRIGGER. The deep/shallow/none decision is the sign of the column
+        !   integrals, not per-level buoyancy: Pt = int cp(T_ref - T)dp and
+        !   Pq = int(q - q_ref)dp over the layer. Pt <= 0 (column already warmer
+        !   than the reference adiabat, on integral) is the only "no convection"
+        !   state; Pt > 0 is replenished every step by radiative cooling, so the
+        !   scheme re-fires continuously instead of latching off at neutrality.
+        !   Pq > 0 is deep (precipitating), Pq <= 0 is shallow.
+        !
+        ! Energy is closed exactly as in sbm_adjust. Deep: shift T_ref by the
+        ! constant that makes int cp(T_ref - T)dp = L Pq, relax T and q. Shallow:
+        ! rescale q_ref by fq = 1 + Pq/int q_ref dp (Pq <= 0 => fq <= 1) so the net
+        ! moisture change over the layer is zero, shift T_ref to zero net heating,
+        ! relax both -- non-precipitating, column-moisture-conserving (this is
+        ! Frierson's shallow "q_ref", a moisture redistribution; sbm_adjust's
+        ! shallow branch instead leaves q untouched). Both relax implicitly over
+        ! one step, X <- X + a (X_ref - X), a = (dt/tau)/(1 + dt/tau), conserving
+        ! int(cp T + L q)dp to machine precision with q >= 0 by construction.
+
+        implicit none
+
+        real(wp), intent(inout) :: t(:), q(:)
+        real(wp), intent(in)    :: pfull(:), dp(:)
+        integer,  intent(in)    :: nlev
+        real(wp), intent(in)    :: tau, rh_ref, dt
+
+        real(wp) :: phi(nlev), tref(nlev), qref(nlev)
+        real(wp) :: hb, hstar, qs, dqs, cp, lv, a
+        real(wp) :: sumdp, sumqref, pq, pt, shift, ct, fq
+        integer  :: k, ktop
+
+        cp = real(cp_d, wp); lv = real(L_v, wp)
+
+        ! Geopotential relative to the surface, from the environment profile.
+        phi(nlev) = 0.0_wp
+        do k = nlev - 1, 1, -1
+            phi(k) = phi(k+1) + R_d*0.5_wp*(t(k) + t(k+1))*log(pfull(k+1)/pfull(k))
+        end do
+
+        ! Boundary-layer parcel MSE (actual humidity) anchors the reference adiabat.
+        hb = cp*t(nlev) + phi(nlev) + lv*q(nlev)
+
+        ! Lift the surface parcel: the convecting layer is [ktop, nlev], ktop the
+        ! level of zero buoyancy. Scan up from the surface and stop at the first
+        ! non-buoyant level -- do NOT jump a stable layer to an elevated band.
+        ktop = nlev
+        do k = nlev - 1, 1, -1
+            call aeros_qsat(t(k), pfull(k), qs, dqs)
+            hstar = cp*t(k) + phi(k) + lv*qs
+            if (hb > hstar) then
+                ktop = k
+            else
+                exit
+            end if
+        end do
+        if (ktop == nlev) return    ! surface parcel not buoyant -> no convection
+
+        ! Reference profiles over the layer: the moist adiabat carrying h_b, dried
+        ! to rh_ref of its own saturation.
+        do k = ktop, nlev
+            tref(k) = moist_adiabat_temp(hb - phi(k), pfull(k), t(k))
+            call aeros_qsat(tref(k), pfull(k), qs, dqs)
+            qref(k) = rh_ref*qs
+        end do
+
+        ! Column integrals over the layer.
+        sumdp = 0.0_wp; sumqref = 0.0_wp; pq = 0.0_wp; pt = 0.0_wp
+        do k = ktop, nlev
+            sumdp   = sumdp   + dp(k)
+            sumqref = sumqref + qref(k)*dp(k)
+            pq      = pq + (q(k)      - qref(k))*dp(k)
+            pt      = pt + cp*(tref(k) - t(k))*dp(k)
+        end do
+
+        ! Pt <= 0: the column is warmer than the reference adiabat on integral --
+        ! no convection. (Radiative cooling drives Pt back positive every step.)
+        if (pt <= 0.0_wp) return
+
+        a = (dt/tau)/(1.0_wp + dt/tau)
+
+        if (pq > 0.0_wp) then
+            ! Deep: shift T_ref so the heating balances L * precip, relax T and q.
+            shift = (lv*pq - pt)/(cp*sumdp)
+            do k = ktop, nlev
+                t(k) = t(k) + a*(tref(k) + shift - t(k))
+                q(k) = q(k) + a*(qref(k) - q(k))
+            end do
+        else
+            ! Shallow: rescale q_ref for zero net moisture change, shift T_ref for
+            ! zero net heating, relax both. No precipitation.
+            fq = 1.0_wp + pq/max(sumqref, 1.0e-30_wp)
+            ct = pt/(cp*sumdp)
+            do k = ktop, nlev
+                t(k) = t(k) + a*(tref(k) - ct - t(k))
+                q(k) = q(k) + a*(fq*qref(k) - q(k))
+            end do
+        end if
+
+        return
+
+    end subroutine sbm_frierson_adjust
 
     function moist_adiabat_temp(rhs, p, tguess) result(tsol)
         ! Solve cp T + L q_sat(T, p) = rhs for T -- the temperature of a
@@ -719,6 +871,10 @@ contains
             select case (cnv%scheme)
             case (SCHEME_SBM)
                 write(iou,"(a)")           "   moist convective adjustment ON  (Simplified Betts-Miller)"
+                write(iou,"(a,f9.1,a)")    "   relaxation timescale       ", cnv%tau, " s"
+                write(iou,"(a,f9.3)")      "   reference relative humidity", cnv%rh_ref
+            case (SCHEME_SBM_FRIERSON)
+                write(iou,"(a)")           "   moist convective adjustment ON  (Simplified Betts-Miller, Frierson trigger)"
                 write(iou,"(a,f9.1,a)")    "   relaxation timescale       ", cnv%tau, " s"
                 write(iou,"(a,f9.3)")      "   reference relative humidity", cnv%rh_ref
             case (SCHEME_MANABE)

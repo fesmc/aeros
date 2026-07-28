@@ -77,6 +77,12 @@ program test_convection
     call test_sbm_shallow(nfail)
     call test_sbm_converge(nfail)
 
+    ! --- Simplified Betts-Miller, Frierson trigger/depth (the default scheme) ---
+    cnv%scheme = SCHEME_SBM_FRIERSON
+    cnv%tau    = 7200.0_wp
+    cnv%rh_ref = 0.7_wp
+    call test_frierson(nfail)
+
     ! --- Manabe (the reference scheme) ---
     cnv%scheme = SCHEME_MANABE
     call test_manabe_moist(nfail)
@@ -153,6 +159,88 @@ contains
             end if
         end do
     end function moist_stable
+
+    ! === Simplified Betts-Miller, Frierson trigger/depth ====================
+
+    ! The Frierson trigger: the convecting layer is the whole surface-to-LZB
+    ! column, so the same budget invariants hold AND the surface layer itself is
+    ! adjusted (the band scheme excludes the sub-cloud layer; this one does not).
+    ! Anchoring at the surface is the property the RCE needs.
+    subroutine test_frierson(nfail)
+        implicit none
+        integer, intent(inout) :: nfail
+        real(wp) :: qs, d, tcol(nlev), qcol(nlev), rhmax
+        real(dp) :: h0, h1, dmse, water_removed, precip_water
+        integer  :: k
+
+        write(*,*) ""
+        write(*,*) " -- SBM/Frierson: surface-anchored adjustment (stays active where the band dorms)"
+
+        ! Conditionally-unstable column with a SATURATED boundary layer, so the
+        ! lifted surface parcel is buoyant from the surface up (Frierson lifts the
+        ! surface parcel and stops at the first non-buoyant level, so a
+        ! sub-saturated sub-cloud layer would collapse the trigger -- the RCE keeps
+        ! it buoyant via the well-mixed boundary layer). Drier free troposphere
+        ! above.
+        do k = 1, nlev
+            t_g(:,:,k) = 300.0_wp - 90.0_wp*(1.0_wp - (pf(k)/real(p0,wp))**0.6_wp)
+            call aeros_qsat(t_g(1,1,k), pf(k), qs, d)
+            if (k >= nlev-1) then
+                qv(:,:,k) = qs             ! saturated boundary layer
+            else
+                qv(:,:,k) = 0.8_wp*qs      ! drier free troposphere
+            end if
+        end do
+        dt_phys = 0.0_wp
+        qv0 = qv
+        do k = 1, nlev
+            tcol(k) = t_g(1,1,k); qcol(k) = qv(1,1,k)
+        end do
+        h0 = col_mse(tcol, qcol, dpc)
+
+        call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
+
+        do k = 1, nlev
+            tcol(k) = t_g(1,1,k) + dt_phys(1,1,k)
+            qcol(k) = qv(1,1,k)
+        end do
+        h1   = col_mse(tcol, qcol, dpc)
+        dmse = abs(h1 - h0)/abs(h0)
+
+        water_removed = col_water(qv0(1,1,:), dpc) - col_water(qv(1,1,:), dpc)
+        precip_water  = real(cnv%precip(1,1),dp)*1800.0_dp
+
+        rhmax = 0.0_wp
+        do k = 1, nlev
+            call aeros_qsat(tcol(k), pf(k), qs, d)
+            rhmax = max(rhmax, qcol(k)/qs)
+        end do
+
+        write(*,"(a40,es12.3)")   "   |dMSE|/MSE                    ", dmse
+        write(*,"(a40,es12.3,a)") "   precip                        ", &
+                                    cnv%precip(1,1)*86400.0_wp, " mm/day"
+        write(*,"(a40,es12.3)")   "   |water removed - precip|       ", &
+                                    abs(water_removed - precip_water)
+        write(*,"(a40,f12.4)")    "   max RH after                  ", rhmax
+        write(*,"(a40,es12.3)")   "   lowest-layer drying dq        ", &
+                                    real(qv0(1,1,nlev) - qv(1,1,nlev), dp)
+        write(*,"(a40,es12.3)")   "   max |dT| (column adjusted)    ", &
+                                    real(maxval(abs(dt_phys)), dp)
+
+        ! Branch-agnostic invariants (this column takes the non-precipitating
+        ! shallow branch: q_ref from the warm saturated-surface adiabat exceeds
+        ! the environment, so Pq <= 0 -- the same regime the RCE subtropics see).
+        call check(dmse < 1.0e-13_dp, "moist static energy is conserved", nfail)
+        call check(maxval(abs(dt_phys)) > 0.0_wp, &
+                    "the column is adjusted (convection fired, not vacuous)", nfail)
+        call check(abs(water_removed - precip_water) < 1.0e-12_dp, &
+                    "column water closes (precip equals the net water removed)", nfail)
+        call check(rhmax <= 1.0_wp + 1.0e-6_wp, "no supersaturation is created", nfail)
+        call check(qv0(1,1,nlev) - qv(1,1,nlev) > 0.0_wp, &
+                    "the surface layer is in the convecting column (it dries)", nfail)
+        call check(minval(qv) >= 0.0_wp, "q stays non-negative", nfail)
+        return
+    end subroutine test_frierson
 
     ! === Simplified Betts-Miller ============================================
 

@@ -30,6 +30,7 @@ program rce_long
     use aeros_vertical
     use aeros_condensation, only : aeros_qsat
     use aeros_cloud,    only : aeros_cloud_diagnose
+    use aeros_convection, only : SCHEME_SBM, SCHEME_SBM_FRIERSON, SCHEME_MANABE
     use aeros_timestep
     use aeros_radiation, only : SCHEME_ECCKD
     use aeros_ocean,    only : aeros_ocean_init
@@ -52,6 +53,7 @@ program rce_long
     real(wp) :: dt = 1800.0_wp, tau_diff = 6.0_wp
     real(wp) :: eps_filter = 0.06_wp, raw_alpha = 0.53_wp
     real(wp) :: conv_tau = 7200.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp, u_min = 1.0_wp
+    character(len=32) :: conv_scheme = "sbm_frierson" ! "sbm" | "sbm_frierson" | "manabe"
     real(wp) :: c_d = 1.5e-3_wp       ! surface momentum drag (0 = off; brakes the low-level jet)
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
     logical  :: l_rad = .TRUE., l_sponge = .TRUE., l_vdiff = .FALSE.
@@ -61,6 +63,8 @@ program rce_long
     logical  :: l_uniform_insol = .FALSE. ! flatten insolation to its global mean (no meridional gradient)
     logical  :: l_nonrotating = .FALSE.   ! zero Coriolis (no jet organization; RCE vehicle)
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
+    logical  :: vdiff_richardson = .TRUE.    ! Ri-diagnosed BL depth (else fixed)
+    real(wp) :: vdiff_ri_crit = 10.0_wp      ! critical bulk Richardson number
     ! Model-top sponge knobs (defaults match aeros_timestep_class). Exposed to
     ! test the top thermal-wind blow-up: a stronger/deeper sponge that delays or
     ! removes it confirms the terminal event is model-top dynamical.
@@ -85,7 +89,8 @@ program rce_long
     ! moisture sink. 1.0 = true saturation adjustment (the model default); a lower
     ! value is the sub-grid-saturation stand-in for the missing subsidence drying
     ! that otherwise leaves the free troposphere pinned at RH~100% (m2_results §23).
-    real(wp) :: cond_rh_crit = 1.0_wp
+    real(wp) :: cond_rh_crit = 0.95_wp
+    real(wp) :: cond_reevap  = 30.0_wp   ! reevaporation efficiency of falling precip
     integer  :: ocean_mode = 0       ! 0 prescribed SST, 1 slab
     real(wp) :: ocean_depth = 10.0_wp
     ! --- thermodynamic sea ice (feat/seaice) --------------------------------
@@ -196,9 +201,19 @@ program rce_long
 
     ts%cnd%enabled = l_cnd
     ts%cnd%rh_crit = cond_rh_crit
+    ts%cnd%reevap  = cond_reevap
     ts%cnv%enabled = l_cnv
     ts%cnv%tau = conv_tau
     ts%cnv%dry_adjust = l_dry_adjust
+    select case (trim(conv_scheme))
+    case ("sbm");          ts%cnv%scheme = SCHEME_SBM
+    case ("sbm_frierson"); ts%cnv%scheme = SCHEME_SBM_FRIERSON
+    case ("manabe");       ts%cnv%scheme = SCHEME_MANABE
+    case default
+        write(*,*) "rce_long:: error: unknown conv_scheme '"//trim(conv_scheme)// &
+                   "' (expected 'sbm', 'sbm_frierson' or 'manabe')"
+        error stop 1
+    end select
     ts%surf%enabled = l_surf
     ts%surf%c_h = c_h; ts%surf%c_e = c_e; ts%surf%u_min = u_min
     ts%surf%c_d = c_d
@@ -224,9 +239,11 @@ program rce_long
     ! (2) sigma-tapered order: the setter rebuilds the per-level ratios.
     if (diff_taper) call aeros_timestep_set_diff_taper(ts, vg, .TRUE., &
                             ndiff_top=diff_ndiff_top, taper_sigma=diff_taper_sigma)
-    ts%vd%enabled   = l_vdiff
-    ts%vd%k0        = vdiff_k0
-    ts%vd%sigma     = vdiff_sigma
+    ts%vd%enabled    = l_vdiff
+    ts%vd%k0         = vdiff_k0
+    ts%vd%sigma      = vdiff_sigma
+    ts%vd%richardson = vdiff_richardson
+    ts%vd%ri_crit    = vdiff_ri_crit
     ts%rad%albedo   = albedo
     ts%rad%co2_ppm  = co2_ppm
     ts%rad%interval = rad_interval
@@ -566,10 +583,17 @@ contains
         call nml_read(nmlfile, "rce", "l_diag", l_diag)
         call nml_read(nmlfile, "rce", "vdiff_k0", vdiff_k0)
         call nml_read(nmlfile, "rce", "vdiff_sigma", vdiff_sigma)
+        ! Boundary-layer scheme (optional; inherits input/rce_defaults.nml).
+        call nml_read(nmlfile, "rce", "vdiff_richardson", vdiff_richardson, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "vdiff_ri_crit", vdiff_ri_crit, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "seed_asym", seed_asym)
         call nml_read(nmlfile, "rce", "albedo", albedo)
         call nml_read(nmlfile, "rce", "co2_ppm", co2_ppm)
         call nml_read(nmlfile, "rce", "cond_rh_crit", cond_rh_crit)
+        call nml_read(nmlfile, "rce", "cond_reevap", cond_reevap, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "ocean_mode", ocean_mode)
         call nml_read(nmlfile, "rce", "ocean_depth", ocean_depth)
         ! Sea-ice knobs (feat/seaice): optional (inherit input/rce_defaults.nml)
@@ -591,6 +615,10 @@ contains
         ! Topography (feat/topography). Optional overrides like the rad knobs
         ! above: a namelist that omits them inherits input/rce_defaults.nml
         ! (l_topography off), so existing run namelists are unaffected.
+        ! Convection scheme selector. Optional (inherits input/rce_defaults.nml =
+        ! "sbm"), so existing namelists that omit it keep the default scheme.
+        call nml_read(nmlfile, "rce", "conv_scheme", conv_scheme, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_topography", l_topography, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "topo_file", topo_file, &
