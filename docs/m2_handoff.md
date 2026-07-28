@@ -1,17 +1,37 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION: free-tropospheric drying — fix the dormant Simplified Betts–Miller
+## ►► NEXT SESSION: weak Hadley overturning — couple diabatic heating to the semi-implicit dynamics
 
-**Full scope in [`docs/frierson_sbm_scope.md`](frierson_sbm_scope.md).** The near-saturated
-moist bias (RH ~85–100% vs ERA5 ~45%, m2_results §23) is the highest-leverage fix left — it
-drives the overcast/cloud runaway, the OLR bias, and the coupled TOA imbalance. Key finding
-from this session: **aeros already implements the Frierson (2007) Simplified Betts–Miller
-scheme** (`sbm_adjust`, the default); it just **goes dormant at RCE equilibrium** (`hb −
-h*_env < 0` everywhere → no convection → nothing dries the free troposphere), whereas
-SpeedyWeather's implementation of the same scheme stays active. So the task is diagnose-and-
-fix the dormancy (parcel/trigger/surface-coupling), not reimplement. Acceptance: RH → ~45%,
-cover → ~0.63, TOA toward balance, and the `cond_rh_crit` crutch can retire. This should
-improve clouds + OLR + TOA together.
+**Full scope in [`docs/weak_hadley_scope.md`](weak_hadley_scope.md).** The moist-bias fix below
+(column physics) landed and hit cover + TOA, but left a residual: free-trop RH ~86% (vs
+SpeedyWeather 66%), pinned in the **non-convecting subtropics/extratropics** because aeros's
+**Hadley overturning is ~10× too weak** (subtropical ω ~1 vs SpeedyWeather ~13 hPa/day;
+upper-branch |v| ~0.6 m/s). Proven *not* resolution (aeros T42 same; SpeedyWeather T21 is dry
+with a vigorous cell), not sponge/diffusion/filter, not SST gradient. **Root cause: all
+diabatic heating is applied forward-split as an n+1 temperature increment (step 6 of
+`aeros_timestep_step`), decoupled from the semi-implicit dynamics — so the divergent (Hadley)
+response to heating is lagged and damped by the RAW filter.** **Chosen fix (AR): approach 1 —
+move ALL diabatic heating into `tnd%temp` before the semi-implicit solve (standard coupling).
+"Do it well"** — mind the leapfrog factor, the old convective computational-mode instability
+(why forward-split was chosen), and the condensation heating/drying pairing (humidity is
+off-spectral). Likely also fixes the weak jet (§25–26). Acceptance: ω → ~10 hPa/day, subtropical
+RH → ~66%, cover/TOA hold, stable, 25 tests pass. Diagnostic tool: the `omega` dump (landed).
+
+### ✅ DONE this session: the moist-bias column physics (on `main`, commit `a5395d6`)
+Diagnosed against SpeedyWeather (same Simplified Betts–Miller) that aeros had two saturating
+sinks and no drying sink. Three fixes, all landed, 25 tests pass:
+- **vdiff** now diffuses **dry static energy** over a **Richardson-diagnosed BL** (Frierson
+  2006; SpeedyWeather's scheme). Was diffusing T → isothermal/over-stable lower troposphere.
+- **condensation** defaults **rh_crit=0.95** + **reevaporation** of falling precip (was pinning
+  the grid mean at 100%).
+- **convection default → `sbm_frierson`** (surface-to-LZB depth + integrated Pt/Pq trigger —
+  what SpeedyWeather runs; stays active where the strictly-buoyant band went dormant).
+- Result (rotating RCE, cond_rh_crit=0.95): cover 0.999 → **0.70**, TOA −18.6 → **+3.8** W/m²,
+  tropics moist-adiabatic and dried to ~73%. `omega` subsidence diagnostic added (commit
+  `c8120b8`). **Superseded framing:** the earlier "SBM goes dormant, fix the trigger" scope
+  (`docs/frierson_sbm_scope.md`) was only half the story — the trigger port alone did *not*
+  fix it; the vdiff + condensation sinks were the load-bearing column-physics fixes, and the
+  true remaining lever is the weak circulation above.
 
 ### Landed this session (all on `main`, pushed)
 - **Land×cloud blow-up FIXED.** Root cause was *not* the ocean/model-top (my first handoff
