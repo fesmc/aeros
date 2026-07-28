@@ -1,8 +1,12 @@
 ! Optional-key defaults for the rce_long driver. Passed as `defaults_file` to the
-! radiation-knob reads so a namelist that omits them inherits these values instead
-! of erroring (the rest of rce_long's &rce keys remain required, fail-loud). Keep
-! rad_interval in step with aeros_rad_class's default (6 h).
+! radiation- and topography-knob reads so a namelist that omits them inherits these
+! values instead of erroring (the rest of rce_long's &rce keys remain required,
+! fail-loud). Keep rad_interval in step with aeros_rad_class's default (6 h).
+! l_topography off = flat aquaplanet (phis = 0), the bit-for-bit default.
 &rce
-    rad_interval = 21600.0
-    rad_scheme   = 2
+    rad_interval   = 21600.0
+    rad_scheme     = 2
+    l_topography   = .false.
+    topo_file      = "/Users/alrobi001/data/era5/era5_orography.nc"
+    topo_ramp_days = 20.0
 /
