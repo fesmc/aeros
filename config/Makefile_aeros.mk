@@ -110,7 +110,7 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o \
 							$(objdir)/aeros_convection.o $(objdir)/aeros_surface.o \
 							$(objdir)/aeros_radiation.o $(objdir)/aeros_vdiff.o \
-							$(objdir)/aeros_ocean.o
+							$(objdir)/aeros_ocean.o $(objdir)/aeros_land.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
@@ -199,6 +199,14 @@ $(objdir)/aeros_topography.o: $(physdir)/aeros_topography.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_bcinput.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M2.x: land surface (feat/land). The second lower-boundary type -- land-sea
+# mask, bucket soil moisture, slab soil temperature -- coupled under the same
+# flux seam as the ocean. Reads the mask and albedo maps via the bcinput
+# regridder, so it needs aeros_bcinput; a column/point process otherwise.
+$(objdir)/aeros_land.o: $(physdir)/aeros_land.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_bcinput.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 ## aeros core #################################
 #
 # IO and the public facade. These sit above everything else and must be
@@ -260,7 +268,8 @@ aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_surface.o \
                  $(objdir)/aeros_vdiff.o \
                  $(objdir)/aeros_ocean.o \
-                 $(objdir)/aeros_topography.o
+                 $(objdir)/aeros_topography.o \
+                 $(objdir)/aeros_land.o
 
 # aeros_timestep sits above the physics as well as the dynamics -- it is what
 # calls the forcing -- so it is archived after both.
