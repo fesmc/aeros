@@ -31,6 +31,7 @@ program rce_long
     use aeros_condensation, only : aeros_qsat
     use aeros_cloud,    only : aeros_cloud_diagnose
     use aeros_timestep
+    use aeros_radiation, only : SCHEME_ECCKD
     use aeros_ocean,    only : aeros_ocean_init
     use nml,            only : nml_read
     use ncio,           only : nc_create, nc_write_dim, nc_write
@@ -75,6 +76,8 @@ program rce_long
     real(wp) :: cond_rh_crit = 1.0_wp
     integer  :: ocean_mode = 0       ! 0 prescribed SST, 1 slab
     real(wp) :: ocean_depth = 10.0_wp
+    real(wp) :: rad_interval = 10800.0_wp   ! radiation recompute cadence [s]
+    integer  :: rad_scheme = SCHEME_ECCKD   ! LW/SW scheme (2=ecCKD default, 1=SESAM)
 
     type(aeros_sht_pool_class), target :: pool
     type(aeros_grid_class)     :: grd
@@ -141,6 +144,8 @@ program rce_long
     ts%vd%sigma     = vdiff_sigma
     ts%rad%albedo   = albedo
     ts%rad%co2_ppm  = co2_ppm
+    ts%rad%interval = rad_interval
+    ts%rad%scheme   = rad_scheme
     ts%ocn%mode     = ocean_mode
     ts%ocn%depth    = ocean_depth
     call aeros_ocean_init(ts%ocn, grd)   ! recompute C for the chosen depth/mode
@@ -374,6 +379,8 @@ contains
         call nml_read(nmlfile, "rce", "cond_rh_crit", cond_rh_crit)
         call nml_read(nmlfile, "rce", "ocean_mode", ocean_mode)
         call nml_read(nmlfile, "rce", "ocean_depth", ocean_depth)
+        call nml_read(nmlfile, "rce", "rad_interval", rad_interval)
+        call nml_read(nmlfile, "rce", "rad_scheme", rad_scheme)
         return
     end subroutine read_config
 
