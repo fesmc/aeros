@@ -5,4 +5,7 @@
 &rce
     rad_interval = 21600.0
     rad_scheme   = 2
+    restart_in       = ""
+    restart_out      = ""
+    restart_interval = 0
 /

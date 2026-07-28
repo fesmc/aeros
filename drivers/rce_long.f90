@@ -79,6 +79,17 @@ program rce_long
     real(wp) :: rad_interval = 21600.0_wp   ! radiation recompute cadence [s]; default 6 h
     integer  :: rad_scheme = SCHEME_ECCKD   ! LW/SW scheme (2=ecCKD default, 1=SESAM)
 
+    ! --- checkpoint / restart ------------------------------------------------
+    ! restart_in  : path to a restart file to resume from ("" = cold start).
+    ! restart_out : path to write checkpoints to ("" = none).
+    ! restart_interval : write a checkpoint every N steps (0 = only at end, if
+    !                    restart_out is set). Defaults preserve current behaviour.
+    character(len=512) :: restart_in  = ""
+    character(len=512) :: restart_out = ""
+    integer            :: restart_interval = 0
+    real(wp)           :: restart_time = 0.0_wp
+    integer            :: n0 = 0          ! absolute step offset (nonzero on restart)
+
     type(aeros_sht_pool_class), target :: pool
     type(aeros_grid_class)     :: grd
     type(aeros_vgrid_class)    :: vg
@@ -182,6 +193,20 @@ program rce_long
     allocate(phis2(grd%nlon, grd%nlat)); phis2 = 0.0_wp
     call aeros_timestep_set_phis(ts, phis2)
 
+    ! === Restart branch: load state instead of constructing an IC ===========
+    ! When restart_in is set, the timestep and state are already allocated by
+    ! the init/config above (same trunc/nlev/grid); read_restart overwrites them
+    ! with the saved leapfrog levels, humidity, ocean and radiation cache, and
+    ! the run resumes from the saved nstep. The whole IC-construction block is
+    ! skipped in that case.
+    if (len_trim(restart_in) > 0) then
+        call aeros_timestep_read_restart(ts, now, restart_time, restart_in)
+        n0 = ts%nstep
+        write(*,"(a,a,a,i0,a,f10.1,a)") " rce_long:: restarted from ", &
+            trim(restart_in), "  (nstep=", n0, ", time=", restart_time, " s)"
+        call report(n0)
+    else
+
     ! Warm, humid, conditionally-unstable start (as test_rce/test_moist_run).
     call aeros_spec_zero(now%spec)
     do k = 1, nlev
@@ -226,8 +251,10 @@ program rce_long
 
     call report(0)
 
+    end if   ! restart_in vs cold-start IC
+
     blew_up = .FALSE.
-    do n = 1, nstep
+    do n = n0+1, n0+nstep
         call aeros_timestep_step(ts, pool, vg, grd, now)
         if (any(ts%wrk%t_g /= ts%wrk%t_g) .or. any(now%qv_g /= now%qv_g)) then
             write(*,"(a,i0,a,f7.2,a)") " *** NaN at step ", n, "  (day ", &
@@ -237,9 +264,23 @@ program rce_long
             exit
         end if
         if (mod(n, print_every) == 0) call report(n)
+        ! Periodic checkpoint (restart_interval > 0). The model time carried into
+        ! the file is the absolute elapsed time n*dt.
+        if (len_trim(restart_out) > 0 .and. restart_interval > 0) then
+            if (mod(n, restart_interval) == 0) &
+                call aeros_timestep_write_restart(ts, now, real(n,wp)*dt, restart_out)
+        end if
     end do
 
     if (.not. blew_up) write(*,"(a)") " rce_long:: completed without NaN"
+
+    ! End-of-run checkpoint: always written when restart_out is set (this is the
+    ! only checkpoint when restart_interval = 0). Skipped on a blow-up, which
+    ! would only persist a NaN state.
+    if (len_trim(restart_out) > 0 .and. .not. blew_up) then
+        call aeros_timestep_write_restart(ts, now, real(n0+nstep,wp)*dt, restart_out)
+        write(*,"(a,a)") " rce_long:: wrote restart -> ", trim(restart_out)
+    end if
 
     if (len_trim(rh_out) > 0) call dump_rh(trim(rh_out))
 
@@ -384,6 +425,14 @@ contains
         call nml_read(nmlfile, "rce", "rad_interval", rad_interval, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "rad_scheme", rad_scheme, &
+                      defaults_file="input/rce_defaults.nml")
+        ! Restart knobs: optional (inherit input/rce_defaults.nml) so existing
+        ! rce_*.nml files that omit them keep cold-starting, not erroring.
+        call nml_read(nmlfile, "rce", "restart_in", restart_in, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "restart_out", restart_out, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "restart_interval", restart_interval, &
                       defaults_file="input/rce_defaults.nml")
         return
     end subroutine read_config
