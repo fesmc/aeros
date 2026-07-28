@@ -175,7 +175,8 @@ module aeros_timestep
                                 aeros_vdiff_apply, aeros_vdiff_report
     use aeros_ocean,      only : aeros_ocean_class, aeros_ocean_init, &
                                 aeros_ocean_load, aeros_ocean_end, &
-                                aeros_ocean_step, aeros_ocean_report
+                                aeros_ocean_step, aeros_ocean_report, &
+                                aeros_ocean_albedo_update
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
     use ncio,             only : nc_create, nc_write, nc_write_dim, &
@@ -584,6 +585,18 @@ contains
 
         s => pool%sht(1)
 
+        ! Sea-ice surface albedo -> radiation. The ocean owns the surface albedo
+        ! field (open water vs ice); copy it into the field radiation reads before
+        ! the radiative transfer runs this step. Allocated lazily the first time
+        ! sea ice is active; ocn%alb reflects the previous step's (or restart's)
+        ! ice state. When l_seaice is off, rad%alb_sfc stays unallocated and
+        ! radiation uses its scalar albedo -- every existing result bit-for-bit.
+        if (ts%ocn%l_seaice .and. allocated(ts%ocn%alb)) then
+            if (.not. allocated(ts%rad%alb_sfc)) &
+                allocate(ts%rad%alb_sfc(ts%ocn%nlon, ts%ocn%nlat))
+            ts%rad%alb_sfc = ts%ocn%alb
+        end if
+
         ! === 0. Step length, and the start-up ================================
         if (ts%nstep == 0) then
             ! No X^(n-1) yet: start from rest against the current state.
@@ -990,7 +1003,7 @@ contains
         real(wp),                   intent(in) :: time
         character(len=*),           intent(in) :: filename
 
-        integer :: nlm, nlev, nlon, nlat, rad_present
+        integer :: nlm, nlev, nlon, nlat, rad_present, seaice_present
 
         nlm  = now%spec%nlm
         nlev = now%spec%nlev
@@ -998,6 +1011,8 @@ contains
         nlat = ts%ocn%nlat
         rad_present = 0
         if (allocated(ts%rad%heat)) rad_present = 1
+        seaice_present = 0
+        if (ts%ocn%l_seaice .and. allocated(ts%ocn%h_ice)) seaice_present = 1
 
         call nc_create(filename)
 
@@ -1015,6 +1030,7 @@ contains
         call nc_write_attr(filename,"nstep",            ts%nstep)
         call nc_write_attr(filename,"ocn_mode",         ts%ocn%mode)
         call nc_write_attr(filename,"rad_heat_present", rad_present)
+        call nc_write_attr(filename,"seaice_present",   seaice_present)
         call nc_write_attr(filename,"time",             real(time,dp))
         call nc_write_attr(filename,"mass_target",      ts%mass_target)
         call nc_write_attr(filename,"lnr_cum",          ts%lnr_cum)
@@ -1033,6 +1049,21 @@ contains
                         units="K", long_name="sea surface temperature")
         call nc_write(filename,"ocn_fnet", ts%ocn%fnet, dim1="lon",dim2="lat", &
                         units="W m-2", long_name="net surface energy flux")
+
+        ! === sea-ice state (feat/seaice) ===
+        ! Prognostic ice thickness / fraction / surface temperature, saved only
+        ! when the thermodynamic sea ice is active (seaice_present). Append-only:
+        ! a restart without sea ice carries neither the attribute's arrays nor any
+        ! change to the blocks above. The surface albedo field is a diagnostic of
+        ! these three (aeros_ocean_albedo_update) and is rebuilt on read, not saved.
+        if (seaice_present == 1) then
+            call nc_write(filename,"ocn_h_ice", ts%ocn%h_ice, dim1="lon",dim2="lat", &
+                            units="m", long_name="sea-ice thickness")
+            call nc_write(filename,"ocn_a_ice", ts%ocn%a_ice, dim1="lon",dim2="lat", &
+                            units="1", long_name="sea-ice fraction")
+            call nc_write(filename,"ocn_t_ice_sfc", ts%ocn%t_ice_sfc, dim1="lon",dim2="lat", &
+                            units="K", long_name="sea-ice surface temperature")
+        end if
 
         ! Cached radiative heating (only if it has been computed).
         if (rad_present == 1) &
@@ -1100,7 +1131,7 @@ contains
         real(wp),                   intent(out)   :: time
         character(len=*),           intent(in)    :: filename
 
-        integer  :: nlm, nlev, nlon, nlat, rad_present
+        integer  :: nlm, nlev, nlon, nlat, rad_present, seaice_present
         integer  :: nlm_f, nlev_f, nlon_f, nlat_f
         real(dp) :: time_f
 
@@ -1141,6 +1172,28 @@ contains
         call nc_read(filename,"qv_g",     now%qv_g)
         call nc_read(filename,"ocn_sst",  ts%ocn%sst)
         call nc_read(filename,"ocn_fnet", ts%ocn%fnet)
+
+        ! === sea-ice state (feat/seaice) ===
+        ! Restore the ice prognostics when the file carries them (older restarts,
+        ! and any l_seaice=.false. run, have seaice_present=0 -> nothing to read).
+        ! The ice fields are allocated lazily by aeros_ocean_init when l_seaice is
+        ! on; guard on allocation so a mismatched pairing fails loudly rather than
+        ! writing into an unallocated array. Rebuild the diagnostic albedo field
+        ! from the restored state so the first restarted radiation step sees it.
+        call nc_read_attr(filename,"seaice_present", seaice_present)
+        if (seaice_present == 1) then
+            if (.not. (allocated(ts%ocn%h_ice) .and. allocated(ts%ocn%a_ice) &
+                       .and. allocated(ts%ocn%t_ice_sfc))) then
+                write(io_unit_err,*) "aeros_timestep_read_restart:: error: restart "// &
+                    "carries sea-ice state but the ocean was not initialised with "// &
+                    "l_seaice = .true."
+                error stop 1
+            end if
+            call nc_read(filename,"ocn_h_ice",     ts%ocn%h_ice)
+            call nc_read(filename,"ocn_a_ice",     ts%ocn%a_ice)
+            call nc_read(filename,"ocn_t_ice_sfc", ts%ocn%t_ice_sfc)
+            call aeros_ocean_albedo_update(ts%ocn)
+        end if
 
         if (rad_present == 1) then
             ! ts%rad%heat is allocated lazily on the first apply; a restart must
