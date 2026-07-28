@@ -39,4 +39,17 @@
     ice_albedo       = 0.60
     k_ice            = 2.0
     t_frz            = 271.35
+    ! Adaptive hyperdiffusion (feat/adaptive-diff). Both OFF = the fixed
+    ! del^ndiff scheme, bit-for-bit unchanged. (1) diff_adapt scales the
+    ! diffusion coefficient per level by 1 + gain*max(0, |zeta|_rms/zeta_ref - 1),
+    ! capped at diff_adapt_max, damping a spiking jet where and when it grows.
+    ! (2) diff_taper lowers the order toward the model top (del^ndiff ->
+    ! del^diff_ndiff_top above diff_taper_sigma) -- an implicit top sponge.
+    diff_adapt       = .false.
+    diff_zeta_ref    = 1.0e-4
+    diff_adapt_gain  = 1.0
+    diff_adapt_max   = 10.0
+    diff_taper       = .false.
+    diff_ndiff_top   = 4
+    diff_taper_sigma = 0.15
 /

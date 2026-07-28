@@ -67,6 +67,16 @@ program rce_long
     real(wp) :: sponge_kr = 1.0_wp/43200.0_wp   ! max Rayleigh rate [s-1]
     real(wp) :: sponge_kt = 1.0_wp/86400.0_wp   ! max Newtonian rate [s-1]
     real(wp) :: sponge_sigma = 0.12_wp          ! sponge ramp top [sigma]
+    ! Adaptive hyperdiffusion knobs (defaults match aeros_timestep_class; both
+    ! OFF => the fixed del^ndiff scheme, bit for bit). See the aeros_timestep
+    ! header. (1) vorticity-scaled strength, (2) sigma-tapered order.
+    logical  :: diff_adapt       = .FALSE.
+    real(wp) :: diff_zeta_ref    = 1.0e-4_wp    ! reference RMS |zeta| [s-1]
+    real(wp) :: diff_adapt_gain  = 1.0_wp       ! excess-vorticity gain [-]
+    real(wp) :: diff_adapt_max   = 10.0_wp      ! cap on the multiplier [-]
+    logical  :: diff_taper       = .FALSE.
+    integer  :: diff_ndiff_top   = 4            ! order at the model top
+    real(wp) :: diff_taper_sigma = 0.15_wp      ! taper ramp top [sigma]
     real(wp) :: seed_asym = 0.0_wp    ! zonal-asymmetry seed amplitude [K-ish]
     real(wp) :: albedo = 0.06_wp      ! surface broadband albedo (cloud proxy knob)
     real(wp) :: co2_ppm = 280.0_wp
@@ -205,6 +215,15 @@ program rce_long
     if (l_cloud_prog) ts%rad%clouds = .TRUE.
     ts%sponge_on    = l_sponge
     call aeros_timestep_set_sponge(ts, vg, sponge_kr, sponge_kt, sponge_sigma)
+    ! Adaptive hyperdiffusion (numerical safety net for the top thermal-wind /
+    ! jet blow-up). (1) vorticity-scaled strength: scalar fields set directly.
+    ts%diff_adapt      = diff_adapt
+    ts%diff_zeta_ref   = diff_zeta_ref
+    ts%diff_adapt_gain = diff_adapt_gain
+    ts%diff_adapt_max  = diff_adapt_max
+    ! (2) sigma-tapered order: the setter rebuilds the per-level ratios.
+    if (diff_taper) call aeros_timestep_set_diff_taper(ts, vg, .TRUE., &
+                            ndiff_top=diff_ndiff_top, taper_sigma=diff_taper_sigma)
     ts%vd%enabled   = l_vdiff
     ts%vd%k0        = vdiff_k0
     ts%vd%sigma     = vdiff_sigma
@@ -616,6 +635,23 @@ contains
         call nml_read(nmlfile, "rce", "cloud_tau_evap", cloud_tau_evap, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "cloud_c_detr", cloud_c_detr, &
+                      defaults_file="input/rce_defaults.nml")
+        ! Adaptive hyperdiffusion knobs (feat/adaptive-diff): optional (inherit
+        ! rce_defaults.nml, both OFF) so existing rce_*.nml files that omit them
+        ! keep the fixed del^ndiff scheme, bit for bit.
+        call nml_read(nmlfile, "rce", "diff_adapt", diff_adapt, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "diff_zeta_ref", diff_zeta_ref, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "diff_adapt_gain", diff_adapt_gain, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "diff_adapt_max", diff_adapt_max, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "diff_taper", diff_taper, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "diff_ndiff_top", diff_ndiff_top, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "diff_taper_sigma", diff_taper_sigma, &
                       defaults_file="input/rce_defaults.nml")
         return
     end subroutine read_config

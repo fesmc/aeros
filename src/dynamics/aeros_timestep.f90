@@ -71,6 +71,46 @@ module aeros_timestep
     ! operator no longer a pure power of the Laplacian. aeros_budget measures
     ! the drift rather than assuming it away.
     !
+    ! === Adaptive hyperdiffusion (SpeedyWeather-style) =======================
+    !
+    ! Two OPT-IN refinements of the operator above, both default OFF and both
+    ! bit-for-bit reducing to the fixed del^ndiff scheme when off. They are the
+    ! two ideas SpeedyWeather uses to stay stable at the model top with no
+    ! Rayleigh sponge (docs/refs/speedy_comparison.md 4a); aeros keeps its
+    ! sponge, so these are a complementary, independently-useful numerical
+    ! safety net against a runaway thermal wind or jet. Both stay IMPLICIT --
+    ! forward-split diffusion on the leapfrog is unconditionally unstable
+    ! (aeros_vdiff header, the house lesson) -- so each only reshapes the
+    ! per-degree, now per-level, damping factor that the division applies.
+    !
+    ! (1) VORTICITY-SCALED STRENGTH (`diff_adapt`). Each step, per level, the
+    ! diffusion coefficient is multiplied by
+    !
+    !     mult_k = 1 + diff_adapt_gain * max(0, |zeta|_k/diff_zeta_ref - 1)
+    !
+    ! capped at diff_adapt_max. |zeta|_k is the level's RMS vorticity [s-1],
+    ! computed from the spectral coefficients by Parseval rather than a grid
+    ! synthesis -- surface-mean-square = sum_lm w_m |vor_lm|^2 / (4 pi), with
+    ! w_m = 1 for m = 0 and 2 for m > 0 (negative orders are not stored for a
+    ! real field), and 4 pi = c00^2 read back from the transform. That is one
+    ! O(nlm) reduction per level and no transform. RMS (not grid max) is the
+    ! robust, cheap choice: a growing thermal wind / jet is a large-scale,
+    ! low-degree structure, exactly what the RMS is dominated by, and it cannot
+    ! be tripped by a single noisy gridpoint. Below the threshold mult_k = 1 and
+    ! the operator is untouched; where and when a level spikes it is damped
+    ! harder, in that level and that step only.
+    !
+    ! (2) SIGMA-TAPERED ORDER (`diff_taper`). The order is lowered toward the
+    ! model top -- del^ndiff through the troposphere, ramping to del^diff_ndiff_top
+    ! (a broader-scale, less scale-selective damping) above diff_taper_sigma.
+    ! A lower order is a stronger, less selective sink at the top: an implicit
+    ! sponge that cannot spin an unbounded thermal wind. This makes the
+    ! per-degree ratio level-dependent, `dratio_lev(0:lmax, 1:nlev)`, with a
+    ! per-level EVEN order (ramped in even steps so the exponent stays an integer
+    ! power of the Laplacian -- and so diff_ndiff_top = ndiff is bit-for-bit the
+    ! 1-D dratio). Precomputed at init and on any knob change; the per-step cost
+    ! is zero.
+    !
     ! === The mass fixer ======================================================
     !
     ! Optional (`mass_fixer`), off by default, applied LAST so that the state
@@ -286,6 +326,27 @@ module aeros_timestep
         ! step-dependent part is one multiply, so this never needs rebuilding.
         real(wp), allocatable :: dratio(:)   ! (0:lmax)
 
+        ! === Adaptive hyperdiffusion (see the module header) =================
+        ! Both opt-in, both default OFF => bit-for-bit the fixed del^ndiff scheme.
+        !
+        ! (1) Vorticity-scaled strength: mult_k on the coefficient, per level,
+        !     keyed to the level's RMS vorticity exceeding diff_zeta_ref.
+        logical  :: diff_adapt      = .FALSE.       ! vorticity-scaled strength
+        real(wp) :: diff_zeta_ref   = 1.0e-4_wp     ! reference RMS |zeta| [s-1]
+        real(wp) :: diff_adapt_gain = 1.0_wp        ! excess-vorticity gain [-]
+        real(wp) :: diff_adapt_max  = 10.0_wp       ! cap on the multiplier [-]
+
+        ! (2) Sigma-tapered order: order ramps from ndiff to diff_ndiff_top above
+        !     diff_taper_sigma. dratio_lev is the per-level [l(l+1)/..]^(n_k/2);
+        !     ndiff_lev is the per-level even order it was built with. Always
+        !     allocated and built; when diff_taper is off every level uses ndiff,
+        !     so dratio_lev(:,k) == dratio(:) exactly and the scheme is unchanged.
+        logical  :: diff_taper       = .FALSE.      ! sigma-tapered order
+        integer  :: diff_ndiff_top   = 4            ! order at the model top
+        real(wp) :: diff_taper_sigma = 0.15_wp      ! ramp threshold [sigma]
+        real(wp), allocatable :: dratio_lev(:,:)    ! (0:lmax, nlev)
+        integer,  allocatable :: ndiff_lev(:)       ! (nlev)
+
         ! === Upper-level sponge ==============================================
         !
         ! A model-top damping layer, off by default. It removes the runaway a
@@ -350,6 +411,7 @@ module aeros_timestep
     public :: aeros_timestep_diagnose
     public :: aeros_timestep_enable_diag
     public :: aeros_timestep_set_sponge
+    public :: aeros_timestep_set_diff_taper
     public :: aeros_timestep_print
     public :: aeros_timestep_write_restart
     public :: aeros_timestep_read_restart
@@ -469,6 +531,14 @@ contains
             ts%dratio(l) = (real(l*(l+1), wp)/lref)**(ts%ndiff/2)
         end do
 
+        ! Per-level ratios for the sigma-tapered order (module header). Built
+        ! from ts%ndiff / diff_taper / diff_ndiff_top / diff_taper_sigma, which
+        ! carry their type defaults here (taper OFF); a driver that wants the
+        ! taper sets those and calls aeros_timestep_set_diff_taper to rebuild.
+        ! With taper off every level uses ndiff, so dratio_lev(:,k) == dratio(:).
+        allocate(ts%dratio_lev(0:lmax, vg%nlev), ts%ndiff_lev(vg%nlev))
+        call build_diff_ratio(ts, vg)
+
         ! The (0,0) mode index and the (0,0) coefficient of the constant field 1
         ! (= sqrt(4 pi) in this normalization), read back from a transform
         ! rather than written down, so a normalization change cannot silently
@@ -544,6 +614,78 @@ contains
 
     end subroutine aeros_timestep_set_sponge
 
+    subroutine build_diff_ratio(ts, vg)
+        ! (Re)build the per-level hyperdiffusion ratios dratio_lev(0:lmax,nlev)
+        ! and the per-level order ndiff_lev. When diff_taper is off, every level
+        ! uses ts%ndiff and dratio_lev(:,k) reproduces the 1-D dratio(:) exactly.
+        ! When on, the order ramps from ndiff (at/below diff_taper_sigma) to
+        ! diff_ndiff_top at the model top, in EVEN steps so the exponent stays an
+        ! integer power -- which is what makes diff_ndiff_top == ndiff a bit-for-
+        ! bit no-op. sigma_full is (1:nlev), small at the top (k = 1). Split out
+        ! of init so the taper can be reconfigured after init.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_vgrid_class),    intent(in)    :: vg
+
+        integer  :: k, l, lmax, n
+        real(wp) :: lref, frac, order_r
+
+        lmax = ubound(ts%dratio, 1)
+        lref = real(lmax*(lmax+1), wp)
+
+        do k = 1, vg%nlev
+            n = ts%ndiff
+            if (ts%diff_taper .and. vg%sigma_full(k) < ts%diff_taper_sigma) then
+                frac    = (ts%diff_taper_sigma - vg%sigma_full(k))/ts%diff_taper_sigma
+                order_r = real(ts%ndiff, wp) &
+                            - frac*real(ts%ndiff - ts%diff_ndiff_top, wp)
+                n = 2*nint(order_r/2.0_wp)                  ! nearest even order
+                n = max(ts%diff_ndiff_top, min(ts%ndiff, n))
+            end if
+            ts%ndiff_lev(k) = n
+            do l = 0, lmax
+                ts%dratio_lev(l,k) = (real(l*(l+1), wp)/lref)**(n/2)
+            end do
+        end do
+
+        return
+
+    end subroutine build_diff_ratio
+
+    subroutine aeros_timestep_set_diff_taper(ts, vg, taper, ndiff_top, taper_sigma)
+        ! Turn the sigma-tapered diffusion order on/off and (re)build the
+        ! per-level ratios. For configuring the implicit top sponge after init
+        ! without recompiling (the top thermal-wind blow-up is model-top
+        ! dynamical). ndiff_top and taper_sigma are optional; omitted ones keep
+        ! their current value.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_vgrid_class),    intent(in)    :: vg
+        logical,  intent(in)           :: taper
+        integer,  intent(in), optional :: ndiff_top
+        real(wp), intent(in), optional :: taper_sigma
+
+        ts%diff_taper = taper
+        if (present(ndiff_top))   ts%diff_ndiff_top   = ndiff_top
+        if (present(taper_sigma)) ts%diff_taper_sigma = taper_sigma
+
+        if (ts%diff_ndiff_top < 2 .or. mod(ts%diff_ndiff_top,2) /= 0 &
+            .or. ts%diff_ndiff_top > ts%ndiff) then
+            write(io_unit_err,*) "aeros_timestep_set_diff_taper:: error: diff_ndiff_top "// &
+                "must be a positive even order <= ndiff, got ", ts%diff_ndiff_top
+            error stop 1
+        end if
+
+        call build_diff_ratio(ts, vg)
+
+        return
+
+    end subroutine aeros_timestep_set_diff_taper
+
     subroutine aeros_timestep_end(ts)
 
         implicit none
@@ -570,6 +712,8 @@ contains
         call aeros_land_end(ts%land)   ! feat/land
 
         if (allocated(ts%dratio)) deallocate(ts%dratio)
+        if (allocated(ts%dratio_lev)) deallocate(ts%dratio_lev)
+        if (allocated(ts%ndiff_lev)) deallocate(ts%ndiff_lev)
         if (allocated(ts%sponge_kr_lev)) deallocate(ts%sponge_kr_lev)
         if (allocated(ts%sponge_kt_lev)) deallocate(ts%sponge_kt_lev)
         if (allocated(ts%ps_fix)) deallocate(ts%ps_fix)
@@ -1441,6 +1585,12 @@ contains
 
     subroutine diffuse(ts, sht, h)
         ! Implicit del^ndiff damping of vorticity, divergence and temperature.
+        !
+        ! The per-level factor is fac(l,k) = 1/(1 + mult_k (h/tau) dratio_lev(l,k)),
+        ! where dratio_lev carries the (optionally sigma-tapered) order and mult_k
+        ! the (optional) vorticity scaling. With both adaptive mechanisms off,
+        ! mult_k = 1 and dratio_lev(:,k) = dratio(:), so fac reduces exactly to the
+        ! fixed 1-D scheme -- bit for bit. See the module header.
 
         implicit none
 
@@ -1448,20 +1598,24 @@ contains
         type(aeros_sht_class),      intent(in)    :: sht
         real(wp), intent(in) :: h
 
-        real(wp) :: fac(0:sht%lmax), rate
+        real(wp) :: fac(0:sht%lmax, ts%new%nlev), rate, mult
         integer  :: l, k, lm
 
         rate = h/ts%tau_diff
-        do l = 0, sht%lmax
-            fac(l) = 1.0_wp/(1.0_wp + rate*ts%dratio(l))
+        do k = 1, ts%new%nlev
+            mult = 1.0_wp
+            if (ts%diff_adapt) mult = diff_adapt_mult(ts, sht, k)
+            do l = 0, sht%lmax
+                fac(l,k) = 1.0_wp/(1.0_wp + mult*rate*ts%dratio_lev(l,k))
+            end do
         end do
 
         !$omp parallel do collapse(2) schedule(static) private(k,lm)
         do k = 1, ts%new%nlev
             do lm = 1, sht%nlm
-                ts%new%vor(lm,k)  = fac(sht%l_of_lm(lm))*ts%new%vor(lm,k)
-                ts%new%div(lm,k)  = fac(sht%l_of_lm(lm))*ts%new%div(lm,k)
-                ts%new%temp(lm,k) = fac(sht%l_of_lm(lm))*ts%new%temp(lm,k)
+                ts%new%vor(lm,k)  = fac(sht%l_of_lm(lm),k)*ts%new%vor(lm,k)
+                ts%new%div(lm,k)  = fac(sht%l_of_lm(lm),k)*ts%new%div(lm,k)
+                ts%new%temp(lm,k) = fac(sht%l_of_lm(lm),k)*ts%new%temp(lm,k)
             end do
         end do
         !$omp end parallel do
@@ -1469,6 +1623,40 @@ contains
         return
 
     end subroutine diffuse
+
+    real(wp) function diff_adapt_mult(ts, sht, k) result(mult)
+        ! The vorticity-scaled diffusion multiplier for level k (module header):
+        !   mult = min( 1 + gain*max(0, |zeta|_k/zeta_ref - 1), adapt_max ).
+        ! |zeta|_k is the level's RMS vorticity [s-1] from Parseval on the
+        ! spectral coefficients -- surface-mean-square = sum_lm w_m |vor|^2/(4 pi),
+        ! w_m = 1 (m=0) or 2 (m>0), 4 pi = c00^2 -- so no grid synthesis is
+        ! needed. l = 0 (which vorticity never populates) is skipped.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(in) :: ts
+        type(aeros_sht_class),      intent(in) :: sht
+        integer,                    intent(in) :: k
+
+        real(dp) :: s2, w
+        real(wp) :: zrms, excess
+        integer  :: lm
+
+        s2 = 0.0_dp
+        do lm = 1, sht%nlm
+            if (sht%l_of_lm(lm) == 0) cycle
+            w = merge(1.0_dp, 2.0_dp, sht%m_of_lm(lm) == 0)
+            s2 = s2 + w*real(ts%new%vor(lm,k)*conjg(ts%new%vor(lm,k)), dp)
+        end do
+        zrms = real(sqrt(s2)/ts%c00, wp)            ! c00^2 = 4 pi
+
+        excess = zrms/ts%diff_zeta_ref - 1.0_wp
+        mult   = 1.0_wp + ts%diff_adapt_gain*max(0.0_wp, excess)
+        mult   = min(mult, ts%diff_adapt_max)
+
+        return
+
+    end function diff_adapt_mult
 
     subroutine raw_filter(ts, sht, cur, nlev)
         ! Williams (2009) Robert-Asselin-Williams filter, in place on X^n and
@@ -1628,6 +1816,20 @@ contains
                                     "  (1 = classical Robert-Asselin)"
         write(iou,"(a,i9)")     "   diffusion order            ", ts%ndiff
         write(iou,"(a,f9.2,a)") "   diffusion e-folding at lmax", ts%tau_diff/3600.0_wp, " h"
+        if (ts%diff_adapt) then
+            write(iou,"(a,es9.2,a,f6.2,a,f6.2)") &
+                "   diff vorticity-scaling   ON  zeta_ref", ts%diff_zeta_ref, &
+                " s-1  gain", ts%diff_adapt_gain, "  max", ts%diff_adapt_max
+        else
+            write(iou,"(a)")    "   diff vorticity-scaling      off"
+        end if
+        if (ts%diff_taper) then
+            write(iou,"(a,i2,a,i2,a,f6.3)") &
+                "   diff order taper         ON  del^", ts%ndiff, " -> del^", &
+                ts%diff_ndiff_top, " above sigma", ts%diff_taper_sigma
+        else
+            write(iou,"(a)")    "   diff order taper            off"
+        end if
         if (ts%mass_fixer) then
             write(iou,"(a)")    "   mass fixer                  ON  (p_s rescaled each step)"
         else
