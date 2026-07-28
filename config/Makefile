@@ -209,6 +209,11 @@ ocean : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_ocean.x is ready."
 
+seaice : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_seaice.x $(testdir)/test_seaice.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_seaice.x is ready."
+
 rce : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_rce.x $(testdir)/test_rce.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
@@ -235,7 +240,7 @@ topography : aeros-static
 		@echo "    test_topography.x is ready."
 
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation surface ocean seaice rce held-suarez-test ecckd restart topography
 
 # Driver executables
 drivers : run bench held-suarez
