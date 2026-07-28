@@ -221,6 +221,13 @@ program rce_long
         write(*,"(a,es11.3,a,es11.3,a,f6.1,a)") " rce_long:: T21   phis min ", &
             minval(phis_full), "  max ", maxval(phis_full), " m2/s2   ramp ", &
             topo_ramp_days, " days"
+        ! Dump the band-limited orography on the model grid for a visual sanity
+        ! check (correct continents/mountains, sane magnitude).
+        call nc_create("output/rce_phis.nc")
+        call nc_write_dim("output/rce_phis.nc", "lon", x=grd%lon, units="degrees_east")
+        call nc_write_dim("output/rce_phis.nc", "lat", x=grd%lat, units="degrees_north")
+        call nc_write("output/rce_phis.nc", "phis", phis_full, dim1="lon", dim2="lat", &
+                      units="m2 s-2", long_name="surface geopotential (T21)")
     end if
     ! Initial feed at t = 0 (scale = 0 while ramping, so the run starts flat).
     tscale      = aeros_topography_scale(l_topography, 0.0_wp, topo_ramp_days)
