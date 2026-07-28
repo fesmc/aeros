@@ -42,6 +42,14 @@ $(objdir)/aeros_state.o: $(srcdir)/aeros_state.f90 \
 							$(objdir)/aeros_defs.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# Boundary-condition input: read a named 2D field from a netCDF file on a
+# regular lon/lat grid and bilinearly regrid it onto the model grid. General
+# (topography, land-sea mask, albedo, SST); leans on ncio for the read, so it
+# needs only aeros_defs among the aeros objects.
+$(objdir)/aeros_bcinput.o: $(srcdir)/aeros_bcinput.f90 \
+							$(objdir)/aeros_defs.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 ## aeros dynamics #############################
 #
 # The spectral primitive-equation core (docs/design.md sections 3.2, 4),
@@ -184,6 +192,13 @@ $(objdir)/aeros_ocean.o: $(physdir)/aeros_ocean.f90 \
 							$(objdir)/aeros_defs.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# M2.x: real surface topography (orography). Returns the surface geopotential
+# phis on the model grid from an ERA5 file, via the bcinput regridder. A column
+# boundary field, archived with the physics; needs aeros_bcinput.
+$(objdir)/aeros_topography.o: $(physdir)/aeros_topography.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_bcinput.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 ## aeros core #################################
 #
 # IO and the public facade. These sit above everything else and must be
@@ -225,7 +240,8 @@ $(objdir)/aeros.o: $(srcdir)/aeros.f90 \
 aeros_base =     $(objdir)/aeros_defs.o \
                  $(objdir)/aeros_spectral.o \
                  $(objdir)/aeros_grid.o \
-                 $(objdir)/aeros_state.o
+                 $(objdir)/aeros_state.o \
+                 $(objdir)/aeros_bcinput.o
 
 aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_vordiv.o \
@@ -243,7 +259,8 @@ aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_radiation.o \
                  $(objdir)/aeros_surface.o \
                  $(objdir)/aeros_vdiff.o \
-                 $(objdir)/aeros_ocean.o
+                 $(objdir)/aeros_ocean.o \
+                 $(objdir)/aeros_topography.o
 
 # aeros_timestep sits above the physics as well as the dynamics -- it is what
 # calls the forcing -- so it is archived after both.

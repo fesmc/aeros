@@ -33,6 +33,7 @@ program rce_long
     use aeros_timestep
     use aeros_radiation, only : SCHEME_ECCKD
     use aeros_ocean,    only : aeros_ocean_init
+    use aeros_topography, only : aeros_topography_load, aeros_topography_scale
     use nml,            only : nml_read
     use ncio,           only : nc_create, nc_write_dim, nc_write
 
@@ -78,6 +79,14 @@ program rce_long
     real(wp) :: ocean_depth = 10.0_wp
     real(wp) :: rad_interval = 21600.0_wp   ! radiation recompute cadence [s]; default 6 h
     integer  :: rad_scheme = SCHEME_ECCKD   ! LW/SW scheme (2=ecCKD default, 1=SESAM)
+    ! --- real surface topography (orography) --------------------------------
+    ! Default .FALSE. keeps the flat aquaplanet (phis = 0), bit-for-bit unchanged.
+    ! When on, phis is read from topo_file (ERA5 surface geopotential, m2 s-2) and
+    ! ramped in over topo_ramp_days to spread the spin-up shock. The ramp is a
+    ! pure function of elapsed time (see aeros_topography_scale), hence restart-safe.
+    logical  :: l_topography = .FALSE.
+    character(len=512) :: topo_file = "/Users/alrobi001/data/era5/era5_orography.nc"
+    real(wp) :: topo_ramp_days = 20.0_wp    ! linear 0->1 spin-up ramp [days]; 0 = full at t=0
 
     ! --- checkpoint / restart ------------------------------------------------
     ! restart_in  : path to a restart file to resume from ("" = cold start).
@@ -97,7 +106,9 @@ program rce_long
     type(aeros_state_class)    :: now
     type(aeros_timestep_class) :: ts
 
-    real(wp), allocatable :: phis2(:,:)
+    real(wp), allocatable :: phis2(:,:)       ! surface geopotential fed to the dynamics
+    real(wp), allocatable :: phis_full(:,:)   ! full (unramped) topography [m2 s-2]
+    real(wp) :: tscale, tscale_prev           ! current / previous ramp factor
     real(wp) :: qs, dqsdt, tval
     real(wp) :: phalf(0:64), pfull(64), dpc(64)
     integer  :: i, j, k, n, m
@@ -190,7 +201,49 @@ program rce_long
         end block
     end if
 
-    allocate(phis2(grd%nlon, grd%nlat)); phis2 = 0.0_wp
+    ! Surface geopotential (lower boundary). Aquaplanet phis = 0 by default; with
+    ! l_topography the real orography is read once and ramped in over the run.
+    allocate(phis2(grd%nlon, grd%nlat));     phis2 = 0.0_wp
+    allocate(phis_full(grd%nlon, grd%nlat)); phis_full = 0.0_wp
+    if (l_topography) then
+        call aeros_topography_load(topo_file, grd%lon, grd%lat, phis_full)
+        write(*,"(a,a)") " rce_long:: topography from ", trim(topo_file)
+        write(*,"(a,es11.3,a,es11.3)") " rce_long:: raw   phis min ", &
+            minval(phis_full), "  max ", maxval(phis_full)
+        ! Spectrally truncate to the model resolution (T21). A spectral core can
+        ! only carry the surface geopotential at its resolved scales: the raw
+        ! interpolated field still has grid-scale structure at coastlines and
+        ! mountain flanks, which aliases in the transforms and rings (Gibbs),
+        ! destabilizing the lowest layer. Band-limiting via one analysis ->
+        ! synthesis round-trip (SHTns truncates at T21) gives the smooth
+        ! orography the dynamics is consistent with. Standard spectral-model
+        ! practice.
+        block
+            complex(wp_sh), allocatable :: phis_lm(:)
+            real(dp),       allocatable :: gwork(:,:)
+            allocate(phis_lm(pool%sht(1)%nlm))
+            allocate(gwork(grd%nlon, grd%nlat))
+            gwork = real(phis_full, dp)
+            call aeros_sht_analysis(pool%sht(1), gwork, phis_lm)   ! grid -> T21 spectral (overwrites gwork)
+            call aeros_sht_synthesis(pool%sht(1), phis_lm, gwork)  ! T21 spectral -> band-limited grid
+            phis_full = real(gwork, wp)
+            deallocate(phis_lm, gwork)
+        end block
+        write(*,"(a,es11.3,a,es11.3,a,f6.1,a)") " rce_long:: T21   phis min ", &
+            minval(phis_full), "  max ", maxval(phis_full), " m2/s2   ramp ", &
+            topo_ramp_days, " days"
+        ! Dump the band-limited orography on the model grid for a visual sanity
+        ! check (correct continents/mountains, sane magnitude).
+        call nc_create("output/rce_phis.nc")
+        call nc_write_dim("output/rce_phis.nc", "lon", x=grd%lon, units="degrees_east")
+        call nc_write_dim("output/rce_phis.nc", "lat", x=grd%lat, units="degrees_north")
+        call nc_write("output/rce_phis.nc", "phis", phis_full, dim1="lon", dim2="lat", &
+                      units="m2 s-2", long_name="surface geopotential (T21)")
+    end if
+    ! Initial feed at t = 0 (scale = 0 while ramping, so the run starts flat).
+    tscale      = aeros_topography_scale(l_topography, 0.0_wp, topo_ramp_days)
+    tscale_prev = tscale
+    phis2 = tscale*phis_full
     call aeros_timestep_set_phis(ts, phis2)
 
     ! === Restart branch: load state instead of constructing an IC ===========
@@ -255,6 +308,18 @@ program rce_long
 
     blew_up = .FALSE.
     do n = n0+1, n0+nstep
+        ! Advance the topography ramp: a pure function of absolute elapsed time
+        ! n*dt, so it is restart-safe -- a run resumed at n0 continues the ramp at
+        ! the right amplitude. Only re-set phis while the factor is still changing
+        ! (during the ramp); once it reaches 1 the surface is constant.
+        if (l_topography .and. topo_ramp_days > 0.0_wp .and. tscale_prev < 1.0_wp) then
+            tscale = aeros_topography_scale(.true., real(n,wp)*dt, topo_ramp_days)
+            if (tscale /= tscale_prev) then
+                phis2 = tscale*phis_full
+                call aeros_timestep_set_phis(ts, phis2)
+                tscale_prev = tscale
+            end if
+        end if
         call aeros_timestep_step(ts, pool, vg, grd, now)
         if (any(ts%wrk%t_g /= ts%wrk%t_g) .or. any(now%qv_g /= now%qv_g)) then
             write(*,"(a,i0,a,f7.2,a)") " *** NaN at step ", n, "  (day ", &
@@ -426,8 +491,17 @@ contains
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "rad_scheme", rad_scheme, &
                       defaults_file="input/rce_defaults.nml")
-        ! Restart knobs: optional (inherit input/rce_defaults.nml) so existing
-        ! rce_*.nml files that omit them keep cold-starting, not erroring.
+        ! Topography (feat/topography). Optional overrides like the rad knobs
+        ! above: a namelist that omits them inherits input/rce_defaults.nml
+        ! (l_topography off), so existing run namelists are unaffected.
+        call nml_read(nmlfile, "rce", "l_topography", l_topography, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "topo_file", topo_file, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "topo_ramp_days", topo_ramp_days, &
+                      defaults_file="input/rce_defaults.nml")
+        ! Restart knobs (feat/restart): optional (inherit input/rce_defaults.nml)
+        ! so existing rce_*.nml files that omit them keep cold-starting, not erroring.
         call nml_read(nmlfile, "rce", "restart_in", restart_in, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "restart_out", restart_out, &
