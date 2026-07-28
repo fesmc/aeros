@@ -9,6 +9,15 @@
     l_topography     = .false.
     topo_file        = "/Users/alrobi001/data/era5/era5_orography.nc"
     topo_ramp_days   = 20.0
+    ! Land surface + land-sea mask (feat/land). l_land off = all-ocean
+    ! aquaplanet, the bit-for-bit default. Files are ERA5 climatologies.
+    l_land           = .false.
+    lsm_file         = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_lsm_1991-2020_clim.nc"
+    land_albedo_file = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_fal_1991-2020_clim.nc"
+    w_field_capacity = 0.15
+    w_crit           = -1.0
+    c_soil           = 2.0e6
+    land_albedo      = 0.20
     restart_in       = ""
     restart_out      = ""
     restart_interval = 0

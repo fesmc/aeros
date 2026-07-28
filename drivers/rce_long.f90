@@ -34,6 +34,7 @@ program rce_long
     use aeros_radiation, only : SCHEME_ECCKD
     use aeros_ocean,    only : aeros_ocean_init
     use aeros_topography, only : aeros_topography_load, aeros_topography_scale
+    use aeros_land,     only : aeros_land_init, aeros_land_couple_radiation
     use nml,            only : nml_read
     use ncio,           only : nc_create, nc_write_dim, nc_write
 
@@ -87,6 +88,21 @@ program rce_long
     logical  :: l_topography = .FALSE.
     character(len=512) :: topo_file = "/Users/alrobi001/data/era5/era5_orography.nc"
     real(wp) :: topo_ramp_days = 20.0_wp    ! linear 0->1 spin-up ramp [days]; 0 = full at t=0
+
+    ! --- land surface + land-sea mask (feat/land) ---------------------------
+    ! Default .FALSE. keeps the all-ocean aquaplanet, bit-for-bit unchanged. When
+    ! on, the land-sea mask and land albedo are read from ERA5 climatologies and
+    ! land points carry a prognostic bucket soil moisture and slab soil
+    ! temperature (the land skin temperature) instead of the ocean SST.
+    logical  :: l_land = .FALSE.
+    character(len=512) :: lsm_file = &
+        "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_lsm_1991-2020_clim.nc"
+    character(len=512) :: land_albedo_file = &
+        "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_fal_1991-2020_clim.nc"
+    real(wp) :: w_field_capacity = 0.15_wp  ! bucket capacity [m]
+    real(wp) :: w_crit           = -1.0_wp  ! beta knee [m]; <0 => 0.75*capacity
+    real(wp) :: c_soil           = 2.0e6_wp ! soil areal heat capacity [J m-2 K-1]
+    real(wp) :: land_albedo      = 0.20_wp  ! fallback land albedo (no albedo file)
 
     ! --- checkpoint / restart ------------------------------------------------
     ! restart_in  : path to a restart file to resume from ("" = cold start).
@@ -171,6 +187,25 @@ program rce_long
     ts%ocn%mode     = ocean_mode
     ts%ocn%depth    = ocean_depth
     call aeros_ocean_init(ts%ocn, grd)   ! recompute C for the chosen depth/mode
+
+    ! Land surface (feat/land). Configure the land state from the namelist and
+    ! init it (reads the land-sea mask and albedo maps when on). Then compose the
+    ! radiation surface-albedo map: the ocean scalar albedo (set just above) over
+    ! sea, the land albedo on land. Off by default -> all-ocean, bit-for-bit.
+    ts%land%enabled          = l_land
+    ts%land%lsm_file         = lsm_file
+    ts%land%albedo_file      = land_albedo_file
+    ts%land%w_field_capacity = w_field_capacity
+    ts%land%w_crit           = w_crit
+    ts%land%c_soil           = c_soil
+    ts%land%land_albedo      = land_albedo
+    call aeros_land_init(ts%land, grd, l_land)
+    if (l_land) then
+        call aeros_land_couple_radiation(ts%land, ts%rad%alb_map, ts%rad%albedo)
+        write(*,"(a,a)") " rce_long:: land-sea mask from ", trim(lsm_file)
+        write(*,"(a,i0,a,i0,a)") " rce_long:: land cells ", count(ts%land%mask), &
+            " of ", grd%nlon*grd%nlat, " (mask threshold 0.5)"
+    end if
 
     ! Per-term heating diagnostics: split the forward-split physics back into
     ! surface/convection/condensation/radiation, capture vdiff's implicit change,
@@ -499,6 +534,23 @@ contains
         call nml_read(nmlfile, "rce", "topo_file", topo_file, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "topo_ramp_days", topo_ramp_days, &
+                      defaults_file="input/rce_defaults.nml")
+        ! Land (feat/land). Optional overrides like the topo knobs above: a
+        ! namelist that omits them inherits input/rce_defaults.nml (l_land off),
+        ! so existing run namelists are unaffected.
+        call nml_read(nmlfile, "rce", "l_land", l_land, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "lsm_file", lsm_file, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "land_albedo_file", land_albedo_file, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "w_field_capacity", w_field_capacity, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "w_crit", w_crit, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "c_soil", c_soil, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "land_albedo", land_albedo, &
                       defaults_file="input/rce_defaults.nml")
         ! Restart knobs (feat/restart): optional (inherit input/rce_defaults.nml)
         ! so existing rce_*.nml files that omit them keep cold-starting, not erroring.
