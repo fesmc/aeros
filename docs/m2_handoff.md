@@ -1,6 +1,45 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION: the slab-ocean model-top instability (now the critical-path blocker)
+## ►► NEXT SESSION: calibrate/stabilize the prognostic cloud scheme (land×cloud blow-up)
+
+**CORRECTION (diagnosed 2026-07-28, supersedes the "slab model-top instability"
+framing that was here):** the coupled blow-up is **not** an ocean/model-top
+problem. It is a **land × prognostic-cloud interaction**, and the ocean is a
+bystander. Bisection with `rce_long` (`logs/topinvestig/`):
+- Neither feature alone blows (land-only, clouds-only: stable ≥19 days).
+- **Only `l_land + l_cloud_prog` together blow up** — an explosively-growing
+  *near-equatorial upper-tropospheric jet* (equator, lev 3–5: ~10 m/s day 12 → 31
+  m/s day 14 → top NaN day 15). Sea ice is irrelevant (land+seaice, clouds+seaice
+  both stable); **the ocean is irrelevant** — prescribed SST blows at the same
+  step as a 2 m or 10 m slab (bit-identical timing).
+- **It is the too-thin, patchy prognostic cover.** With land: diagnostic clouds →
+  stable; clear-sky → stable; prognostic **thin** (default knobs) → blows;
+  prognostic **forced thick** (`cloud_rhc_sfc=0.40, cloud_rhc_top=0.60`) → stable.
+  Without land, prognostic clouds are stable. The prognostic scheme touches the
+  model **only through radiation** (`aeros_cloud_prog_apply` is `intent(in)` on
+  T/q; driver forces `rad%clouds=.TRUE.` when `l_cloud_prog`, rce_long.f90:205), so
+  the mechanism is: land's zonal asymmetry × a thin, *spatially-patchy* cloud field
+  → patchy cloud-radiative heating near the equator → a resonant jet nothing damps.
+  This is exactly the "default knobs give thin cover; calibration is future work"
+  caveat the cloud scheme shipped with — now shown to be a *stability* problem, not
+  just a bias, because the scheme was only ever tested on the zonally-symmetric
+  aquaplanet.
+
+**So the bare slab (incl. sea ice) is NOT the blocker** — a 2 m slab with hard
+damping runs stably ≥19 days, and land+sea-ice is stable. The §29 slab *thermo-
+dynamic* runaway (cloud cover 0.66→0.86 over years) is a separate, slower issue.
+
+**Fix direction (get AR's call before implementing — cloud-scheme design):**
+1. **Calibrate the prognostic cloud scheme to realistic cover (~0.6)** — the real
+   fix; forced-thick is already stable. Tune the Sundqvist RH_crit profile /
+   formation-evaporation balance so equilibrium cover matches obs instead of ~0.07.
+2. **Add horizontal advection of `cf`** (the agent deferred it) — an unadvected
+   cloud field is patchier than a real one; transport would smooth the forcing.
+3. **Consider a limiter/smoother on the cloud-radiative heating** if the equatorial
+   jet proves partly numerical (the day-12→14 explosive acceleration looks resonant).
+Recommended: (1)+(2) together; (3) only if a jet remains after realistic cover.
+Repro configs in `logs/topinvestig/` (`L_progcloud` blows, `L_progthick`/`A_progcloud`
+stable).
 
 **Wave 2 landed (on `main`, integrated + verified together).** Three features
 built in parallel worktrees, merged with an albedo-unification pass, all opt-in
