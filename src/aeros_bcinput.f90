@@ -99,11 +99,13 @@ contains
             src = raw2
             deallocate(raw2)
         case (3)
-            ! CF order (time,lat,lon) -> Fortran (lon,lat,time). Average time.
+            ! CF order (time,lat,lon) -> Fortran (lon,lat,time). ncio/nc_dims
+            ! reports dims in Fortran (array) order, so the time dimension is
+            ! LAST. Read (nlon,nlat,nt) and average over time.
             block
                 integer, allocatable :: ddims(:)
                 call nc_dims(trim(filename), trim(varname), dims=ddims)
-                nt = ddims(1)          ! slowest netCDF dim == time
+                nt = ddims(size(ddims))     ! time == last (slowest) array dim
                 deallocate(ddims)
             end block
             allocate(raw3(nsx, nsy, nt))
