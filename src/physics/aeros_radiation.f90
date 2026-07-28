@@ -75,7 +75,7 @@ module aeros_radiation
                                sigma_sb, S0, pi, aeros_grid_class
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure, &
                                aeros_hydrostatic
-    use aeros_cloud,    only : aeros_cloud_diagnose
+    use aeros_cloud,    only : aeros_cloud_diagnose, aeros_cloud_water
     use aeros_insolation, only : aeros_insol_class, aeros_insol_init, &
                                aeros_insol_end, aeros_insol_annual, aeros_insol_day
     use aeros_ecckd,    only : aeros_ecckd_init, &
@@ -1020,7 +1020,7 @@ contains
     end subroutine aeros_sw_cloudy_column
 
     subroutine aeros_radiation_apply(rad, vg, grd, t_g, qv_g, lnps_g, t_s, &
-                                     nstep, dt, dt_phys)
+                                     nstep, dt, dt_phys, cf_prog)
         ! Radiative heating at the grid seam. The full column transfer (LW + SW)
         ! is recomputed every `interval` seconds; between recomputes the cached
         ! heating rate is held fixed (design.md section 5).
@@ -1050,6 +1050,12 @@ contains
         integer,  intent(in)    :: nstep          ! step counter
         real(wp), intent(in)    :: dt             ! [s]
         real(wp), intent(inout) :: dt_phys(:,:,:) ! (nlon,nlat,nlev) [K] increment
+        ! Prognostic cloud fraction (aeros_cloud_prog). When present the all-sky
+        ! path uses THIS field instead of diagnosing the fraction from RH; the
+        ! in-cloud water paths are still built by aeros_cloud_water, so the cloud
+        ! optics are identical either way. Absent (the diagnostic scheme, the
+        ! default) leaves the RH->cover path bit-for-bit unchanged.
+        real(wp), intent(in), optional :: cf_prog(:,:,:)  ! (nlon,nlat,nlev) [0-1]
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: phi_full(vg%nlev), phi_half(0:vg%nlev), z_half(0:vg%nlev)
@@ -1058,9 +1064,11 @@ contains
         real(wp) :: fnet(0:vg%nlev), heat_lw(vg%nlev), heat_sw(vg%nlev)
         real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net, doy, cz, sw
         integer  :: i, j, k, nlev, nrad
+        logical  :: use_cf_prog
 
         if (.not. rad%enabled) return
 
+        use_cf_prog = present(cf_prog)
         nlev = vg%nlev
         if (.not. allocated(rad%heat)) then
             allocate(rad%heat(rad%nlon, rad%nlat, nlev))
@@ -1099,9 +1107,17 @@ contains
                     z_half = phi_half/grav
 
                     if (rad%clouds) then
-                        ! diagnose the cloud column, then the all-sky operators
-                        call aeros_cloud_diagnose(nlev, t_g(i,j,:), qv_g(i,j,:), &
-                            pfull, exp(lnps_g(i,j)), cf, clwc, ciwc)
+                        ! Cloud column: the prognostic fraction when the
+                        ! prognostic scheme is on, else the RH diagnosis. Either
+                        ! way the in-cloud water paths come from aeros_cloud_water,
+                        ! so the all-sky operators see identical optics.
+                        if (use_cf_prog) then
+                            cf = cf_prog(i,j,:)
+                            call aeros_cloud_water(nlev, t_g(i,j,:), pfull, cf, clwc, ciwc)
+                        else
+                            call aeros_cloud_diagnose(nlev, t_g(i,j,:), qv_g(i,j,:), &
+                                pfull, exp(lnps_g(i,j)), cf, clwc, ciwc)
+                        end if
 
                         ! All-sky: dispatch on the scheme selector (opt-in ecCKD
                         ! folds the same grey cloud optics into its g-points).
