@@ -109,8 +109,8 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_correction.o $(objdir)/aeros_moisture.o \
 							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o \
 							$(objdir)/aeros_convection.o $(objdir)/aeros_surface.o \
-							$(objdir)/aeros_radiation.o $(objdir)/aeros_vdiff.o \
-							$(objdir)/aeros_ocean.o
+							$(objdir)/aeros_radiation.o $(objdir)/aeros_cloud_prog.o \
+							$(objdir)/aeros_vdiff.o $(objdir)/aeros_ocean.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ## aeros physics ##############################
@@ -145,6 +145,15 @@ $(objdir)/aeros_convection.o: $(physdir)/aeros_convection.f90 \
 # q_sat from condensation, so it is compiled after it.
 $(objdir)/aeros_cloud.o: $(physdir)/aeros_cloud.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_condensation.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
+# feat/clouds: prognostic cloud fraction (Sundqvist 1989), the opt-in
+# replacement for the diagnostic RH->cover scheme. A column process; needs the
+# vertical coordinate for the layer pressures and q_sat from condensation, and
+# drives radiation's cloud optics (aeros_cloud_water) through the prognostic cf.
+$(objdir)/aeros_cloud_prog.o: $(physdir)/aeros_cloud_prog.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o \
+							$(objdir)/aeros_condensation.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 # M2.6: ecCKD-style correlated-k gas optics (section 5, option 1). The opt-in
@@ -254,6 +263,7 @@ aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_condensation.o \
                  $(objdir)/aeros_convection.o \
                  $(objdir)/aeros_cloud.o \
+                 $(objdir)/aeros_cloud_prog.o \
                  $(objdir)/aeros_insolation.o \
                  $(objdir)/aeros_ecckd.o \
                  $(objdir)/aeros_radiation.o \
