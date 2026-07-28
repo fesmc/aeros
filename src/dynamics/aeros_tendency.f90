@@ -174,6 +174,7 @@ module aeros_tendency
         real(wp), allocatable :: dt_rad(:,:,:)    ! radiation increment [K/step]
         real(wp), allocatable :: dt_vdiff(:,:,:)  ! vdiff grid-T change [K/step]
         real(wp), allocatable :: dt_vadv(:,:,:)   ! -vadv_t + kappa T omega/p [K/s]
+        real(wp), allocatable :: omega(:,:,:)     ! vertical pressure velocity [Pa/s]
     end type aeros_work_class
 
     public :: aeros_tend_class
@@ -283,9 +284,12 @@ contains
             allocate(wrk%dt_vdiff(wrk%nlon,wrk%nlat,wrk%nlev))
         if (.not. allocated(wrk%dt_vadv)) &
             allocate(wrk%dt_vadv(wrk%nlon,wrk%nlat,wrk%nlev))
+        if (.not. allocated(wrk%omega)) &
+            allocate(wrk%omega(wrk%nlon,wrk%nlat,wrk%nlev))
 
         wrk%dt_surf  = 0.0_wp; wrk%dt_cnv = 0.0_wp; wrk%dt_cnd = 0.0_wp
         wrk%dt_rad   = 0.0_wp; wrk%dt_vdiff = 0.0_wp; wrk%dt_vadv = 0.0_wp
+        wrk%omega    = 0.0_wp
         wrk%diag = .TRUE.
 
         return
@@ -325,6 +329,7 @@ contains
         if (allocated(wrk%dt_rad))   deallocate(wrk%dt_rad)
         if (allocated(wrk%dt_vdiff)) deallocate(wrk%dt_vdiff)
         if (allocated(wrk%dt_vadv))  deallocate(wrk%dt_vadv)
+        if (allocated(wrk%omega))    deallocate(wrk%omega)
 
         return
 
@@ -579,8 +584,10 @@ contains
                     ! Diagnostic: the non-horizontal (vertical advection +
                     ! adiabatic) part of the dynamical heating -- the ventilation
                     ! of the column. Horizontal advection is dtdt minus this.
-                    if (wrk%diag) &
+                    if (wrk%diag) then
                         wrk%dt_vadv(i,j,k) = -vadv_t + kappa*tc(k)*omga(k)
+                        wrk%omega(i,j,k)   = omga(k)*p_full(k)   ! [Pa/s], >0 = descent
+                    end if
 
                 end do
 

@@ -158,6 +158,8 @@ program rce_long
 
     real(wp), allocatable :: phis2(:,:)       ! surface geopotential fed to the dynamics
     real(wp), allocatable :: phis_full(:,:)   ! full (unramped) topography [m2 s-2]
+    real(wp), allocatable :: w_tavg(:,:,:)    ! time-mean omega accumulator [Pa/s]
+    integer            :: n_wacc = 0          ! samples in w_tavg
     real(wp) :: tscale, tscale_prev           ! current / previous ramp factor
     real(wp) :: qs, dqsdt, tval
     real(wp) :: phalf(0:64), pfull(64), dpc(64)
@@ -411,6 +413,7 @@ program rce_long
     end if   ! restart_in vs cold-start IC
 
     blew_up = .FALSE.
+    allocate(w_tavg(grd%nlon,grd%nlat,nlev)); w_tavg = 0.0_wp; n_wacc = 0
     do n = n0+1, n0+nstep
         ! Advance the topography ramp: a pure function of absolute elapsed time
         ! n*dt, so it is restart-safe -- a run resumed at n0 continues the ramp at
@@ -433,6 +436,12 @@ program rce_long
             exit
         end if
         if (mod(n, print_every) == 0) call report(n)
+        ! Time-mean omega over the run's second half (equilibrium) for a robust
+        ! zonal-mean subsidence diagnostic -- a single snapshot is too noisy.
+        if (l_diag .and. n > n0 + nstep/2) then
+            w_tavg = w_tavg + ts%wrk%omega
+            n_wacc = n_wacc + 1
+        end if
         ! Periodic checkpoint (restart_interval > 0). The model time carried into
         ! the file is the absolute elapsed time n*dt.
         if (len_trim(restart_out) > 0 .and. restart_interval > 0) then
@@ -477,17 +486,17 @@ contains
         real(wp) :: cf(nlev), clwc(nlev), ciwc(nlev)
         real(wp) :: qsl, dqsl, colcov, rnlon
         real(wp), allocatable :: rh_zm(:,:), cf_zm(:,:), t_zm(:,:), q_zm(:,:), p_zm(:,:)
-        real(wp), allocatable :: u_zm(:,:), v_zm(:,:)
+        real(wp), allocatable :: u_zm(:,:), v_zm(:,:), w_zm(:,:)
         real(wp), allocatable :: cover(:), latout(:), levout(:)
         integer :: ii, jj, kk
 
         rnlon = real(grd%nlon, wp)
         allocate(rh_zm(grd%nlat,nlev), cf_zm(grd%nlat,nlev), t_zm(grd%nlat,nlev), &
                  q_zm(grd%nlat,nlev), p_zm(grd%nlat,nlev), &
-                 u_zm(grd%nlat,nlev), v_zm(grd%nlat,nlev), cover(grd%nlat), &
-                 latout(grd%nlat), levout(nlev))
+                 u_zm(grd%nlat,nlev), v_zm(grd%nlat,nlev), w_zm(grd%nlat,nlev), &
+                 cover(grd%nlat), latout(grd%nlat), levout(nlev))
         rh_zm = 0.0_wp; cf_zm = 0.0_wp; t_zm = 0.0_wp; q_zm = 0.0_wp
-        p_zm = 0.0_wp; u_zm = 0.0_wp; v_zm = 0.0_wp; cover = 0.0_wp
+        p_zm = 0.0_wp; u_zm = 0.0_wp; v_zm = 0.0_wp; w_zm = 0.0_wp; cover = 0.0_wp
         latout = grd%lat(1:grd%nlat)
         levout = vg%sigma_full(1:nlev)
 
@@ -507,6 +516,9 @@ contains
                     p_zm(jj,kk)  = p_zm(jj,kk)  + pfc(kk)/100.0_wp
                     u_zm(jj,kk)  = u_zm(jj,kk)  + now%u(ii,jj,kk)
                     v_zm(jj,kk)  = v_zm(jj,kk)  + now%v(ii,jj,kk)
+                    ! time-mean vertical pressure velocity [hPa/day], >0 = subsidence
+                    if (n_wacc > 0) w_zm(jj,kk) = w_zm(jj,kk) &
+                        + w_tavg(ii,jj,kk)/real(n_wacc,wp)*864.0_wp
                     colcov = max(colcov, cf(kk))     ! max-overlap column cover
                 end do
                 cover(jj) = cover(jj) + colcov
@@ -518,6 +530,7 @@ contains
             p_zm(jj,:)  = p_zm(jj,:)/rnlon
             u_zm(jj,:)  = u_zm(jj,:)/rnlon
             v_zm(jj,:)  = v_zm(jj,:)/rnlon
+            w_zm(jj,:)  = w_zm(jj,:)/rnlon
             cover(jj)   = cover(jj)/rnlon
         end do
 
@@ -534,6 +547,8 @@ contains
             long_name="zonal-mean specific humidity")
         call nc_write(fname, "pfull", p_zm,  dim1="lat", dim2="lev", units="hPa", &
             long_name="zonal-mean layer pressure")
+        call nc_write(fname, "omega", w_zm,  dim1="lat", dim2="lev", units="hPa/day", &
+            long_name="zonal-mean vertical pressure velocity (>0 subsidence)")
         call nc_write(fname, "u",     u_zm,  dim1="lat", dim2="lev", units="m/s", &
             long_name="zonal-mean zonal wind")
         call nc_write(fname, "v",     v_zm,  dim1="lat", dim2="lev", units="m/s", &
