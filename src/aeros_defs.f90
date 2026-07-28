@@ -278,6 +278,16 @@ module aeros_defs
         real(wp), allocatable :: temp_g(:,:,:)    ! temperature [K]
         real(wp), allocatable :: qv_g(:,:,:)      ! specific humidity [kg kg-1]
         real(wp), allocatable :: ps(:,:)          ! surface pressure [Pa], (nlon,nlat)
+
+        ! Prognostic cloud fraction (feat/clouds), a gridpoint field like qv_g
+        ! and for the same reason: cloud fraction is bounded in [0,1], and
+        ! truncating a bounded field in spectral space overshoots out of range.
+        ! It carries its own time evolution (Sundqvist 1989 source/sink in
+        ! aeros_cloud_prog) and persists across steps -- genuine prognostic
+        ! state, not a per-step diagnostic. Zero and unused unless the prognostic
+        ! cloud scheme is switched on (l_cloud_prog); the diagnostic RH->cover
+        ! path (aeros_cloud) does not touch it.
+        real(wp), allocatable :: cf_g(:,:,:)      ! cloud fraction [0-1], (nlon,nlat,nlev)
     end type aeros_state_class
 
     public :: aeros_param_class

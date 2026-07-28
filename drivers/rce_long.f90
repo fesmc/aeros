@@ -104,6 +104,16 @@ program rce_long
     real(wp) :: c_soil           = 2.0e6_wp ! soil areal heat capacity [J m-2 K-1]
     real(wp) :: land_albedo      = 0.20_wp  ! fallback land albedo (no albedo file)
 
+    ! --- prognostic cloud fraction (feat/clouds) ----------------------------
+    ! Default off = the diagnostic RH->cover scheme, bit-for-bit unchanged. When
+    ! on, radiation consumes the Sundqvist prognostic cf (aeros_cloud_prog).
+    logical  :: l_cloud_prog   = .FALSE.
+    real(wp) :: cloud_rhc_sfc  = 0.70_wp    ! critical RH at the surface
+    real(wp) :: cloud_rhc_top  = 0.90_wp    ! critical RH at the model top (higher aloft)
+    real(wp) :: cloud_tau_form = 3600.0_wp  ! formation timescale [s]
+    real(wp) :: cloud_tau_evap = 3600.0_wp  ! evaporation timescale [s]
+    real(wp) :: cloud_c_detr   = 0.5_wp     ! convective detrainment anvil ceiling [-]
+
     ! --- checkpoint / restart ------------------------------------------------
     ! restart_in  : path to a restart file to resume from ("" = cold start).
     ! restart_out : path to write checkpoints to ("" = none).
@@ -175,6 +185,15 @@ program rce_long
     ts%surf%c_d = c_d
     ts%rad%enabled  = l_rad
     ts%rad%clouds   = l_rad_clouds
+    ! Prognostic cloud fraction: when on, force radiation's all-sky path on too
+    ! (clouds=.TRUE.) so it consumes the prognostic cf rather than clear-sky.
+    ts%cpr%enabled  = l_cloud_prog
+    ts%cpr%rhc_sfc  = cloud_rhc_sfc
+    ts%cpr%rhc_top  = cloud_rhc_top
+    ts%cpr%tau_form = cloud_tau_form
+    ts%cpr%tau_evap = cloud_tau_evap
+    ts%cpr%c_detr   = cloud_c_detr
+    if (l_cloud_prog) ts%rad%clouds = .TRUE.
     ts%sponge_on    = l_sponge
     call aeros_timestep_set_sponge(ts, vg, sponge_kr, sponge_kt, sponge_sigma)
     ts%vd%enabled   = l_vdiff
@@ -560,6 +579,20 @@ contains
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "restart_interval", restart_interval, &
                       defaults_file="input/rce_defaults.nml")
+        ! Prognostic cloud knobs (feat/clouds): optional (inherit rce_defaults.nml)
+        ! so existing rce_*.nml files that omit them keep the diagnostic scheme.
+        call nml_read(nmlfile, "rce", "l_cloud_prog", l_cloud_prog, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cloud_rhc_sfc", cloud_rhc_sfc, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cloud_rhc_top", cloud_rhc_top, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cloud_tau_form", cloud_tau_form, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cloud_tau_evap", cloud_tau_evap, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cloud_c_detr", cloud_c_detr, &
+                      defaults_file="input/rce_defaults.nml")
         return
     end subroutine read_config
 
@@ -594,8 +627,34 @@ contains
             call term_table(lat_index_near(45.0_wp))  ! midlatitude
         end if
         call energy_balance()
+        if (l_cloud_prog) call cloud_prog_cover()
         return
     end subroutine report
+
+    subroutine cloud_prog_cover()
+        ! Area-weighted global-mean max-overlap total cloud cover from the
+        ! PROGNOSTIC cloud fraction (now%cf_g), plus its column max. This is the
+        ! quantity the diagnostic scheme runs away on (0.66 -> 0.86); the point
+        ! of the prognostic budget is that it does not.
+        real(wp) :: colcov, wsum, cov, w, cfmax
+        integer  :: ii, jj, kk
+        cov = 0.0_wp; wsum = 0.0_wp; cfmax = 0.0_wp
+        do jj = 1, grd%nlat
+            do ii = 1, grd%nlon
+                colcov = 0.0_wp
+                do kk = 1, nlev
+                    colcov = max(colcov, now%cf_g(ii,jj,kk))
+                end do
+                w = grd%area(ii,jj)
+                cov  = cov + colcov*w
+                wsum = wsum + w
+                cfmax = max(cfmax, colcov)
+            end do
+        end do
+        write(*,"(a,f7.3,a,f7.3)") "   prognostic cloud cover  mean ", &
+            cov/wsum, "   max-column ", cfmax
+        return
+    end subroutine cloud_prog_cover
 
     integer function hot_lat_index() result(jstar)
         ! Latitude row with the warmest zonal-mean lowest layer (the tropics).

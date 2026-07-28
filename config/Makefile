@@ -239,8 +239,13 @@ land : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_land.x is ready."
 
+cloud-prog : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_cloud_prog.x $(testdir)/test_cloud_prog.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_cloud_prog.x is ready."
+
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography land
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction moisture condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography land cloud-prog
 
 # Driver executables
 drivers : run bench held-suarez

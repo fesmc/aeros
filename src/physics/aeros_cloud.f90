@@ -62,6 +62,7 @@ module aeros_cloud
     real(wp), parameter :: CLD_CF_MAX  = 0.999_wp      ! max diagnosed fraction
 
     public :: aeros_cloud_diagnose
+    public :: aeros_cloud_water
 
 contains
 
@@ -79,7 +80,7 @@ contains
         real(wp), intent(out) :: ciwc(:)    ! (nlev) grid-mean cloud ice    [kg kg-1]
 
         integer  :: k
-        real(wp) :: qs, dqsdt, rh, rhc, b, fice, rho
+        real(wp) :: qs, dqsdt, rh, rhc, b
 
         do k = 1, nlev
             call aeros_qsat(t(k), pfull(k), qs, dqsdt)
@@ -94,19 +95,11 @@ contains
             else
                 cf(k) = 0.0_wp
             end if
-
-            ! in-cloud water content [kg m-3] -> mixing ratio via air density,
-            ! then grid-mean water paths (x cloud fraction)
-            if (cf(k) > 0.0_wp) then
-                fice = ice_fraction(t(k))
-                rho  = pfull(k)/(R_d*t(k))
-                clwc(k) = cf(k)*(1.0_wp - fice)*CLD_LWC/rho
-                ciwc(k) = cf(k)*fice*CLD_IWC/rho
-            else
-                clwc(k) = 0.0_wp
-                ciwc(k) = 0.0_wp
-            end if
         end do
+
+        ! In-cloud water content -> grid-mean water paths, shared with the
+        ! prognostic-cloud radiation coupling (identical optics either way).
+        call aeros_cloud_water(nlev, t, pfull, cf, clwc, ciwc)
 
         return
 
@@ -120,18 +113,57 @@ contains
             return
         end function rh_crit
 
-        pure real(wp) function ice_fraction(tk) result(fice)
-            real(wp), intent(in) :: tk
-            if (tk >= CLD_T_LIQ) then
-                fice = 0.0_wp
-            else if (tk <= CLD_T_ICE) then
-                fice = 1.0_wp
-            else
-                fice = (CLD_T_LIQ - tk)/(CLD_T_LIQ - CLD_T_ICE)
-            end if
-            return
-        end function ice_fraction
-
     end subroutine aeros_cloud_diagnose
+
+    subroutine aeros_cloud_water(nlev, t, pfull, cf, clwc, ciwc)
+        ! Grid-mean cloud liquid/ice mixing ratios [kg kg-1] from a GIVEN cloud
+        ! fraction, one column. Factored out of aeros_cloud_diagnose so both the
+        ! diagnostic RH->cover path and the prognostic cloud fraction
+        ! (aeros_cloud_prog, feat/clouds) drive radiation through exactly the
+        ! same cloud optics: a specified in-cloud water content [kg m-3] (thin
+        ! for ice/cirrus, thicker for liquid) converted to a mixing ratio by the
+        ! air density and scaled to a grid-mean by the cloud fraction. The
+        ! radiation kernels recover the in-cloud value by dividing by cf again.
+        implicit none
+        integer,  intent(in)  :: nlev
+        real(wp), intent(in)  :: t(:)       ! (nlev) layer temperature [K]
+        real(wp), intent(in)  :: pfull(:)   ! (nlev) layer pressure [Pa]
+        real(wp), intent(in)  :: cf(:)      ! (nlev) cloud fraction [0-1]
+        real(wp), intent(out) :: clwc(:)    ! (nlev) grid-mean cloud liquid [kg kg-1]
+        real(wp), intent(out) :: ciwc(:)    ! (nlev) grid-mean cloud ice    [kg kg-1]
+
+        integer  :: k
+        real(wp) :: fice, rho
+
+        do k = 1, nlev
+            if (cf(k) > 0.0_wp) then
+                fice = ice_fraction(t(k))
+                rho  = pfull(k)/(R_d*t(k))
+                clwc(k) = cf(k)*(1.0_wp - fice)*CLD_LWC/rho
+                ciwc(k) = cf(k)*fice*CLD_IWC/rho
+            else
+                clwc(k) = 0.0_wp
+                ciwc(k) = 0.0_wp
+            end if
+        end do
+
+        return
+
+    end subroutine aeros_cloud_water
+
+    pure real(wp) function ice_fraction(tk) result(fice)
+        ! Liquid/ice partition by a temperature ramp: all liquid above CLD_T_LIQ,
+        ! all ice below CLD_T_ICE, linear between.
+        implicit none
+        real(wp), intent(in) :: tk
+        if (tk >= CLD_T_LIQ) then
+            fice = 0.0_wp
+        else if (tk <= CLD_T_ICE) then
+            fice = 1.0_wp
+        else
+            fice = (CLD_T_LIQ - tk)/(CLD_T_LIQ - CLD_T_ICE)
+        end if
+        return
+    end function ice_fraction
 
 end module aeros_cloud
