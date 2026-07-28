@@ -1,6 +1,57 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION: Wave 2 — land surface / prognostic clouds / sea ice
+## ►► NEXT SESSION: the slab-ocean model-top instability (now the critical-path blocker)
+
+**Wave 2 landed (on `main`, integrated + verified together).** Three features
+built in parallel worktrees, merged with an albedo-unification pass, all opt-in
+(default off → the 21 prior tests bit-for-bit), suite now **24** tests, all pass:
+
+- **Land surface + land–sea mask (`l_land`, feat/land).** `src/physics/
+  aeros_land.f90`: LSM + land albedo from ERA5 (`lsm`/`fal`) via `aeros_bcinput`;
+  bucket soil moisture `w` + slab soil temperature `t_soil` (the land skin temp,
+  replacing SST on land); β-limited evapotranspiration. Surface/radiation branch
+  on the mask; ocean path bit-for-bit. Smoke run: 34% land, deserts hot/dry.
+- **Prognostic cloud fraction (`l_cloud_prog`, feat/clouds).** `src/physics/
+  aeros_cloud_prog.f90`: Sundqvist cf as a gridpoint prognostic `now%cf_g`
+  (source = large-scale + convective detrainment, sink = evaporation). cf-only,
+  in-cloud water diagnosed by the existing tuned optics (`aeros_cloud_water`).
+  On the *same* atmospheric state the prognostic sink holds cover ~7× below the
+  runaway diagnostic — the runaway mechanism is addressed. **Horizontal advection
+  of cf deferred** (documented); default knobs give a thin cover — calibration is
+  future work.
+- **Sea ice (`l_seaice`, feat/seaice).** Semtner 0-layer thermodynamic ice in
+  `aeros_ocean` (thickness/fraction/ice-surface-temp), ice-albedo feedback,
+  replacing the freeze-floor clamp. Energy-conserving to 1e-16; ice forms poleward
+  in a cold slab smoke run.
+- **All three extend the restart** (append-only, gated by `*_present` attrs) and
+  feed a **single unified per-cell surface-albedo field `rad%alb_map`** — land and
+  ice compose into it (disjoint cells; ice never on land). Both land and sea-ice
+  had independently added a per-cell albedo to radiation; the merge unified them.
+- **Verified together.** 24/24 tests; a combined **land+clouds+sea-ice restart is
+  bit-identical** for all meaningful state (spectral, moisture, land soil, ocean,
+  radiation cache; every cloud cell with cf>1e-12 exactly 0.0 diff). Residual: 62
+  cf_g cells at ~1e-96 (denormal-tail underflow, physically zero cloud) — benign,
+  not clamped.
+
+**►► The blocker that Wave 2 exposed and made critical: the slab ocean is
+model-top unstable within ~15 days.** Sea ice *requires* a slab ocean
+(`ocean_mode=1`), but a coupled slab run blows up at level 1 (the model top,
+axisymmetric — the §29 slab runaway / the `rce-instability-diagnosis` note) in
+~10–15 days, while ice needs ~75 days to form. **So sea-ice thermodynamics cannot
+be exercised in a coupled run, and no slab/coupled climate can be validated, until
+this is fixed.** It is no longer deferrable. Likely levers (in order): a proper
+model-top treatment (higher top / more levels / gravity-wave drag — the same fix
+topography wants), stronger/deeper sponge as an interim, and the free-SST energy
+imbalance itself (§29: cloud over-reflection + no realistic cover). Do this next.
+
+**Then:** land calibration + seasonal cycle on; cf horizontal advection +
+knob calibration; sea-ice validated once the slab is stable; resolution/eddy work.
+
+Original Wave-1 status and the full leverage analysis follow.
+
+---
+
+## Wave 1 recap — topography / restart (DONE)
 
 **Wave 1 landed (on `main`, integrated + verified together).** Two features were
 built in parallel worktrees, merged, and validated as a pair:
