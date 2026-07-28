@@ -153,12 +153,14 @@ contains
         allocate(now%v(grd%nlon,grd%nlat,nlev))
         allocate(now%temp_g(grd%nlon,grd%nlat,nlev))
         allocate(now%qv_g(grd%nlon,grd%nlat,nlev))
+        allocate(now%cf_g(grd%nlon,grd%nlat,nlev))
         allocate(now%ps(grd%nlon,grd%nlat))
 
         now%u      = 0.0_wp
         now%v      = 0.0_wp
         now%temp_g = 0.0_wp
         now%qv_g   = 0.0_wp
+        now%cf_g   = 0.0_wp
         now%ps     = 0.0_wp
 
         return
@@ -179,6 +181,7 @@ contains
         if (allocated(now%v))      deallocate(now%v)
         if (allocated(now%temp_g)) deallocate(now%temp_g)
         if (allocated(now%qv_g))   deallocate(now%qv_g)
+        if (allocated(now%cf_g))   deallocate(now%cf_g)
         if (allocated(now%ps))     deallocate(now%ps)
 
         return
