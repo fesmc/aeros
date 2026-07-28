@@ -201,12 +201,46 @@ module aeros_ecckd
     real(wp), parameter :: SW_CLD_TAU_A = 8.0_wp   ! absorptance e-folding optical depth
     real(wp), parameter :: SW_CLD_MAX = 0.999_wp   ! max column cloud fraction [-]
 
+    ! === Cached reference k-table ==========================================
+    ! The g-point (k, weight) table depends ONLY on the compile-time Malkmus
+    ! parameters (KSCALE/KBAR/ALS via the inverse-Gaussian ICDF) -- it is
+    ! identical for every column and every recompute. Build it once and reuse.
+    ! aeros_ecckd_init builds it serially (called from aeros_radiation_init,
+    ! before any OpenMP region); ensure_ktable is a lazy fallback for direct
+    ! callers (e.g. the acceptance tests) that bypass the driver init.
+    real(wp), save :: kj_ref(NB,NGAS,NGT) = 0.0_wp
+    real(wp), save :: gw_ref(NB,NGT)      = 0.0_wp
+    logical,  save :: ktable_ready = .false.
+
+    public :: aeros_ecckd_init
     public :: aeros_ecckd_lw_clearsky_column
     public :: aeros_ecckd_sw_clearsky_column
     public :: aeros_ecckd_lw_cloudy_column
     public :: aeros_ecckd_sw_cloudy_column
 
 contains
+
+    subroutine aeros_ecckd_init()
+        ! Build the cached reference k-table once, serially. Safe to call more
+        ! than once (idempotent). Call before entering any OpenMP parallel
+        ! region so worker threads only ever read the completed table.
+        call ensure_ktable()
+    end subroutine aeros_ecckd_init
+
+    subroutine ensure_ktable()
+        ! Lazily populate the module k-table cache. The double-checked critical
+        ! makes a first-touch from inside a parallel region safe; in the normal
+        ! driver path the table is already built (aeros_ecckd_init ran serially
+        ! before the parallel region) so the flag check returns immediately and
+        ! no thread ever enters the critical.
+        if (ktable_ready) return
+        !$omp critical (ecckd_ktable_init)
+        if (.not. ktable_ready) then
+            call build_ktable(kj_ref, gw_ref)
+            ktable_ready = .true.
+        end if
+        !$omp end critical (ecckd_ktable_init)
+    end subroutine ensure_ktable
 
     subroutine aeros_ecckd_lw_clearsky_column(nlev, t, q, o3, dp_lev, z_half, ts, &
                                               q_co2, l_o3, fnet, heat, olr, fdw_sur)
@@ -307,14 +341,13 @@ contains
         real(wp), intent(in)  :: cloud_od(:)  ! (nlev) grey LW cloud optical depth, model order
         real(wp), intent(out) :: fnet(0:), olr, fdw_sur
 
-        real(wp) :: kj(NB,NGAS,NGT), gw(NB,NGT)
         real(wp) :: umass(nlev,NGAS), pratio(nlev), tlay(nlev)
-        real(wp) :: pf_layer(nlev,NB), bsrc(nlev), bsurf_b(NB)
+        real(wp) :: pf_layer(nlev,NB), bsrc(nlev), bsurf_b(NB), pf(NB)
         real(wp) :: ctau(0:nlev), ccld(0:nlev), fup(0:nlev), fdw(0:nlev)
         real(wp) :: p_half, pfl, tau_l
         integer  :: k, l, i, ib, ig, igas
 
-        call build_ktable(kj, gw)
+        call ensure_ktable()
 
         ! --- per-layer absorber paths, pressure ratio, temperature, Planck ------
         p_half = 0.0_wp
@@ -332,12 +365,14 @@ contains
             pratio(l) = pfl/p0
             tlay(l)   = t(k)
             bsrc(l)   = sigma_sb*t(k)**4
+            call planck_fracs(t(k), pf)
             do ib = 1, NB
-                pf_layer(l,ib) = planck_frac(ib, t(k))
+                pf_layer(l,ib) = pf(ib)
             end do
         end do
+        call planck_fracs(ts, pf)
         do ib = 1, NB
-            bsurf_b(ib) = planck_frac(ib, ts)*sigma_sb*ts**4
+            bsurf_b(ib) = pf(ib)*sigma_sb*ts**4
         end do
 
         ! cumulative grey cloud optical depth, local surface->top order
@@ -354,14 +389,14 @@ contains
                 do l = 1, nlev
                     tau_l = 0.0_wp
                     do igas = 1, NGAS
-                        if (kj(ib,igas,ig) <= 0.0_wp) cycle
-                        tau_l = tau_l + kj(ib,igas,ig) * umass(l,igas) &
+                        if (kj_ref(ib,igas,ig) <= 0.0_wp) cycle
+                        tau_l = tau_l + kj_ref(ib,igas,ig) * umass(l,igas) &
                               * pratio(l)**KAPPA(ib,igas) &
                               * (TREF/tlay(l))**NST(ib,igas)
                     end do
                     ctau(l) = ctau(l-1) + tau_l
                 end do
-                call band_flux(nlev, gw(ib,ig), pf_layer(:,ib), bsrc, &
+                call band_flux(nlev, gw_ref(ib,ig), pf_layer(:,ib), bsrc, &
                                bsurf_b(ib), ctau, ccld, fup, fdw)
                 do i = 0, nlev
                     fnet(nlev - i) = fnet(nlev - i) + (fup(i) - fdw(i))
@@ -603,8 +638,20 @@ contains
         real(wp), intent(in)  :: ccld(0:)       ! (0:nlev) cumulative grey cloud optical depth
         real(wp), intent(out) :: fup(0:), fdw(0:)
 
-        real(wp) :: b(nlev), bs
-        integer  :: l, i
+        real(wp) :: b(nlev), bs, trm(0:nlev,0:nlev)
+        integer  :: l, i, lo, hi
+
+        ! Precompute the interface-pair transmissions once. tr is symmetric in
+        ! its arguments and was previously recomputed O(nlev^2) times per
+        ! g-point; here each distinct pair's exp is evaluated exactly once, with
+        ! the identical expression (bit-for-bit unchanged), then reused below.
+        do hi = 0, nlev
+            trm(hi,hi) = 1.0_wp
+            do lo = 0, hi-1
+                trm(lo,hi) = exp(-BETA0*(ctau(hi) - ctau(lo)) - (ccld(hi) - ccld(lo)))
+                trm(hi,lo) = trm(lo,hi)
+            end do
+        end do
 
         do l = 1, nlev
             b(l) = wg*pf_layer(l)*bsrc(l)
@@ -613,26 +660,19 @@ contains
 
         fup(0) = bs
         do i = 1, nlev
-            fup(i) = bs*tr(0, i)
+            fup(i) = bs*trm(0, i)
             do l = 1, i
-                fup(i) = fup(i) + b(l)*(tr(l, i) - tr(l-1, i))
+                fup(i) = fup(i) + b(l)*(trm(l, i) - trm(l-1, i))
             end do
         end do
         fdw(nlev) = 0.0_wp
         do i = nlev-1, 0, -1
             fdw(i) = 0.0_wp
             do l = i+1, nlev
-                fdw(i) = fdw(i) + b(l)*(tr(l-1, i) - tr(l, i))
+                fdw(i) = fdw(i) + b(l)*(trm(l-1, i) - trm(l, i))
             end do
         end do
         return
-    contains
-        pure real(wp) function tr(ia, ib) result(x)
-            integer, intent(in) :: ia, ib
-            integer :: hi, lo
-            hi = max(ia, ib); lo = min(ia, ib)
-            x = exp(-BETA0*(ctau(hi) - ctau(lo)) - (ccld(hi) - ccld(lo)))
-        end function tr
     end subroutine band_flux
 
     ! === Correlated-k table construction ===================================
@@ -731,25 +771,26 @@ contains
 
     ! === Planck fraction in a band =========================================
 
-    pure real(wp) function planck_frac(ib, t) result(pf)
-        ! Fraction of the blackbody flux at temperature t that falls in band ib.
-        ! Band 1 lower edge is 0 (fraction 1 below it); band NB upper edge is inf
-        ! (fraction 0 above it). Uses the exact fractional-emissive-power series.
-        integer,  intent(in) :: ib
-        real(wp), intent(in) :: t
-        real(wp) :: flo, fhi
-        if (ib == 1) then
-            flo = 1.0_wp                          ! from 0 cm-1: whole blackbody
-        else
-            flo = bb_frac_above(C2*WN_HI(ib-1)/t)
-        end if
-        if (ib == NB) then
-            fhi = 0.0_wp                          ! to +inf
-        else
-            fhi = bb_frac_above(C2*WN_HI(ib)/t)
-        end if
-        pf = max(0.0_wp, flo - fhi)
-    end function planck_frac
+    pure subroutine planck_fracs(t, pf)
+        ! All NB band Planck fractions at temperature t in one shot. Each
+        ! interior band edge fraction (integral_edge^inf of the normalized
+        ! Planck function) is evaluated once and shared between the two bands
+        ! that straddle it; pf(ib) = flo(ib) - fhi(ib) with band 1's lower edge
+        ! the whole blackbody (1) and band NB's upper edge +inf (0).
+        real(wp), intent(in)  :: t
+        real(wp), intent(out) :: pf(NB)
+        real(wp) :: edge(NB-1)
+        integer  :: ib
+        do ib = 1, NB-1
+            edge(ib) = bb_frac_above(C2*WN_HI(ib)/t)
+        end do
+        pf(1) = max(0.0_wp, 1.0_wp - edge(1))
+        do ib = 2, NB-1
+            pf(ib) = max(0.0_wp, edge(ib-1) - edge(ib))
+        end do
+        pf(NB) = max(0.0_wp, edge(NB-1) - 0.0_wp)
+    end subroutine planck_fracs
+
 
     pure real(wp) function bb_frac_above(x) result(f)
         ! Fraction of blackbody emissive power at wavenumbers ABOVE x = C2*nu/T,

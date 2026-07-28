@@ -78,7 +78,8 @@ module aeros_radiation
     use aeros_cloud,    only : aeros_cloud_diagnose
     use aeros_insolation, only : aeros_insol_class, aeros_insol_init, &
                                aeros_insol_end, aeros_insol_annual, aeros_insol_day
-    use aeros_ecckd,    only : aeros_ecckd_lw_clearsky_column, &
+    use aeros_ecckd,    only : aeros_ecckd_init, &
+                               aeros_ecckd_lw_clearsky_column, &
                                aeros_ecckd_sw_clearsky_column, &
                                aeros_ecckd_lw_cloudy_column, &
                                aeros_ecckd_sw_cloudy_column
@@ -281,6 +282,10 @@ contains
         ! airmass cosine, as the shortwave band scheme expects.
         call aeros_insol_init(rad%ins, grd, rad%time_bp)
         call aeros_insol_annual(rad%ins, rad%sw_toa, rad%coszen)
+
+        ! Build the ecCKD reference k-table once, serially, before any OpenMP
+        ! region (the per-column recompute then only reads the cached table).
+        call aeros_ecckd_init()
 
         return
     end subroutine aeros_radiation_init
