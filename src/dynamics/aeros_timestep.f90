@@ -227,10 +227,11 @@ module aeros_timestep
         ! uncorrected model bit for bit.
         type(aeros_correction_class) :: cor
 
-        ! Positive-definite grid tracer transport (aeros_transport). q is a
-        ! gridpoint field carried in now%qv_g and advected here, off the spectral
-        ! core. Always allocated; it transports whatever is in qv_g, which for a
-        ! dry run is zero and stays zero.
+        ! Positive-definite grid tracer transport (aeros_transport). One engine
+        ! instance, allocated once, advects every prognostic that lives off the
+        ! spectral core: now%qv_g always (zero and staying zero for a dry run),
+        ! and now%cf_g when the prognostic cloud scheme is on. Shared geometry
+        ! and scratch; the fields are transported sequentially.
         type(aeros_transport_class) :: mst
 
         ! Large-scale condensation (aeros_condensation), at the grid seam. Off
@@ -893,13 +894,26 @@ contains
         ! could reintroduce what it just removed.
         if (ts%mass_fixer) call mass_fix(ts, s, now%spec)
 
-        ! === 8. Humidity transport ===========================================
+        ! === 8. Grid tracer transport ========================================
         ! On the grid, forward in time, using the winds and surface pressure at
         ! the time level just stepped from -- which are still in ts%wrk, filled
-        ! by aeros_tendency_grid and untouched since. q (now%qv_g) persists
-        ! across steps; nothing here is spectral. See aeros_transport.
+        ! by aeros_tendency_grid and untouched since. The transported fields
+        ! (now%qv_g, now%cf_g) persist across steps; nothing here is spectral.
+        ! See aeros_transport.
+        !
+        ! Humidity first, as always. The engine reports its Courant/sub-step
+        ! diagnostics from this (moisture) call, and both calls see identical
+        ! winds so the numbers are the same regardless of order.
         call aeros_transport_transport(ts%mst, vg, ts%wrk%u, ts%wrk%v, &
                                         ts%wrk%lnps_g, now%qv_g, ts%dt)
+
+        ! Cloud fraction, through the SAME engine instance (shared geometry and
+        ! scratch), when the prognostic cloud scheme is on. cf starts in [0,1]
+        ! and the scheme's max-principle keeps it there, so it transports safely
+        ! with no clamp -- a clamp would break the conservative flux form.
+        if (ts%cpr%enabled) &
+            call aeros_transport_transport(ts%mst, vg, ts%wrk%u, ts%wrk%v, &
+                                            ts%wrk%lnps_g, now%cf_g, ts%dt)
 
         ts%nstep = ts%nstep + 1
 
