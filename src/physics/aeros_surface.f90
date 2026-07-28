@@ -143,20 +143,28 @@ contains
         return
     end subroutine aeros_surface_end
 
-    subroutine aeros_surface_apply(surf, vg, sst, t_g, qv_g, lnps_g, u, v, dt_phys, dt)
+    subroutine aeros_surface_apply(surf, vg, sst, t_g, qv_g, lnps_g, u, v, dt_phys, dt, &
+                                   evap_eff)
         ! Sensible and latent surface fluxes into the lowest model layer.
         !
-        ! sst is the sea surface temperature (aeros_ocean) the fluxes are driven
-        ! against. t_g, lnps_g, u, v are the current gridpoint fields
-        ! (aeros_tendency's wrk); qv_g is the gridpoint humidity, moistened in
-        ! place by evaporation; dt_phys is the forward-split temperature
-        ! increment [K] the sensible heating is added to. The lowest layer is
-        ! k = vg%nlev.
+        ! sst is the skin temperature the fluxes are driven against -- the ocean
+        ! SST over sea (aeros_ocean), the prognostic soil temperature over land
+        ! (aeros_land composes the combined field). t_g, lnps_g, u, v are the
+        ! current gridpoint fields (aeros_tendency's wrk); qv_g is the gridpoint
+        ! humidity, moistened in place by evaporation; dt_phys is the
+        ! forward-split temperature increment [K] the sensible heating is added
+        ! to. The lowest layer is k = vg%nlev.
+        !
+        ! evap_eff is an OPTIONAL per-point evaporation efficiency (beta):
+        ! potential evaporation is multiplied by it. Absent, or 1 everywhere, is
+        ! the open-water default (bit-for-bit); aeros_land passes the
+        ! moisture-limited beta over land so a dry soil evaporates below
+        ! potential. It scales only the moisture flux, never the sensible flux.
 
         implicit none
         type(aeros_surf_class),  intent(inout) :: surf
         type(aeros_vgrid_class), intent(in)    :: vg
-        real(wp), intent(in)    :: sst(:,:)       ! (nlon,nlat) sea surface T [K]
+        real(wp), intent(in)    :: sst(:,:)       ! (nlon,nlat) skin T [K]
         real(wp), intent(in)    :: t_g(:,:,:)     ! (nlon,nlat,nlev) [K]
         real(wp), intent(inout) :: qv_g(:,:,:)    ! (nlon,nlat,nlev) [kg kg-1]
         real(wp), intent(in)    :: lnps_g(:,:)    ! (nlon,nlat) ln[Pa]
@@ -164,17 +172,21 @@ contains
         real(wp), intent(in)    :: v(:,:,:)       ! (nlon,nlat,nlev) [m s-1]
         real(wp), intent(inout) :: dt_phys(:,:,:) ! (nlon,nlat,nlev) [K] increment
         real(wp), intent(in)    :: dt             ! [s]
+        real(wp), intent(in), optional :: evap_eff(:,:) ! (nlon,nlat) beta [-]
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
-        real(wp) :: ps, t1, q1, wind, rho1, qs_s, dqs, sh, ev, dq
+        real(wp) :: ps, t1, q1, wind, rho1, qs_s, dqs, sh, ev, dq, beta
+        logical  :: have_beta
         integer  :: i, j, ks
 
         if (.not. surf%enabled) return
 
+        have_beta = present(evap_eff)
+
         ks = vg%nlev                              ! lowest (surface) layer
 
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,sh,ev,dq)
+        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,sh,ev,dq,beta)
         do j = 1, surf%nlat
             do i = 1, surf%nlon
                 ps = exp(lnps_g(i,j))
@@ -190,9 +202,13 @@ contains
                 ! sensible heat flux [W m-2], positive up (into the atmosphere)
                 sh = rho1*cp_d*surf%c_h*wind*(sst(i,j) - t1)
 
-                ! evaporation [kg m-2 s-1] from the saturation deficit at the SST
+                ! evaporation [kg m-2 s-1] from the saturation deficit at the skin
+                ! temperature, throttled by the evaporation efficiency beta (1 for
+                ! open water; below 1 for a drying soil).
+                beta = 1.0_wp
+                if (have_beta) beta = evap_eff(i,j)
                 call aeros_qsat(sst(i,j), ps, qs_s, dqs)
-                ev = rho1*surf%c_e*wind*(qs_s - q1)
+                ev = beta*rho1*surf%c_e*wind*(qs_s - q1)
 
                 ! sensible heating of the lowest layer, forward-split increment
                 ! [K]: it is confined to one layer, so like convection and

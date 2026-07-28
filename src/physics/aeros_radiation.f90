@@ -230,6 +230,14 @@ module aeros_radiation
         ! Cached heating rate [K s-1], (nlon,nlat,nlev), applied every step.
         real(wp), allocatable :: heat(:,:,:)
 
+        ! === land surface albedo map (feat/land) =============================
+        ! Per-point surface albedo. Unallocated by default -- radiation uses the
+        ! scalar `albedo` (ocean) and every existing run is bit-for-bit. When
+        ! land is on, aeros_land_couple_radiation fills this with the ocean
+        ! albedo over sea and the land albedo on land, and the column transfer
+        ! reads it per point instead of the scalar.
+        real(wp), allocatable :: alb_map(:,:)    ! (nlon,nlat) surface albedo [-]
+
         ! Diagnostics from the last recompute, (nlon,nlat) [W m-2].
         real(wp), allocatable :: olr(:,:)        ! outgoing LW at TOA
         real(wp), allocatable :: lw_dw_sur(:,:)  ! surface downward LW
@@ -356,6 +364,7 @@ contains
         if (allocated(rad%sw_dw_sur)) deallocate(rad%sw_dw_sur)
         if (allocated(rad%sw_net_sur)) deallocate(rad%sw_net_sur)
         if (allocated(rad%sw_up_toa)) deallocate(rad%sw_up_toa)
+        if (allocated(rad%alb_map))   deallocate(rad%alb_map)   ! feat/land
         call aeros_insol_end(rad%ins)
         rad%enabled = .FALSE.
         rad%nlon = 0; rad%nlat = 0
@@ -1056,7 +1065,8 @@ contains
         real(wp) :: o3col(vg%nlev)
         real(wp) :: cf(vg%nlev), clwc(vg%nlev), ciwc(vg%nlev)
         real(wp) :: fnet(0:vg%nlev), heat_lw(vg%nlev), heat_sw(vg%nlev)
-        real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net, doy, cz, sw
+        real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net, doy, cz, sw, alb
+        logical  :: have_alb_map
         integer  :: i, j, k, nlev, nrad
 
         if (.not. rad%enabled) return
@@ -1068,6 +1078,10 @@ contains
         end if
 
         nrad = max(1, nint(rad%interval/dt))
+
+        ! Land (feat/land) supplies a per-point surface albedo; without it every
+        ! column uses the scalar ocean albedo, bit-for-bit as before.
+        have_alb_map = allocated(rad%alb_map)
 
         ! --- recompute the transfer on the cadence -------------------------
         if (mod(nstep, nrad) == 0) then
@@ -1082,10 +1096,14 @@ contains
 
             !$omp parallel do collapse(2) schedule(static) &
             !$omp   private(i,j,phalf,pfull,dpc,phi_full,phi_half,z_half,o3col, &
-            !$omp           cf,clwc,ciwc,fnet,heat_lw,heat_sw,olr,fdw_lw,sw_up,sw_dw,sw_net)
+            !$omp           cf,clwc,ciwc,fnet,heat_lw,heat_sw,olr,fdw_lw,sw_up,sw_dw,sw_net,alb)
             do j = 1, rad%nlat
                 do i = 1, rad%nlon
                     call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
+
+                    ! Surface albedo: the land map if present, else the scalar.
+                    alb = rad%albedo
+                    if (have_alb_map) alb = rad%alb_map(i,j)
 
                     if (rad%l_o3) then
                         call aeros_ozone_profile(pfull, o3col)
@@ -1110,15 +1128,15 @@ contains
                                 qv_g(i,j,:), o3col, dpc, z_half, t_s(i,j), rad%q_co2, &
                                 rad%l_o3, cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw)
                             call aeros_ecckd_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
-                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
-                                rad%albedo, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
+                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb, &
+                                alb, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
                         else
                             call aeros_lw_cloudy_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
                                 o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
                                 cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw)
                             call aeros_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
-                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
-                                rad%albedo, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
+                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb, &
+                                alb, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
                         end if
                     else
                         ! Clear-sky longwave: dispatch on the scheme selector.
@@ -1131,14 +1149,14 @@ contains
                                 rad%q_co2, rad%l_o3, fnet, heat_lw, olr, fdw_lw)
                             call aeros_ecckd_sw_clearsky_column(nlev, qv_g(i,j,:), &
                                 o3col, rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), &
-                                rad%albedo, rad%albedo, heat_sw, sw_up, sw_dw, sw_net)
+                                alb, alb, heat_sw, sw_up, sw_dw, sw_net)
                         else
                             call aeros_lw_clearsky_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
                                 o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
                                 fnet, heat_lw, olr, fdw_lw)
                             call aeros_sw_clearsky_column(nlev, qv_g(i,j,:), o3col, &
-                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), rad%albedo, &
-                                rad%albedo, heat_sw, sw_up, sw_dw, sw_net)
+                                rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb, &
+                                alb, heat_sw, sw_up, sw_dw, sw_net)
                         end if
                     end if
 
