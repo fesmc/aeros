@@ -174,6 +174,11 @@ program rce_long
     ! sampling as w_tavg -- to see WHERE (lat,sigma) the latent heating fires.
     real(wp), allocatable :: cnv_tavg(:,:,:), cnd_tavg(:,:,:), &
                              rad_tavg(:,:,:), surf_tavg(:,:,:)
+    ! Time-mean zonal-mean jet/MMC/eddy-momentum-flux accumulators (lat,lev),
+    ! same 2nd-half sampling as w_tavg. uv_tavg = [u*v*] (zonal-mean of the
+    ! deviations from the instantaneous zonal mean) -- the northward eddy flux
+    ! of zonal momentum whose meridional convergence sets the Hadley-cell edge.
+    real(wp), allocatable :: uv_tavg(:,:), ubar_tavg(:,:), vbar_tavg(:,:)
     real(wp) :: tscale, tscale_prev           ! current / previous ramp factor
     real(wp) :: qs, dqsdt, tval
     real(wp) :: phalf(0:64), pfull(64), dpc(64)
@@ -470,6 +475,8 @@ program rce_long
     allocate(cnv_tavg(grd%nlon,grd%nlat,nlev), cnd_tavg(grd%nlon,grd%nlat,nlev), &
              rad_tavg(grd%nlon,grd%nlat,nlev), surf_tavg(grd%nlon,grd%nlat,nlev))
     cnv_tavg = 0.0_wp; cnd_tavg = 0.0_wp; rad_tavg = 0.0_wp; surf_tavg = 0.0_wp
+    allocate(uv_tavg(grd%nlat,nlev), ubar_tavg(grd%nlat,nlev), vbar_tavg(grd%nlat,nlev))
+    uv_tavg = 0.0_wp; ubar_tavg = 0.0_wp; vbar_tavg = 0.0_wp
     do n = n0+1, n0+nstep
         ! Advance the topography ramp: a pure function of absolute elapsed time
         ! n*dt, so it is restart-safe -- a run resumed at n0 continues the ramp at
@@ -500,6 +507,7 @@ program rce_long
             cnd_tavg  = cnd_tavg  + ts%wrk%dt_cnd
             rad_tavg  = rad_tavg  + ts%wrk%dt_rad
             surf_tavg = surf_tavg + ts%wrk%dt_surf
+            call accum_zmflux()
             n_wacc = n_wacc + 1
         end if
         ! Periodic checkpoint (restart_interval > 0). The model time carried into
@@ -633,6 +641,14 @@ contains
             long_name="zonal-mean zonal wind")
         call nc_write(fname, "v",     v_zm,  dim1="lat", dim2="lev", units="m/s", &
             long_name="zonal-mean meridional wind")
+        if (n_wacc > 0) then
+            call nc_write(fname, "ubar", ubar_tavg/real(n_wacc,wp), dim1="lat", dim2="lev", &
+                units="m/s", long_name="time-mean zonal-mean zonal wind (2nd half)")
+            call nc_write(fname, "vbar", vbar_tavg/real(n_wacc,wp), dim1="lat", dim2="lev", &
+                units="m/s", long_name="time-mean zonal-mean meridional wind (2nd half)")
+            call nc_write(fname, "uvpr", uv_tavg/real(n_wacc,wp), dim1="lat", dim2="lev", &
+                units="m2/s2", long_name="time-mean zonal-mean eddy momentum flux [u*v*]")
+        end if
         call nc_write(fname, "cover", cover, dim1="lat", units="1", &
             long_name="max-overlap total cloud cover")
         call nc_write(fname, "q_cnv",  cnv_zm,  dim1="lat", dim2="lev", units="K/day", &
@@ -1033,6 +1049,33 @@ contains
             sqrt(t2/wsum), " K  eddyKE ", ke/wsum, " m2/s2  [v''T''] ", vt/wsum
         return
     end subroutine eddy_diag
+
+    subroutine accum_zmflux()
+        ! Accumulate, over the equilibrated 2nd half (same window as w_tavg), the
+        ! time-mean zonal-mean jet [u], meridional wind [v], and eddy momentum
+        ! flux [u*v*] = zonal mean of (u-[u])(v-[v]) at every (lat,lev). The
+        ! meridional convergence of [u*v*] is the eddy forcing that terminates
+        ! the Hadley cell -- the cell-edge diagnostic this branch is after.
+        integer  :: i, j, k
+        real(wp) :: uzm, vzm, up, vp, cov, rn
+        rn = real(grd%nlon, wp)
+        do k = 1, nlev
+            do j = 1, grd%nlat
+                uzm = sum(now%u(:,j,k))/rn
+                vzm = sum(now%v(:,j,k))/rn
+                cov = 0.0_wp
+                do i = 1, grd%nlon
+                    up = now%u(i,j,k) - uzm
+                    vp = now%v(i,j,k) - vzm
+                    cov = cov + up*vp
+                end do
+                ubar_tavg(j,k) = ubar_tavg(j,k) + uzm
+                vbar_tavg(j,k) = vbar_tavg(j,k) + vzm
+                uv_tavg(j,k)   = uv_tavg(j,k)   + cov/rn
+            end do
+        end do
+        return
+    end subroutine accum_zmflux
 
     subroutine locate_umax(umax, ium, jum, kum)
         ! max|u| and its (i,j,k) -- to see whether the growing jet sits at the

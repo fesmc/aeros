@@ -48,8 +48,11 @@ mutable struct OverturnAccumulator <: SpeedyWeather.AbstractCallback
     heat::Any                     # [point, k]  K/s   (net physics heating)
     rain_c::Any                   # [point]     m/s   convective
     rain_l::Any                   # [point]     m/s   large-scale
+    uwnd::Any                     # [point, k]  m/s   zonal wind
+    vwnd::Any                     # [point, k]  m/s   meridional wind
+    uvp::Any                      # [point, k]  m2/s2 u*v product (for eddy momentum flux)
 end
-OverturnAccumulator() = OverturnAccumulator(0, 0.0, Float64[], nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+OverturnAccumulator() = OverturnAccumulator(0, 0.0, Float64[], nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
 
 function SpeedyWeather.initialize!(cb::OverturnAccumulator, vars, model)
     cb.n = 0
@@ -63,6 +66,9 @@ function SpeedyWeather.initialize!(cb::OverturnAccumulator, vars, model)
     cb.heat   = zeros(Float64, size(T))
     cb.rain_c = zeros(Float64, size(vars.parameterizations.rain_rate_convection))
     cb.rain_l = zeros(Float64, size(vars.parameterizations.rain_rate_large_scale))
+    cb.uwnd = zeros(Float64, size(T))
+    cb.vwnd = zeros(Float64, size(T))
+    cb.uvp  = zeros(Float64, size(T))
     return nothing
 end
 
@@ -99,6 +105,13 @@ function SpeedyWeather.callback!(cb::OverturnAccumulator, vars, model)
     # --- precipitation rates (instantaneous, m/s) from the real timestep ---
     cb.rain_c .+= Array(vars.parameterizations.rain_rate_convection)
     cb.rain_l .+= Array(vars.parameterizations.rain_rate_large_scale)
+
+    # --- winds + u*v product (for the eddy momentum flux [u*v*] = [uv]-[u][v]) ---
+    ug = Array(vars.grid.u)                    # [point, k]  m/s
+    vg = Array(vars.grid.v)                    # [point, k]  m/s
+    cb.uwnd .+= ug
+    cb.vwnd .+= vg
+    cb.uvp  .+= ug .* vg
 
     # --- net diabatic (physics) heating profile: re-run physics on current state ---
     # parameterization_tendencies! resets tendencies+diagnostics, fills tend.grid.temperature
@@ -182,17 +195,29 @@ humid_m = acc.humid ./ n        # kg/kg
 heat_m  = acc.heat  ./ n        # K/s
 rc_m    = acc.rain_c ./ n       # m/s
 rl_m    = acc.rain_l ./ n       # m/s
+u_m     = acc.uwnd  ./ n        # m/s
+v_m     = acc.vwnd  ./ n        # m/s
+uv_m    = acc.uvp   ./ n        # m2/s2  time-mean of point product u*v
 
 # zonal means on (lat, sigma)
 OMEGA = zeros(nlat, NLAYERS)    # hPa/day
 RH    = zeros(nlat, NLAYERS)    # %
 TEMP  = zeros(nlat, NLAYERS)    # K
 HEAT  = zeros(nlat, NLAYERS)    # K/day
+UWND  = zeros(nlat, NLAYERS)    # m/s   [ubar]  (the jet)
+VWND  = zeros(nlat, NLAYERS)    # m/s   [vbar]  (the MMC)
+UVPR  = zeros(nlat, NLAYERS)    # m2/s2 eddy momentum flux [u*v*] = [uv]-[u][v]
 for k in 1:NLAYERS
     OMEGA[:, k] = zonal_mean_level(omega_m[:, k], spectral_grid, R) .* 864.0     # Pa/s -> hPa/day
     RH[:, k]    = zonal_mean_level(rh_m[:, k],    spectral_grid, R) .* 100.0     # -> %
     TEMP[:, k]  = zonal_mean_level(temp_m[:, k],  spectral_grid, R)
     HEAT[:, k]  = zonal_mean_level(heat_m[:, k],  spectral_grid, R) .* 86400.0   # K/s -> K/day
+    ubar_k      = zonal_mean_level(u_m[:, k],  spectral_grid, R)                 # [ubar]
+    vbar_k      = zonal_mean_level(v_m[:, k],  spectral_grid, R)                 # [vbar]
+    uvbar_k     = zonal_mean_level(uv_m[:, k], spectral_grid, R)                 # [ubar*vbar overline] = [<uv>]
+    UWND[:, k]  = ubar_k
+    VWND[:, k]  = vbar_k
+    UVPR[:, k]  = uvbar_k .- ubar_k .* vbar_k                                    # stationary+transient eddy flux
 end
 PRECIP_C = zonal_mean_level(rc_m, spectral_grid, R) .* (1000.0 * 86400.0)        # mm/day
 PRECIP_L = zonal_mean_level(rl_m, spectral_grid, R) .* (1000.0 * 86400.0)        # mm/day
@@ -215,6 +240,9 @@ NCDataset(NCPATH, "c") do ds
     put2("rh",    RH,    "%",       "zonal-mean relative humidity")
     put2("temp",  TEMP,  "K",       "zonal-mean temperature")
     put2("heat",  HEAT,  "K/day",   "zonal-mean net diabatic (physics) heating")
+    put2("uwind", UWND,  "m/s",     "time-mean zonal-mean zonal wind (jet)")
+    put2("vwind", VWND,  "m/s",     "time-mean zonal-mean meridional wind (MMC)")
+    put2("uvpr",  UVPR,  "m2/s2",   "time-mean zonal-mean eddy momentum flux [u*v*]=[uv]-[u][v]")
     v = defVar(ds, "precip_convective", Float32, ("lat",)); v[:] = Float32.(PRECIP_C[jperm]); v.attrib["units"]="mm/day"
     v = defVar(ds, "precip_largescale", Float32, ("lat",)); v[:] = Float32.(PRECIP_L[jperm]); v.attrib["units"]="mm/day"
     ds.attrib["model"]="SpeedyWeather.jl PrimitiveWetModel aquaplanet"
