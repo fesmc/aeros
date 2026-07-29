@@ -10,6 +10,9 @@
     ! Couple diabatic heating in-solve (step 1b) instead of the default forward
     ! split. Needs eps_filter ~0.15 for stability. Off by default (bit-for-bit).
     couple_diabatic  = .false.
+    ! Van Leer (2nd-order monotone) vertical humidity transport instead of the
+    ! default first-order upwind donor cell. Off by default (bit-for-bit).
+    vert_vanleer     = .false.
     ! Diagnostic prescribed heating (dry-core heating->omega isolation). Off by
     ! default; when on, set all physics off. amp in K/day.
     l_qforce         = .false.

@@ -52,6 +52,7 @@ program rce_long
     integer  :: print_every = 96          ! ~2 model days at dt=1800
     real(wp) :: dt = 1800.0_wp, tau_diff = 6.0_wp
     real(wp) :: t_ref = 300.0_wp          ! isothermal semi-implicit reference [K]
+    logical  :: vert_vanleer = .FALSE.    ! van Leer (not donor-cell) vertical q transport
     ! Couple diabatic heating in-solve (step 1b) vs the default forward-split.
     ! Needs eps_filter ~0.15 to hold the convective computational mode.
     logical  :: couple_diabatic = .FALSE.
@@ -215,6 +216,7 @@ program rce_long
     call aeros_timestep_init(ts, par, pool, grd, vg)
 
     ts%couple_diabatic = couple_diabatic
+    ts%mst%vert_vanleer = vert_vanleer
 
     ts%cnd%enabled = l_cnd
     ts%cnd%rh_crit = cond_rh_crit
@@ -663,6 +665,8 @@ contains
         call nml_read(nmlfile, "rce", "t_ref", t_ref, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "couple_diabatic", couple_diabatic, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "vert_vanleer", vert_vanleer, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "tau_diff", tau_diff)
         call nml_read(nmlfile, "rce", "ndiff", ndiff)

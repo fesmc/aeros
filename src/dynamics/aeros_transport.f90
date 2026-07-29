@@ -126,6 +126,13 @@ module aeros_transport
         real(wp), allocatable :: qm(:,:,:)      ! tracer mass  q*dp        [Pa]
         real(wp), allocatable :: dp0(:,:,:)     ! layer air mass before the horizontal sweeps [Pa]
 
+        ! Vertical reconstruction. Default first-order upwind (donor cell); when
+        ! .TRUE. the vertical sweep uses the same van Leer monotone limiter the
+        ! horizontal already uses, cutting the numerical diffusion that otherwise
+        ! smears the subtropical subsidence drying of the upper troposphere. Both
+        ! are monotone and positive under the Courant limit; off is bit-for-bit.
+        logical :: vert_vanleer = .FALSE.
+
         ! Diagnostics, retained between calls for aeros_transport_report.
         real(wp) :: last_cfl   = 0.0_wp        ! max total Courant last call
         integer  :: last_nsub  = 0             ! sub-steps taken last call
@@ -344,8 +351,13 @@ contains
 
                 do k = 1, nlev
                     da_v = mfl_a(k) - mfl_a(k-1)
-                    dq_v = vflux_q(mst%qm, mst%dp_lev, i, j, k,   mfl_a(k),   nlev) &
-                            - vflux_q(mst%qm, mst%dp_lev, i, j, k-1, mfl_a(k-1), nlev)
+                    if (mst%vert_vanleer) then
+                        dq_v = vflux_q_vl(mst%qm, mst%dp_lev, i, j, k,   mfl_a(k),   dt, nlev) &
+                                - vflux_q_vl(mst%qm, mst%dp_lev, i, j, k-1, mfl_a(k-1), dt, nlev)
+                    else
+                        dq_v = vflux_q(mst%qm, mst%dp_lev, i, j, k,   mfl_a(k),   nlev) &
+                                - vflux_q(mst%qm, mst%dp_lev, i, j, k-1, mfl_a(k-1), nlev)
+                    end if
 
                     mst%dp_lev(i,j,k) = mst%dp_lev(i,j,k) - dt*da_v
                     mst%qm(i,j,k)     = mst%qm(i,j,k)     - dt*dq_v
@@ -616,6 +628,64 @@ contains
         return
 
     end function vflux_q
+
+    real(wp) function vflux_q_vl(qm, dp_lev, i, j, k, mfl, dt, nlev) result(fq)
+        ! Van Leer (second-order, monotone) vertical tracer flux at interface k,
+        ! [Pa/s]. Same donor selection and sign convention as vflux_q, plus half
+        ! the donor layer's limited slope reduced by the vertical Courant number
+        ! -- the vertical analogue of vl_face. The van Leer limiter keeps it
+        ! monotone (no new extremum, hence q >= 0) under the Courant limit, which
+        ! the transport's sub-stepping enforces. Degrades to donor cell at the top
+        ! and bottom interior layers, where an outer neighbour is missing.
+
+        implicit none
+
+        real(wp), intent(in) :: qm(:,:,:), dp_lev(:,:,:)
+        integer,  intent(in) :: i, j, k, nlev
+        real(wp), intent(in) :: mfl, dt
+
+        integer  :: kd
+        real(wp) :: qd, sm, sp, cour
+
+        if (k <= 0 .or. k >= nlev) then
+            fq = 0.0_wp
+            return
+        end if
+
+        ! Donor layer: kd = k (above) for downward flow, k+1 (below) for upward.
+        if (mfl >= 0.0_wp) then
+            kd = k
+        else
+            kd = k + 1
+        end if
+
+        qd   = qm(i,j,kd)/dp_lev(i,j,kd)
+        cour = abs(mfl)*dt/dp_lev(i,j,kd)
+
+        ! One-sided mass-specific-q slopes oriented along the flow: sp is the
+        ! downwind (ahead) side, sm the upwind (behind) side. Drop to donor cell
+        ! if either neighbour falls outside the column.
+        if (mfl >= 0.0_wp) then
+            ! downward: ahead = kd+1 (below), behind = kd-1 (above)
+            if (kd-1 < 1 .or. kd+1 > nlev) then
+                fq = qd*mfl; return
+            end if
+            sm = qd - qm(i,j,kd-1)/dp_lev(i,j,kd-1)
+            sp = qm(i,j,kd+1)/dp_lev(i,j,kd+1) - qd
+        else
+            ! upward: ahead = kd-1 (above), behind = kd+1 (below)
+            if (kd+1 > nlev .or. kd-1 < 1) then
+                fq = qd*mfl; return
+            end if
+            sm = qd - qm(i,j,kd+1)/dp_lev(i,j,kd+1)
+            sp = qm(i,j,kd-1)/dp_lev(i,j,kd-1) - qd
+        end if
+
+        fq = (qd + 0.5_wp*(1.0_wp - cour)*vanleer(sm, sp))*mfl
+
+        return
+
+    end function vflux_q_vl
 
     real(wp) function max_courant(mst, u, v, lnps, vg, dt) result(cmax)
         ! Largest total (zonal + meridional + vertical) Courant number on the
