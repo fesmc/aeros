@@ -57,12 +57,18 @@ eddy-momentum feedback). Both push toward SW/ERA5.
 
 ## Open (the gap that remains)
 
-Not all the way to SW yet: descent +3.15 vs +6.4, RH 78 vs 62%. And a loose end:
-eddy KE is 5.9 m²/s² but the *time-mean* `[u*v*]` reads ~0.04 — the eddies clearly
-modify the mean (jet braking, extra drying) yet the time-mean momentum-flux
-diagnostic is small. Likely transient cancellation: aeros's eddies may be less
-*organized* for systematic momentum transport than SW's, which would explain the
-undershoot. Next: understand the eddy organization and close the descent/RH gap.
+Not all the way to SW yet: descent +3.15 vs +6.4, RH 78 vs 62%. **Verified stable
+over 300 days** — eddy KE equilibrates at ~6–7 m²/s² (not a pre-blowup transient).
+
+The gap is now characterized: with proper averaging (150-day mean) the eddy
+momentum flux is **|[u*v*]| ~0.52 m²/s², coherent but ~7× weaker than SW's 3.9**
+(the earlier ~0.04 was transient cancellation in a too-short average). So aeros's
+eddies have **SW-like energy (KE~6) but under-transport** — they flux momentum, just
+inefficiently. That 7× flux deficit is why the descent reaches +3.15 not +6.4.
+
+Next: why do aeros's eddies carry SW-like KE but ~7× less momentum flux? Candidates
+— dominant wavenumber, baroclinic phase tilt, life-cycle intermittency, or T21
+resolution (test T42). Closing the flux deficit should close the descent/RH gap.
 
 ## Code (this branch)
 
