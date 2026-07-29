@@ -245,6 +245,15 @@ module aeros_timestep
         integer  :: ndiff      = 6        ! diffusion order (6 = del^6)
         logical  :: semi_implicit = .TRUE.
 
+        ! Couple the diabatic heating (surface, convection, condensation,
+        ! radiation) into the thermodynamic tendency BEFORE the semi-implicit
+        ! solve (step 1b), the standard coupling, so the divergent circulation
+        ! responds to the heating within the step. Default OFF = the validated
+        ! forward-split increment on n+1 (step 6), bit-for-bit. The in-solve path
+        ! needs a stronger time filter (eps_filter ~0.15) to hold the convective
+        ! computational mode the centered heating excites; see m2_results 12.1.
+        logical  :: couple_diabatic = .FALSE.
+
         ! Steps taken since init. Zero means the next one is the start-up step.
         integer  :: nstep = 0
 
@@ -259,6 +268,13 @@ module aeros_timestep
         ! Idealized forcing (M1.5). At M2 this becomes a physics driver with
         ! several components; the seam it is applied at does not change.
         type(aeros_hs_class)      :: hs
+
+        ! Diagnostic prescribed heating [K/s], (nlon,nlat,nlev). When allocated,
+        ! added to wrk%dtdt at step 1b -- the same in-solve seam the diabatic
+        ! heating couples at -- independent of the physics toggles. A controlled
+        ! analytic Q for isolating the dry dynamical core's heating->ω response
+        ! from the moist physics. Unallocated (the default) is a bit-for-bit no-op.
+        real(wp), allocatable :: q_force(:,:,:)
 
         ! The additive tendency correction (design.md 3.7, 3.8). A DIFFERENT
         ! seam from `hs` above -- spectral, not grid -- and the reason is in
@@ -408,6 +424,7 @@ module aeros_timestep
     public :: aeros_timestep_end
     public :: aeros_timestep_step
     public :: aeros_timestep_set_phis
+    public :: aeros_timestep_set_qforce
     public :: aeros_timestep_set_mass_target
     public :: aeros_timestep_diagnose
     public :: aeros_timestep_enable_diag
@@ -810,13 +827,13 @@ contains
 
         if (ts%hs%enabled) call aeros_hs_apply(ts%hs, vg, ts%wrk)
 
-        ! Forward-split physics accumulator. Surface fluxes, convection,
-        ! condensation and radiation all add a forward temperature increment
-        ! here, applied to the n+1 state in step 6 -- off the centered leapfrog,
-        ! which their large, vertically sharp heating (a single-layer flux, an
-        ! overturning column, a lowest-layer latent release, a cooling model top)
-        ! would otherwise drive computational-mode unstable. Zero it once if any
-        ! is on.
+        ! Diabatic heating accumulator. Surface fluxes, convection, condensation
+        ! and radiation each add a temperature increment [K] here over one dt.
+        ! Default: applied forward onto n+1 at step 6. With couple_diabatic on:
+        ! step 1b converts the sum to a rate and couples it into the thermodynamic
+        ! tendency ahead of the semi-implicit solve, so the divergent circulation
+        ! is generated in response to the heating within the step. Zero it once if
+        ! any term is on.
         if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled &
             .or. ts%cnd%enabled) &
             ts%wrk%dt_phys = 0.0_wp
@@ -867,11 +884,12 @@ contains
         if (ts%wrk%diag) ts%wrk%dt_cnv = ts%wrk%dt_phys
 
         ! Large-scale condensation, at the same grid seam: it dries the
-        ! gridpoint humidity in place and adds its latent heating to wrk%dt_phys,
-        ! the forward-split path -- symmetric with the forward drying, and off the
-        ! centered leapfrog, whose computational mode the latent release excites
-        ! once it is large in the coupled RCE (aeros_condensation header). Returns
-        ! at once when dry.
+        ! gridpoint humidity in place and adds its latent heating to wrk%dt_phys.
+        ! Default (forward-split) keeps the heating and the forward drying on one
+        ! discretization; with couple_diabatic the heating moves to the centered
+        ! step-1b tendency while the drying stays forward on the off-spectral
+        ! humidity, so column MSE is then conserved only in the mean (a watched
+        ! budget diagnostic, not a per-step equality). Returns at once when dry.
         call aeros_condensation_apply(ts%cnd, vg, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
         if (ts%wrk%diag) ts%wrk%dt_cnd = ts%wrk%dt_phys
@@ -959,6 +977,35 @@ contains
                                     ts%surf%shf, ts%surf%lhf, ts%surf%evap, &
                                     ts%cnv%precip + ts%cnd%precip, ts%dt)
 
+        ! === 1b. Couple the diabatic heating into the thermodynamic tendency ==
+        ! (couple_diabatic only; default OFF uses the step-6 forward-split.)
+        ! Surface, convection, condensation and radiation accumulated a heating
+        ! INCREMENT [K] over one dt in wrk%dt_phys. Convert it back to a RATE
+        ! [K/s] -- dt_phys/dt -- and add it to the dynamical heating rate dtdt,
+        ! so the whole diabatic forcing enters tnd%temp BEFORE the semi-implicit
+        ! solve and the gravity-wave adjustment generates the divergent (Hadley)
+        ! circulation in response to it, within the step. This is the standard
+        ! coupling (IFS/SPEEDY/SpeedyWeather), and the treatment Held-Suarez
+        ! Newtonian heating already gets here (aeros_held_suarez adds to dtdt).
+        !
+        ! The rate is the true physical rate, no leapfrog factor: the semi-
+        ! implicit advances temperature over h = 2 dt but each step moves the
+        ! clock forward only dt, so a rate Q deposits Q*dt per clock-step in the
+        ! mean -- exactly what the forward-split (dt_phys = Q*dt onto n+1)
+        ! deposits. Any future attenuation of a term stays an explicit factor on
+        ! the rate, out here, never folded into the rate itself.
+        !
+        ! Guarded on the same physics-enabled condition that zeroed dt_phys, so
+        ! the pure-dynamics / Held-Suarez path leaves dtdt untouched, bit-exact.
+        if (ts%couple_diabatic .and. (ts%surf%enabled .or. ts%cnv%enabled &
+            .or. ts%rad%enabled .or. ts%cnd%enabled)) &
+            ts%wrk%dtdt = ts%wrk%dtdt + ts%wrk%dt_phys/ts%dt
+
+        ! Diagnostic prescribed heating, on the same in-solve seam. A controlled
+        ! analytic Q [K/s] for isolating the dry core's heating->ω response; a
+        ! no-op unless a driver has set it (aeros_timestep_set_qforce).
+        if (allocated(ts%q_force)) ts%wrk%dtdt = ts%wrk%dtdt + ts%q_force
+
         call aeros_tendency_spectral(pool, vg, ts%wrk, ts%tnd)
 
         ! The additive correction, on the assembled spectral tendency. Not at
@@ -1018,18 +1065,20 @@ contains
         call aeros_spec_swap(ts%old, now%spec)
         call aeros_spec_swap(now%spec, ts%new)
 
-        ! === 6. Forward-split physics heating ================================
+        ! === 6. Forward-split physics heating (default; not couple_diabatic) ==
         ! Surface, convective, condensational AND radiative heating were
         ! accumulated on the grid in wrk%dt_phys as an increment [K]. Apply it
         ! FORWARD onto the n+1 state now -- transform per level and add to
         ! now%temp -- decoupled from the centered leapfrog, which would otherwise
         ! turn their large, vertically sharp heating into a computational-mode
-        ! instability. This mirrors the forward treatment of gridpoint humidity
-        ! in step 8, so for condensation the drying and heating now share one
-        ! discretization. (Boundary-layer vertical diffusion is separate: it is a
-        ! diffusion operator, applied implicitly in step 3c.)
-        if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled &
-            .or. ts%cnd%enabled) &
+        ! instability (m2_results 12.1). This mirrors the forward treatment of
+        ! gridpoint humidity in step 8, so for condensation the drying and heating
+        ! share one discretization. (Boundary-layer vertical diffusion is
+        ! separate: a diffusion operator, applied implicitly in step 3c.) When
+        ! couple_diabatic is on, step 1b coupled the heating in-solve instead and
+        ! this is skipped.
+        if (.not. ts%couple_diabatic .and. (ts%surf%enabled .or. ts%cnv%enabled &
+            .or. ts%rad%enabled .or. ts%cnd%enabled)) &
             call apply_phys_heating(s, now%spec, ts%wrk%dt_phys, vg%nlev)
 
         ! === 7. Mass fixer ===================================================
@@ -1071,6 +1120,7 @@ contains
         ! analysis per level. The grid field is consumed (analysis overwrites
         ! its input). See step 6 of aeros_timestep_step for why the convective
         ! heating is applied here, forward, rather than through the centered RHS.
+        ! Used only in the default (not couple_diabatic) configuration.
 
         implicit none
 
@@ -1127,7 +1177,8 @@ contains
 
         ! Diagnostic: capture vdiff's grid-T change as t3(after) - t3(before).
         ! It rides t3 in place through aeros_vdiff_apply, so hold the pre-diffuse
-        ! temperature and difference below. [K/step], like the forward-split terms.
+        ! temperature and difference below. [K/step], like the per-term physics
+        ! heating diagnostics (dt_surf/dt_cnv/dt_cnd/dt_rad).
         if (ts%wrk%diag) ts%wrk%dt_vdiff = t3
 
         call aeros_vdiff_apply(ts%vd, vg, t3, now%qv_g, u3, v3, lnps2, ts%dt, &
@@ -1755,6 +1806,33 @@ contains
         return
 
     end subroutine aeros_timestep_set_phis
+
+    subroutine aeros_timestep_set_qforce(ts, q)
+        ! Set the diagnostic prescribed heating rate [K/s], (nlon,nlat,nlev).
+        ! Added to wrk%dtdt at step 1b (the in-solve seam), independent of the
+        ! physics toggles -- a controlled analytic Q for isolating the dry
+        ! dynamical core's heating->ω response. Not a production forcing.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        real(wp), intent(in) :: q(:,:,:)
+
+        if (size(q,1) /= ts%wrk%nlon .or. size(q,2) /= ts%wrk%nlat &
+            .or. size(q,3) /= ts%wrk%nlev) then
+            write(io_unit_err,*) "aeros_timestep_set_qforce:: error: shape mismatch, got ", &
+                                    shape(q), " expected ", &
+                                    ts%wrk%nlon, ts%wrk%nlat, ts%wrk%nlev
+            error stop 1
+        end if
+
+        if (.not. allocated(ts%q_force)) &
+            allocate(ts%q_force(ts%wrk%nlon, ts%wrk%nlat, ts%wrk%nlev))
+        ts%q_force = q
+
+        return
+
+    end subroutine aeros_timestep_set_qforce
 
     subroutine aeros_timestep_diagnose(ts, pool, vg, grd, now)
         ! Synthesize the grid-space fields of `now` from its spectral state.

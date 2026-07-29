@@ -51,6 +51,10 @@ program rce_long
     integer  :: trunc = 21, nlev = 12, nstep = 4800, ndiff = 6
     integer  :: print_every = 96          ! ~2 model days at dt=1800
     real(wp) :: dt = 1800.0_wp, tau_diff = 6.0_wp
+    real(wp) :: t_ref = 300.0_wp          ! isothermal semi-implicit reference [K]
+    ! Couple diabatic heating in-solve (step 1b) vs the default forward-split.
+    ! Needs eps_filter ~0.15 to hold the convective computational mode.
+    logical  :: couple_diabatic = .FALSE.
     real(wp) :: eps_filter = 0.06_wp, raw_alpha = 0.53_wp
     real(wp) :: conv_tau = 7200.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp, u_min = 1.0_wp
     character(len=32) :: conv_scheme = "sbm_frierson" ! "sbm" | "sbm_frierson" | "manabe"
@@ -62,6 +66,11 @@ program rce_long
     logical  :: l_rad_clouds = .FALSE. ! diagnostic all-sky clouds in the radiation
     logical  :: l_uniform_insol = .FALSE. ! flatten insolation to its global mean (no meridional gradient)
     logical  :: l_nonrotating = .FALSE.   ! zero Coriolis (no jet organization; RCE vehicle)
+    ! Diagnostic prescribed heating (dry-core heating->ω isolation). When on, set
+    ! all physics off; an analytic Q(lat,sigma) = amp * [equatorial, zero-mean] *
+    ! sin(pi*sigma) is coupled on the in-solve seam. amp in K/day.
+    logical  :: l_qforce = .FALSE.
+    real(wp) :: qforce_amp = 2.0_wp       ! prescribed heating amplitude [K/day]
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
     logical  :: vdiff_richardson = .TRUE.    ! Ri-diagnosed BL depth (else fixed)
     real(wp) :: vdiff_ri_crit = 10.0_wp      ! critical bulk Richardson number
@@ -160,6 +169,10 @@ program rce_long
     real(wp), allocatable :: phis_full(:,:)   ! full (unramped) topography [m2 s-2]
     real(wp), allocatable :: w_tavg(:,:,:)    ! time-mean omega accumulator [Pa/s]
     integer            :: n_wacc = 0          ! samples in w_tavg
+    ! Time-mean per-term diabatic heating accumulators [K/step], same 2nd-half
+    ! sampling as w_tavg -- to see WHERE (lat,sigma) the latent heating fires.
+    real(wp), allocatable :: cnv_tavg(:,:,:), cnd_tavg(:,:,:), &
+                             rad_tavg(:,:,:), surf_tavg(:,:,:)
     real(wp) :: tscale, tscale_prev           ! current / previous ramp factor
     real(wp) :: qs, dqsdt, tval
     real(wp) :: phalf(0:64), pfull(64), dpc(64)
@@ -173,7 +186,7 @@ program rce_long
 
     call aeros_sht_pool_init(pool, trunc, quick=.TRUE.)
     call aeros_grid_init(grd, pool%sht(1))
-    call aeros_vgrid_init(vg, nlev)
+    call aeros_vgrid_init(vg, nlev, t_ref=t_ref)
 
     ! Non-rotating vehicle: with no Coriolis there is nothing to organise a
     ! meridional asymmetry into a geostrophic/angular-momentum jet, so with
@@ -200,6 +213,8 @@ program rce_long
 
     call aeros_state_alloc(now, grd, pool%sht(1)%nlm, nlev)
     call aeros_timestep_init(ts, par, pool, grd, vg)
+
+    ts%couple_diabatic = couple_diabatic
 
     ts%cnd%enabled = l_cnd
     ts%cnd%rh_crit = cond_rh_crit
@@ -352,6 +367,42 @@ program rce_long
     phis2 = tscale*phis_full
     call aeros_timestep_set_phis(ts, phis2)
 
+    ! Diagnostic prescribed heating: an analytic Q(lat,sigma), equatorial and
+    ! area-weighted zero-mean in latitude (no net global heating -> no drift),
+    ! sin(pi*sigma) in the vertical (mid-troposphere peak, zero at top/surface).
+    ! Coupled on the in-solve seam to isolate the dry core's heating->ω response
+    ! from moist physics. Run with all physics off.
+    if (l_qforce) then
+        block
+            real(wp), allocatable :: q3(:,:,:), slat(:)
+            real(wp) :: amp, mlat, wsum, latr, pi
+            integer  :: iq, jq, kq
+            pi = 4.0_wp*atan(1.0_wp)
+            allocate(q3(grd%nlon, grd%nlat, nlev), slat(grd%nlat))
+            amp = qforce_amp/86400.0_wp                     ! K/day -> K/s
+            wsum = 0.0_wp; mlat = 0.0_wp
+            do jq = 1, grd%nlat
+                latr    = grd%lat(jq)
+                slat(jq) = exp(-(latr/15.0_wp)**2)          ! equatorial heating
+                mlat    = mlat + slat(jq)*cos(latr*pi/180.0_wp)
+                wsum    = wsum + cos(latr*pi/180.0_wp)
+            end do
+            mlat = mlat/wsum                                ! area-weighted mean
+            do kq = 1, nlev
+                do jq = 1, grd%nlat
+                    do iq = 1, grd%nlon
+                        q3(iq,jq,kq) = amp*(slat(jq) - mlat) &
+                                        *sin(pi*vg%sigma_full(kq))
+                    end do
+                end do
+            end do
+            call aeros_timestep_set_qforce(ts, q3)
+            write(*,'(a,f6.2,a)') " rce_long:: prescribed Q ON, amp=", qforce_amp, &
+                                    " K/day (physics MUST be off for a clean dry test)"
+            deallocate(q3, slat)
+        end block
+    end if
+
     ! === Restart branch: load state instead of constructing an IC ===========
     ! When restart_in is set, the timestep and state are already allocated by
     ! the init/config above (same trunc/nlev/grid); read_restart overwrites them
@@ -414,6 +465,9 @@ program rce_long
 
     blew_up = .FALSE.
     allocate(w_tavg(grd%nlon,grd%nlat,nlev)); w_tavg = 0.0_wp; n_wacc = 0
+    allocate(cnv_tavg(grd%nlon,grd%nlat,nlev), cnd_tavg(grd%nlon,grd%nlat,nlev), &
+             rad_tavg(grd%nlon,grd%nlat,nlev), surf_tavg(grd%nlon,grd%nlat,nlev))
+    cnv_tavg = 0.0_wp; cnd_tavg = 0.0_wp; rad_tavg = 0.0_wp; surf_tavg = 0.0_wp
     do n = n0+1, n0+nstep
         ! Advance the topography ramp: a pure function of absolute elapsed time
         ! n*dt, so it is restart-safe -- a run resumed at n0 continues the ramp at
@@ -440,6 +494,10 @@ program rce_long
         ! zonal-mean subsidence diagnostic -- a single snapshot is too noisy.
         if (l_diag .and. n > n0 + nstep/2) then
             w_tavg = w_tavg + ts%wrk%omega
+            cnv_tavg  = cnv_tavg  + ts%wrk%dt_cnv
+            cnd_tavg  = cnd_tavg  + ts%wrk%dt_cnd
+            rad_tavg  = rad_tavg  + ts%wrk%dt_rad
+            surf_tavg = surf_tavg + ts%wrk%dt_surf
             n_wacc = n_wacc + 1
         end if
         ! Periodic checkpoint (restart_interval > 0). The model time carried into
@@ -487,7 +545,10 @@ contains
         real(wp) :: qsl, dqsl, colcov, rnlon
         real(wp), allocatable :: rh_zm(:,:), cf_zm(:,:), t_zm(:,:), q_zm(:,:), p_zm(:,:)
         real(wp), allocatable :: u_zm(:,:), v_zm(:,:), w_zm(:,:)
+        real(wp), allocatable :: cnv_zm(:,:), cnd_zm(:,:), rad_zm(:,:), &
+                                 surf_zm(:,:), qnet_zm(:,:)
         real(wp), allocatable :: cover(:), latout(:), levout(:)
+        real(wp) :: kday
         integer :: ii, jj, kk
 
         rnlon = real(grd%nlon, wp)
@@ -497,8 +558,13 @@ contains
                  cover(grd%nlat), latout(grd%nlat), levout(nlev))
         rh_zm = 0.0_wp; cf_zm = 0.0_wp; t_zm = 0.0_wp; q_zm = 0.0_wp
         p_zm = 0.0_wp; u_zm = 0.0_wp; v_zm = 0.0_wp; w_zm = 0.0_wp; cover = 0.0_wp
+        allocate(cnv_zm(grd%nlat,nlev), cnd_zm(grd%nlat,nlev), rad_zm(grd%nlat,nlev), &
+                 surf_zm(grd%nlat,nlev), qnet_zm(grd%nlat,nlev))
+        cnv_zm = 0.0_wp; cnd_zm = 0.0_wp; rad_zm = 0.0_wp; surf_zm = 0.0_wp
         latout = grd%lat(1:grd%nlat)
         levout = vg%sigma_full(1:nlev)
+        ! [K/step] time-mean -> [K/day]: /n_wacc (time), /nlon (zonal), *86400/dt.
+        kday = 86400.0_wp/dt
 
         do jj = 1, grd%nlat
             do ii = 1, grd%nlon
@@ -519,6 +585,13 @@ contains
                     ! time-mean vertical pressure velocity [hPa/day], >0 = subsidence
                     if (n_wacc > 0) w_zm(jj,kk) = w_zm(jj,kk) &
                         + w_tavg(ii,jj,kk)/real(n_wacc,wp)*864.0_wp
+                    ! per-term diabatic heating, time-mean [K/day]
+                    if (n_wacc > 0) then
+                        cnv_zm(jj,kk)  = cnv_zm(jj,kk)  + cnv_tavg(ii,jj,kk) /real(n_wacc,wp)*kday
+                        cnd_zm(jj,kk)  = cnd_zm(jj,kk)  + cnd_tavg(ii,jj,kk) /real(n_wacc,wp)*kday
+                        rad_zm(jj,kk)  = rad_zm(jj,kk)  + rad_tavg(ii,jj,kk) /real(n_wacc,wp)*kday
+                        surf_zm(jj,kk) = surf_zm(jj,kk) + surf_tavg(ii,jj,kk)/real(n_wacc,wp)*kday
+                    end if
                     colcov = max(colcov, cf(kk))     ! max-overlap column cover
                 end do
                 cover(jj) = cover(jj) + colcov
@@ -531,6 +604,11 @@ contains
             u_zm(jj,:)  = u_zm(jj,:)/rnlon
             v_zm(jj,:)  = v_zm(jj,:)/rnlon
             w_zm(jj,:)  = w_zm(jj,:)/rnlon
+            cnv_zm(jj,:)  = cnv_zm(jj,:)/rnlon
+            cnd_zm(jj,:)  = cnd_zm(jj,:)/rnlon
+            rad_zm(jj,:)  = rad_zm(jj,:)/rnlon
+            surf_zm(jj,:) = surf_zm(jj,:)/rnlon
+            qnet_zm(jj,:) = cnv_zm(jj,:) + cnd_zm(jj,:) + rad_zm(jj,:) + surf_zm(jj,:)
             cover(jj)   = cover(jj)/rnlon
         end do
 
@@ -555,6 +633,16 @@ contains
             long_name="zonal-mean meridional wind")
         call nc_write(fname, "cover", cover, dim1="lat", units="1", &
             long_name="max-overlap total cloud cover")
+        call nc_write(fname, "q_cnv",  cnv_zm,  dim1="lat", dim2="lev", units="K/day", &
+            long_name="zonal-mean convective heating")
+        call nc_write(fname, "q_cnd",  cnd_zm,  dim1="lat", dim2="lev", units="K/day", &
+            long_name="zonal-mean condensation heating")
+        call nc_write(fname, "q_rad",  rad_zm,  dim1="lat", dim2="lev", units="K/day", &
+            long_name="zonal-mean radiative heating")
+        call nc_write(fname, "q_surf", surf_zm, dim1="lat", dim2="lev", units="K/day", &
+            long_name="zonal-mean surface-flux heating")
+        call nc_write(fname, "q_net",  qnet_zm, dim1="lat", dim2="lev", units="K/day", &
+            long_name="zonal-mean net diabatic heating")
         write(*,"(a)") " rce_long:: wrote zonal-mean RH/cf dump -> "//trim(fname)
 
         deallocate(rh_zm, cf_zm, t_zm, q_zm, p_zm, u_zm, v_zm, cover, latout, levout)
@@ -572,6 +660,10 @@ contains
         call nml_read(nmlfile, "rce", "nlev", nlev)
         call nml_read(nmlfile, "rce", "nstep", nstep)
         call nml_read(nmlfile, "rce", "dt", dt)
+        call nml_read(nmlfile, "rce", "t_ref", t_ref, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "couple_diabatic", couple_diabatic, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "tau_diff", tau_diff)
         call nml_read(nmlfile, "rce", "ndiff", ndiff)
         call nml_read(nmlfile, "rce", "eps_filter", eps_filter)
@@ -587,6 +679,10 @@ contains
         call nml_read(nmlfile, "rce", "l_dry_adjust", l_dry_adjust)
         call nml_read(nmlfile, "rce", "l_uniform_insol", l_uniform_insol)
         call nml_read(nmlfile, "rce", "l_nonrotating", l_nonrotating)
+        call nml_read(nmlfile, "rce", "l_qforce", l_qforce, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "qforce_amp", qforce_amp, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "sponge_kr", sponge_kr)
         call nml_read(nmlfile, "rce", "sponge_kt", sponge_kt)
         call nml_read(nmlfile, "rce", "sponge_sigma", sponge_sigma)

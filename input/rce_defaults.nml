@@ -4,6 +4,16 @@
 ! fail-loud). Keep rad_interval in step with aeros_rad_class's default (6 h).
 ! l_topography off = flat aquaplanet (phis = 0), the bit-for-bit default.
 &rce
+    ! Isothermal semi-implicit reference temperature [K] (aeros_semiimp requires
+    ! isothermal). Optional; omitted -> this default.
+    t_ref            = 300.0
+    ! Couple diabatic heating in-solve (step 1b) instead of the default forward
+    ! split. Needs eps_filter ~0.15 for stability. Off by default (bit-for-bit).
+    couple_diabatic  = .false.
+    ! Diagnostic prescribed heating (dry-core heating->omega isolation). Off by
+    ! default; when on, set all physics off. amp in K/day.
+    l_qforce         = .false.
+    qforce_amp       = 2.0
     rad_interval     = 21600.0
     rad_scheme       = 2
     l_topography     = .false.
