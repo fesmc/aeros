@@ -1,7 +1,13 @@
 # Subtropical descent concentration — the residual moist bias is a dynamics problem
 
-**Status:** diagnosed thoroughly; the moisture side and the dynamical core are both ruled out.
-For a fresh session.
+**Status (2026-07-29): LARGELY RESOLVED — see [`docs/refs/sw_faithful_dynamics.md`](refs/sw_faithful_dynamics.md).**
+The descent didn't concentrate because aeros had **no eddy momentum flux** — its RCE couldn't sustain
+baroclinic eddies (they blew up at the model top). Reproducing SpeedyWeather's core numerics (unlock:
+`eps_filter=0.1`, SW's Robert coefficient; + `si_alpha` backward-implicit + divergence diffusion) now
+sustains eddies: descent tightened 25→69° down to **19–30°**, jet 14→**31 m/s @ 30°**, subtropical RH
+94→**78%**. Remaining gap (+3.15 vs SW +6.4): the eddies are **mis-scaled** (m=8 jet-instability spike)
+because aeros's subtropical jet is too strong/narrow — a coupled jet–eddy loop, now the active thread
+(handoff ►►). The original diagnosis chain below is retained as the ruled-out record.
 
 **The residual bias.** The free-tropospheric moist bias (subtropical/extratropical **upper
 troposphere pinned near ~94% RH** vs SpeedyWeather/ERA5 ~45–62%) traces to aeros's **subtropical

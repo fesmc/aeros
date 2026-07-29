@@ -1,22 +1,44 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION: subtropical descent concentration (dynamics) — the residual is a cell-edge problem
+## ►► NEXT SESSION: break the jet–eddy loop — aeros's subtropical jet is too strong/narrow
 
-**Full scope in [`docs/descent_concentration_scope.md`](descent_concentration_scope.md).** The
-residual free-tropospheric moist bias (subtropical/extratropical **upper troposphere pinned near
-~94% RH** vs SpeedyWeather ~45–62%) is now pinned to a single cause: aeros's Hadley **descending
-branch is too weak and diffuse** (spread ~1.5–2 hPa/day from 19° to the pole) instead of
-**concentrating at ~30°** like SpeedyWeather (+6→+11 hPa/day). Nothing dries the subtropical free
-troposphere below the `rh_crit=0.95` condensation ceiling.
+**Prior state (`docs/descent_concentration_scope.md`) — LARGELY RESOLVED.** The residual moist bias
+traced to aeros's Hadley descent not concentrating at 30°, which traced to aeros having **no eddy
+momentum flux** — its RCE could not sustain baroclinic eddies (seeded eddies blew up at the model
+top by ~day 27). **That is now fixed** (see below): reproducing SpeedyWeather's core numerics lets
+aeros hold eddies, and the descent, jet, and subtropical RH all move a long way toward SW/ERA5.
 
-**Everything else is RULED OUT** (this session): the overturning mass flux is *not* weak (aeros
-Ψ 4.9×10¹⁰ kg/s > SW 3.8×10¹⁰); the dry core converts prescribed heating→ω fine and is
-filter-insensitive; both models have the same split (double) ITCZ; SpeedyWeather's "~13 hPa/day"
-is its **descent**, not ascent; `t_ref` doesn't matter; the humidity transport diffusivity
-(`vert_vanleer` test) doesn't matter; `rh_crit` is a band-aid (SW condenses to saturation yet
-reaches ~50% via subsidence). So the fix is **dynamical: what sets the Hadley cell edge** — the
-weak subtropical jet (|u| ~20 vs ERA5 ~30), baroclinic-eddy termination, and/or T21 resolution.
-This is open-ended research, not a targeted patch — scope it realistically.
+**The remaining gap is a coupled jet–eddy loop (`docs/refs/sw_faithful_dynamics.md`).** aeros now
+sustains eddies but they are **mis-scaled**: 43% of the eddy KE sits in an m=8 spike (SW has 2%;
+SW's energy is synoptic, m=1–5) that carries ~no momentum flux, so the descent only reaches +3.15
+hPa/day vs SW's +6.4. m=8 is a **jet instability**: it lives at 30–41°, mid-troposphere, on the
+flanks of aeros's jet — which is **too strong/narrow (51 m/s @ 30.5°)** and dominated by the
+*subtropical* (Hadley) jet, where SW's is the broader *eddy-driven* jet at ~47°. Self-reinforcing:
+weak/mis-scaled eddies → subtropical jet dominates → narrow jet → m=8 → weak eddies.
+
+**Next task = attack the jet (break the loop):** understand why aeros's Hadley/subtropical jet is so
+vigorous and equatorward, and broaden/weaken it toward SW's (a weaker SST meridional gradient, or
+whatever makes the axisymmetric jet over-strong). A broader jet → synoptic (low-m) instability →
+transporting eddies → concentrated descent. Open-ended coupled-dynamics research.
+
+**►► THE FIX THAT LANDED THIS SESSION (all on `main`, opt-in / default off, bit-for-bit, 25 tests
+pass) — `docs/refs/sw_faithful_dynamics.md`, `hadley_edge_emf.md`:** aeros could not sustain eddies;
+the blow-up was a **leapfrog computational mode** in the balanced field (the "model-top" framing was
+a red herring). The unlock was **`eps_filter=0.1` — SpeedyWeather's actual Robert-filter
+coefficient** (aeros ran 0.06, too weak → blows up; 0.15 is too strong → kills eddies). Plus two
+opt-in SW-faithful core options: **`si_alpha`** (semi-implicit decentering; 1.0 = backward-implicit;
+commit `7d7484e`) and **`tau_diff_div` + divergence-only order taper** (SW's gravity-wave absorber).
+Full SW config = `si_alpha=1, ndiff=8, tau_diff=4, tau_diff_div=1, diff_taper, diff_ndiff_top=4,
+diff_taper_sigma=0.2, l_sponge=.false., eps_filter=0.1, raw_alpha=0.53`. Result (T21 RCE, 300 d
+stable, eddy KE ~6): descent 25→69° tightened to **19–30°**, jet 14→**31 m/s @ 30°**, subtropical RH
+94→**78%** (SW 62%). New diagnostics (commits `402fa7a`, `b0321f7`, `d3d1748`): the eddy
+momentum-flux dump (`uvpr`/`ubar`/`vbar`), the eddy zonal-wavenumber spectrum (`accum_espec`, KE +
+flux co-spectrum, and KE by latitude/level), and `scripts/hadley_edge_compare.jl`; the SW extraction
+(`mwm/C_omega/omega_structure.jl`) mirrors all of them.
+
+**Superseded framing below** (kept for the ruled-out chain): the descent gap was thought to be the
+cell-edge with candidates weak-jet / eddy-termination / T21. The eddy-termination piece is now the
+active thread (the jet–eddy loop); T21 is not it (SW works at T21, and aeros T42 was a prior null).
 
 **Landed this session (all on `main`, opt-in / default off, bit-for-bit; 25 tests pass):**
 `couple_diabatic` (in-solve diabatic coupling, needs eps~0.15; commit `51bd92a`), `vert_vanleer`
