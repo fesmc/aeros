@@ -51,8 +51,18 @@ mutable struct OverturnAccumulator <: SpeedyWeather.AbstractCallback
     uwnd::Any                     # [point, k]  m/s   zonal wind
     vwnd::Any                     # [point, k]  m/s   meridional wind
     uvp::Any                      # [point, k]  m2/s2 u*v product (for eddy momentum flux)
+    # eddy zonal-wavenumber spectrum (regrid to full Gaussian, latitude DFT,
+    # sampled every 10 steps) -- apples-to-apples with aeros's accum_espec.
+    ke_spec::Any                  # (mmax) eddy KE by zonal wavenumber (accumulated)
+    mf_spec::Any                  # (mmax) [u*v*] co-spectrum by zonal wavenumber
+    nspec::Int                    # spectrum samples
+    R::Any                        # regridder to full Gaussian grid
+    ctab::Any                     # (mmax, nlon) DFT cos table
+    stab::Any                     # (mmax, nlon) DFT -sin table
+    mmax::Int
+    cslat::Any                    # (nlat) cos(latitude) area weight
 end
-OverturnAccumulator() = OverturnAccumulator(0, 0.0, Float64[], nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+OverturnAccumulator() = OverturnAccumulator(0, 0.0, Float64[], nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, 0, nothing, nothing, nothing, 0, nothing)
 
 function SpeedyWeather.initialize!(cb::OverturnAccumulator, vars, model)
     cb.n = 0
@@ -69,6 +79,22 @@ function SpeedyWeather.initialize!(cb::OverturnAccumulator, vars, model)
     cb.uwnd = zeros(Float64, size(T))
     cb.vwnd = zeros(Float64, size(T))
     cb.uvp  = zeros(Float64, size(T))
+    # eddy wavenumber spectrum setup
+    sg = model.spectral_grid
+    cb.R = make_regridder(sg)
+    cb.mmax = Int(sg.trunc)
+    nlon = get_nlon_max(cb.R.target); nlat = get_nlat(cb.R.target)
+    latd = Array(get_latd(cb.R.target))
+    cb.cslat = cosd.(latd)
+    cb.ctab = zeros(Float64, cb.mmax, nlon)
+    cb.stab = zeros(Float64, cb.mmax, nlon)
+    for i in 1:nlon, m in 1:cb.mmax
+        ang = 2π*m*(i-1)/nlon
+        cb.ctab[m,i] = cos(ang); cb.stab[m,i] = -sin(ang)
+    end
+    cb.ke_spec = zeros(Float64, cb.mmax)
+    cb.mf_spec = zeros(Float64, cb.mmax)
+    cb.nspec = 0
     return nothing
 end
 
@@ -112,6 +138,35 @@ function SpeedyWeather.callback!(cb::OverturnAccumulator, vars, model)
     cb.uwnd .+= ug
     cb.vwnd .+= vg
     cb.uvp  .+= ug .* vg
+
+    # --- eddy wavenumber spectrum, sampled every 10 steps (regrid + latitude DFT) ---
+    if cb.n % 10 == 0
+        sg = model.spectral_grid
+        dsig = 1.0/nlayers                      # SW L8 equal-sigma (relative mass weight)
+        nlon = size(cb.ctab, 2)
+        for k in 1:nlayers
+            Uk = regrid_level(ug[:, k], sg, cb.R)    # [lon, lat]
+            Vk = regrid_level(vg[:, k], sg, cb.R)
+            nlat = size(Uk, 2)
+            for j in 1:nlat
+                wj  = cb.cslat[j]*dsig
+                uzm = sum(@view Uk[:, j])/nlon
+                vzm = sum(@view Vk[:, j])/nlon
+                for m in 1:cb.mmax
+                    ur = 0.0; ui = 0.0; vr = 0.0; vi = 0.0
+                    @inbounds for i in 1:nlon
+                        up = Uk[i, j] - uzm; vp = Vk[i, j] - vzm
+                        c = cb.ctab[m, i]; s = cb.stab[m, i]
+                        ur += up*c; ui += up*s; vr += vp*c; vi += vp*s
+                    end
+                    ur /= nlon; ui /= nlon; vr /= nlon; vi /= nlon
+                    cb.ke_spec[m] += wj*(ur*ur + ui*ui + vr*vr + vi*vi)
+                    cb.mf_spec[m] += wj*2.0*(ur*vr + ui*vi)
+                end
+            end
+        end
+        cb.nspec += 1
+    end
 
     # --- net diabatic (physics) heating profile: re-run physics on current state ---
     # parameterization_tendencies! resets tendencies+diagnostics, fills tend.grid.temperature
@@ -321,5 +376,27 @@ println("\n================ SUMMARY ================")
 @printf("SUBTROP DESC : omega = %.2f hPa/day at lat %.1f  (15-35 band)\n", sub_desc_val, sub_desc_lat)
 @printf("SUBTROP RH  : %.1f %% (free trop, sigma=%.3f, 15-35 band)\n", rh_sub, σf[k500])
 @printf("PRECIP peak : %.2f mm/day at lat %.1f\n", tot_precip[jprc], latd[jprc])
+
+# --- eddy zonal-wavenumber spectrum (apples-to-apples with aeros) ---
+if acc.nspec > 0
+    ke = acc.ke_spec ./ acc.nspec
+    mf = acc.mf_spec ./ acc.nspec
+    ket = sum(ke); mft = sum(mf)
+    open(joinpath(OUTDIR, "eddy_spectrum.txt"), "w") do io
+        @printf(io, "# SpeedyWeather eddy zonal-wavenumber spectrum (mass+area wtd, %d samples)\n", acc.nspec)
+        @printf(io, "# total eddy KE %.3e   total [u*v*] %.3e\n", ket, mft)
+        @printf(io, "#  m    KE(m)      KE%%     [u*v*](m)   flux%%\n")
+        for m in 1:acc.mmax
+            @printf(io, "%4d %11.3e %7.1f %12.3e %7.1f\n", m, ke[m], 100*ke[m]/max(ket,eps()),
+                    mf[m], 100*mf[m]/max(abs(mft),eps()))
+        end
+    end
+    println("\n=== SpeedyWeather eddy KE spectrum by zonal wavenumber m ===")
+    @printf("total eddy KE %.3e   total [u*v*] %.3e\n", ket, mft)
+    @printf("  m    KE%%    flux%%\n")
+    for m in 1:min(acc.mmax, 12)
+        @printf("%4d %7.1f %7.1f\n", m, 100*ke[m]/max(ket,eps()), 100*mf[m]/max(abs(mft),eps()))
+    end
+end
 println("wrote ", joinpath(OUTDIR,"summary.txt"), " and ", NCPATH)
 @info "DONE"

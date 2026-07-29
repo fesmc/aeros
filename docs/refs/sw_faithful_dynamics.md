@@ -66,9 +66,25 @@ momentum flux is **|[u*v*]| ~0.52 m²/s², coherent but ~7× weaker than SW's 3.
 eddies have **SW-like energy (KE~6) but under-transport** — they flux momentum, just
 inefficiently. That 7× flux deficit is why the descent reaches +3.15 not +6.4.
 
-Next: why do aeros's eddies carry SW-like KE but ~7× less momentum flux? Candidates
-— dominant wavenumber, baroclinic phase tilt, life-cycle intermittency, or T21
-resolution (test T42). Closing the flux deficit should close the descent/RH gap.
+**Root of the flux deficit — the eddies are mis-scaled (eddy KE spectrum, both
+models T21, `accum_espec` in rce_long / the SW extraction):**
+
+| m | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| SpeedyWeather KE% | 24 | 18 | 12 | 15 | 11 | 11 | 5 | **2** |
+| aeros KE% | 10 | 9 | 4 | 22 | 6 | 2 | 2 | **43** |
+
+SpeedyWeather's eddy energy is smooth and synoptic (m=1–5) and it transports (flux
+carried by m=2–5). aeros locks **43% of its eddy energy in an m=8 spike that SW
+barely has (2%)** — and m=8 carries ~no momentum flux (aeros's flux comes from the
+weaker m=1–4). So aeros's eddies are not low on total energy, they are **mis-scaled**:
+half the energy sits in a small mode SW lacks, starving the transporting synoptic
+scales. T42 is not the fix (prior null result; SW works at T21). The seed only
+perturbs m=1–6, so **m=8 is naturally selected by aeros's flow**, not seeded.
+
+Open: *why* does aeros select an m=8 mode SW doesn't? Numerical (a spurious mode)
+vs physical (the narrow 31–40 m/s jet making m=8 the most-unstable scale). Killing
+the m=8 spike / shifting energy to synoptic scales should close the descent/RH gap.
 
 ## Code (this branch)
 

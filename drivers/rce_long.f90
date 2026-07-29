@@ -181,6 +181,14 @@ program rce_long
     ! deviations from the instantaneous zonal mean) -- the northward eddy flux
     ! of zonal momentum whose meridional convergence sets the Hadley-cell edge.
     real(wp), allocatable :: uv_tavg(:,:), ubar_tavg(:,:), vbar_tavg(:,:)
+    ! Eddy zonal-wavenumber spectrum (mass+area-weighted, time-mean over the 2nd
+    ! half): ke_spec(m) = eddy KE at zonal wavenumber m, mf_spec(m) = the [u*v*]
+    ! momentum-flux co-spectrum. Answers whether the eddies carry SW-like KE but
+    ! at the wrong scale / with no coherent flux. ctab/stab are the precomputed
+    ! DFT trig table so the per-step accumulation is multiply-add only.
+    integer               :: mmax_spec = 0
+    real(wp), allocatable :: ke_spec(:), mf_spec(:)     ! (1:mmax_spec)
+    real(wp), allocatable :: ctab(:,:), stab(:,:)       ! (mmax_spec, nlon)
     real(wp) :: tscale, tscale_prev           ! current / previous ramp factor
     real(wp) :: qs, dqsdt, tval
     real(wp) :: phalf(0:64), pfull(64), dpc(64)
@@ -483,6 +491,22 @@ program rce_long
     cnv_tavg = 0.0_wp; cnd_tavg = 0.0_wp; rad_tavg = 0.0_wp; surf_tavg = 0.0_wp
     allocate(uv_tavg(grd%nlat,nlev), ubar_tavg(grd%nlat,nlev), vbar_tavg(grd%nlat,nlev))
     uv_tavg = 0.0_wp; ubar_tavg = 0.0_wp; vbar_tavg = 0.0_wp
+    ! Eddy wavenumber spectrum: resolve m = 1..trunc; build the DFT trig table.
+    mmax_spec = trunc
+    allocate(ke_spec(mmax_spec), mf_spec(mmax_spec))
+    allocate(ctab(mmax_spec, grd%nlon), stab(mmax_spec, grd%nlon))
+    ke_spec = 0.0_wp; mf_spec = 0.0_wp
+    block
+        integer :: mm, ii
+        real(wp) :: ang, twopi
+        twopi = 8.0_wp*atan(1.0_wp)
+        do ii = 1, grd%nlon
+            do mm = 1, mmax_spec
+                ang = twopi*real(mm*(ii-1), wp)/real(grd%nlon, wp)
+                ctab(mm,ii) = cos(ang); stab(mm,ii) = -sin(ang)
+            end do
+        end do
+    end block
     do n = n0+1, n0+nstep
         ! Advance the topography ramp: a pure function of absolute elapsed time
         ! n*dt, so it is restart-safe -- a run resumed at n0 continues the ramp at
@@ -514,6 +538,7 @@ program rce_long
             rad_tavg  = rad_tavg  + ts%wrk%dt_rad
             surf_tavg = surf_tavg + ts%wrk%dt_surf
             call accum_zmflux()
+            call accum_espec()
             n_wacc = n_wacc + 1
         end if
         ! Periodic checkpoint (restart_interval > 0). The model time carried into
@@ -668,6 +693,23 @@ contains
         call nc_write(fname, "q_net",  qnet_zm, dim1="lat", dim2="lev", units="K/day", &
             long_name="zonal-mean net diabatic heating")
         write(*,"(a)") " rce_long:: wrote zonal-mean RH/cf dump -> "//trim(fname)
+
+        if (n_wacc > 0 .and. allocated(ke_spec)) then
+            block
+                integer  :: m
+                real(wp) :: ket, mft
+                ket = sum(ke_spec)/real(n_wacc,wp); mft = sum(mf_spec)/real(n_wacc,wp)
+                write(*,"(a)") " eddy zonal-wavenumber spectrum (mass+area wtd, 2nd-half mean):"
+                write(*,"(a,es10.3,a,es10.3)") "   total eddy KE ", ket, "   total [u*v*] ", mft
+                write(*,"(a)") "     m    KE(m)      KE%     [u*v*](m)   flux%"
+                do m = 1, mmax_spec
+                    write(*,"(i6,es11.3,f8.1,es12.3,f8.1)") m, ke_spec(m)/real(n_wacc,wp), &
+                        100.0_wp*ke_spec(m)/max(sum(ke_spec),tiny(1.0_wp)), &
+                        mf_spec(m)/real(n_wacc,wp), &
+                        100.0_wp*mf_spec(m)/max(abs(sum(mf_spec)),tiny(1.0_wp))
+                end do
+            end block
+        end if
 
         deallocate(rh_zm, cf_zm, t_zm, q_zm, p_zm, u_zm, v_zm, cover, latout, levout)
         return
@@ -1086,6 +1128,38 @@ contains
         end do
         return
     end subroutine accum_zmflux
+
+    subroutine accum_espec()
+        ! Eddy KE and [u*v*] momentum-flux co-spectrum by zonal wavenumber m,
+        ! mass (dsigma) + area weighted and summed over the globe, accumulated
+        ! over the 2nd half. One-sided (factor 2 for +-m): sum_m ke_spec(m) is the
+        ! total eddy KE, sum_m mf_spec(m) the total momentum flux.
+        integer  :: i, j, k, m
+        real(wp) :: uzm, vzm, up, vp, w, dsig, rn, ur, ui, vr, vi, c, s
+        rn = real(grd%nlon, wp)
+        do k = 1, nlev
+            dsig = vg%sigma_half(k) - vg%sigma_half(k-1)
+            do j = 1, grd%nlat
+                w   = grd%area(1,j)*dsig
+                uzm = sum(now%u(:,j,k))/rn
+                vzm = sum(now%v(:,j,k))/rn
+                do m = 1, mmax_spec
+                    ur = 0.0_wp; ui = 0.0_wp; vr = 0.0_wp; vi = 0.0_wp
+                    do i = 1, grd%nlon
+                        up = now%u(i,j,k) - uzm
+                        vp = now%v(i,j,k) - vzm
+                        c  = ctab(m,i); s = stab(m,i)
+                        ur = ur + up*c; ui = ui + up*s
+                        vr = vr + vp*c; vi = vi + vp*s
+                    end do
+                    ur = ur/rn; ui = ui/rn; vr = vr/rn; vi = vi/rn
+                    ke_spec(m) = ke_spec(m) + w*(ur*ur + ui*ui + vr*vr + vi*vi)
+                    mf_spec(m) = mf_spec(m) + w*2.0_wp*(ur*vr + ui*vi)
+                end do
+            end do
+        end do
+        return
+    end subroutine accum_espec
 
     subroutine locate_umax(umax, ium, jum, kum)
         ! max|u| and its (i,j,k) -- to see whether the growing jet sits at the
