@@ -1,33 +1,29 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION: subtropical upper-tropospheric moisture bias (the reframed residual)
+## ►► NEXT SESSION: subtropical descent concentration (dynamics) — the residual is a cell-edge problem
 
-**The "weak Hadley" framing was a red herring — RESOLVED.** The diabatic-coupling investigation
-(commit `51bd92a`, opt-in `couple_diabatic`, default off) coupled all diabatic heating into the
-semi-implicit tendency the standard way. It landed and is stable (100 d at `eps_filter=0.15`,
-needed to hold the convective computational mode), and it *did* strengthen the circulation — but
-it **did not fix the RH bias**, and a two-model comparison against SpeedyWeather (T21 aquaplanet,
-scripts in `mwm/C_omega/`, analysis in `docs/refs/hadley_core_diff_*.md`,
-`docs/refs/speedy_omega_structure.md`) showed why:
+**Full scope in [`docs/descent_concentration_scope.md`](descent_concentration_scope.md).** The
+residual free-tropospheric moist bias (subtropical/extratropical **upper troposphere pinned near
+~94% RH** vs SpeedyWeather ~45–62%) is now pinned to a single cause: aeros's Hadley **descending
+branch is too weak and diffuse** (spread ~1.5–2 hPa/day from 19° to the pole) instead of
+**concentrating at ~30°** like SpeedyWeather (+6→+11 hPa/day). Nothing dries the subtropical free
+troposphere below the `rh_crit=0.95` condensation ceiling.
 
-- **The circulation is NOT weak.** aeros's overturning mass flux (max|Ψ| 4.9×10¹⁰ kg/s) *exceeds*
-  SpeedyWeather's (3.8×10¹⁰); the dry core converts prescribed heating→ω fine and is
-  filter-insensitive; both models have the same **split (double) ITCZ**. SpeedyWeather's quoted
-  "~13 hPa/day" is its subtropical **descent**, not peak ascent.
-- **The real residual is the subtropical UPPER troposphere.** aeros dries **bottom-up** (moist
-  aloft, dry near surface); SpeedyWeather dries **top-down**. aeros's subtropical/extratropical
-  upper troposphere is **uniformly pinned near ~94% RH** — the condensation floor (`rh_crit=0.95`)
-  — because subsidence there is weak/**diffuse** (spread 19°→pole, ~1.5–2 hPa/day, no concentrated
-  30° peak) and can't win against moisture supplied by the nearby (8–14°) ITCZ outflow.
-  SpeedyWeather's **concentrated** subtropical descent (+6→+11 at 30°) dries its subtropics to
-  ~45–62%.
+**Everything else is RULED OUT** (this session): the overturning mass flux is *not* weak (aeros
+Ψ 4.9×10¹⁰ kg/s > SW 3.8×10¹⁰); the dry core converts prescribed heating→ω fine and is
+filter-insensitive; both models have the same split (double) ITCZ; SpeedyWeather's "~13 hPa/day"
+is its **descent**, not ascent; `t_ref` doesn't matter; the humidity transport diffusivity
+(`vert_vanleer` test) doesn't matter; `rh_crit` is a band-aid (SW condenses to saturation yet
+reaches ~50% via subsidence). So the fix is **dynamical: what sets the Hadley cell edge** — the
+weak subtropical jet (|u| ~20 vs ERA5 ~30), baroclinic-eddy termination, and/or T21 resolution.
+This is open-ended research, not a targeted patch — scope it realistically.
 
-**NEXT TASK — the moisture side (AR-approved direction).** Attack the upper-tropospheric moisture
-balance directly (more tractable than concentrating the descent dynamically): candidates are the
-**over-diffusive off-spectral FV humidity transport** spreading ITCZ moisture into the subtropics,
-and/or the **`rh_crit=0.95` floor** being too generous aloft. Diagnostics landed: the zonal-mean
-per-term heating dump and the `q_force` prescribed-heating hook (commit `51bd92a`). Deprioritized:
-virtual-T (mostly boosts ascent, not the weak descent).
+**Landed this session (all on `main`, opt-in / default off, bit-for-bit; 25 tests pass):**
+`couple_diabatic` (in-solve diabatic coupling, needs eps~0.15; commit `51bd92a`), `vert_vanleer`
+(van Leer vertical humidity transport; commit `3de0b69`), the zonal-mean per-term heating dump,
+the `q_force` prescribed-heating hook, and the `t_ref` knob. Comparison artifacts:
+`mwm/C_omega/` (SpeedyWeather T21 run), `docs/refs/hadley_core_diff_*.md`,
+`docs/refs/speedy_omega_structure.md`.
 
 ### ✅ DONE this session: the moist-bias column physics (on `main`, commit `a5395d6`)
 Diagnosed against SpeedyWeather (same Simplified Betts–Miller) that aeros had two saturating
