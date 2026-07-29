@@ -105,6 +105,10 @@ program rce_long
     real(wp) :: cond_reevap  = 30.0_wp   ! reevaporation efficiency of falling precip
     integer  :: ocean_mode = 0       ! 0 prescribed SST, 1 slab
     real(wp) :: ocean_depth = 10.0_wp
+    ! Prescribed-SST meridional profile knobs (default = APE Control). sst_shape=1.0
+    ! + sst_lat=90 gives SpeedyWeather's cos^2(lat) profile (gentler, more poleward
+    ! gradient) instead of the APE Control's steep-at-30 gradient.
+    real(wp) :: sst_eq = 27.0_wp, sst_lat = 60.0_wp, sst_shape = 1.5_wp
     ! --- thermodynamic sea ice (feat/seaice) --------------------------------
     ! Default .FALSE. keeps the freeze-floor slab, bit-for-bit unchanged. When on
     ! (with a slab ocean) the mixed-layer deficit forms ice, ice grows/melts from
@@ -292,6 +296,9 @@ program rce_long
     ts%rad%scheme   = rad_scheme
     ts%ocn%mode     = ocean_mode
     ts%ocn%depth    = ocean_depth
+    ts%ocn%sst_eq    = sst_eq
+    ts%ocn%sst_lat   = sst_lat
+    ts%ocn%sst_shape = sst_shape
     ts%ocn%l_seaice   = l_seaice
     ts%ocn%ice_albedo = ice_albedo
     ts%ocn%ocn_albedo = albedo        ! open-water albedo = the `albedo` knob (one source of truth)
@@ -892,6 +899,12 @@ contains
         call nml_read(nmlfile, "rce", "tau_diff_div", tau_diff_div, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "si_alpha", si_alpha, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "sst_eq", sst_eq, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "sst_lat", sst_lat, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "sst_shape", sst_shape, &
                       defaults_file="input/rce_defaults.nml")
         return
     end subroutine read_config

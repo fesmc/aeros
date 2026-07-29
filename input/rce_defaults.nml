@@ -93,4 +93,10 @@
     ! waves, bit-for-bit default), 1.0 = backward-implicit (SpeedyWeather; damps
     ! the fast gravity + computational modes in the solve).
     si_alpha         = 0.5
+    ! Prescribed-SST meridional profile: T_s = T0 + sst_eq*(1 - sin^2(sst_shape*phi))
+    ! for |phi| < sst_lat. Defaults are the APE Control profile (gradient steepest at
+    ! 30 deg). sst_shape=1.0 + sst_lat=90 gives SpeedyWeather's cos^2(phi).
+    sst_eq           = 27.0
+    sst_lat          = 60.0
+    sst_shape        = 1.5
 /

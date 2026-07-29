@@ -90,9 +90,13 @@ module aeros_ocean
         real(wp) :: k_ice      = 2.0_wp         ! ice thermal conductivity [W m-1 K-1]
         real(wp) :: t_frz      = 271.35_wp      ! seawater freezing point [K]
 
-        ! Prescribed / initial SST profile (APE control).
-        real(wp) :: sst_eq  = 27.0_wp           ! equator-minus-freezing SST [K]
-        real(wp) :: sst_lat = 60.0_wp           ! frozen poleward of this [deg]
+        ! Prescribed / initial SST profile: T_s = T0 + sst_eq*(1 - sin^2(sst_shape*phi))
+        ! for |phi| < sst_lat. sst_shape = 1.5 is the APE Control profile (gradient
+        ! steepest at 30 deg); sst_shape = 1.0 gives cos^2(phi) (SpeedyWeather's
+        ! smoother, more poleward gradient -- use with sst_lat = 90).
+        real(wp) :: sst_eq    = 27.0_wp         ! equator-minus-freezing SST [K]
+        real(wp) :: sst_lat   = 60.0_wp         ! frozen poleward of this [deg]
+        real(wp) :: sst_shape = 1.5_wp          ! meridional-shape argument multiplier
 
         ! Sea surface temperature [K], (nlon,nlat). Read by surface and radiation.
         ! With sea ice on this carries the ICE-SURFACE skin temperature where ice
@@ -147,7 +151,7 @@ contains
         do j = 1, grd%nlat
             latr = grd%lat(j)*pi/180.0_wp
             if (abs(grd%lat(j)) < ocn%sst_lat) then
-                dsst = ocn%sst_eq*(1.0_wp - sin(1.5_wp*latr)**2)
+                dsst = ocn%sst_eq*(1.0_wp - sin(ocn%sst_shape*latr)**2)
             else
                 dsst = 0.0_wp
             end if

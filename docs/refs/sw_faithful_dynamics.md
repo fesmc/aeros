@@ -55,10 +55,33 @@ builds a 40 m/s jet at 30°; the **eddies** then nearly double the descent stren
 (+1.7→+3.15), dry the subtropics further (87→78%), and brake the jet (40→31, a real
 eddy-momentum feedback). Both push toward SW/ERA5.
 
-## Open (the gap that remains)
+## Equilibrium (the gap is small) + the SST experiment
 
-Not all the way to SW yet: descent +3.15 vs +6.4, RH 78 vs 62%. **Verified stable
-over 300 days** — eddy KE equilibrates at ~6–7 m²/s² (not a pre-blowup transient).
+**The descent needs ~200 d to equilibrate** — the 100-day snapshot badly
+under-reported it:
+
+| averaging | descent peak | subtropical RH |
+|---|---|---|
+| 100 d | +3.15 @ 25° | 78% |
+| 200 d | +5.48 @ 25° | 71% |
+| **300 d** | **+5.69 @ 25°** | **72%** |
+| SpeedyWeather | +6.4 @ 30.5° | 62% |
+
+So the SW-faithful config (with the default APE-Control SST) reaches **descent +5.7
+(vs SW +6.4) and RH 72% (vs 62%)** — most of the gap is closed. Stable over 300 d,
+eddy KE ~6–7 m²/s².
+
+**The m=8 spike is thermally forced, and the APE SST is load-bearing.** Test: swap
+aeros's APE-Control SST (gradient steep at 30°) for SpeedyWeather's smoother
+cos²(φ) profile (`sst_shape=1.0, sst_lat=90`). It **fixes the eddy scale** — the m=8
+spike collapses 43%→5%, energy moves to synoptic m=1–2 — **but the descent gets
+worse**: +5.7→+1.3 and diffuses out to 86°, because the smoother SST removes the
+subtropical forcing that concentrates the descent. So aeros concentrates its descent
+**thermally** (via the steep APE-Control gradient at 30°), where SpeedyWeather does it
+via synoptic eddies — different routes, similar result. **The SST shape is not a lever
+to pursue; the APE profile is doing the work.** m=8 remains a cosmetic eddy-scale
+artifact that does not materially cost the descent. (`sst_shape` landed as an opt-in
+knob, default = APE Control, bit-for-bit.)
 
 The gap is now characterized: with proper averaging (150-day mean) the eddy
 momentum flux is **|[u*v*]| ~0.52 m²/s², coherent but ~7× weaker than SW's 3.9**
