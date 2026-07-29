@@ -189,6 +189,10 @@ program rce_long
     integer               :: mmax_spec = 0
     real(wp), allocatable :: ke_spec(:), mf_spec(:)     ! (1:mmax_spec)
     real(wp), allocatable :: ctab(:,:), stab(:,:)       ! (mmax_spec, nlon)
+    ! Where each wavenumber's eddy KE lives -- to place the m=8 spike (on the jet
+    ! => physical jet instability; spread/grid-tied => numerical).
+    real(wp), allocatable :: ke_latm(:,:)               ! (nlat, mmax) mass-wtd over levels
+    real(wp), allocatable :: ke_levm(:,:)               ! (nlev, mmax) area-wtd over lats
     real(wp) :: tscale, tscale_prev           ! current / previous ramp factor
     real(wp) :: qs, dqsdt, tval
     real(wp) :: phalf(0:64), pfull(64), dpc(64)
@@ -495,7 +499,8 @@ program rce_long
     mmax_spec = trunc
     allocate(ke_spec(mmax_spec), mf_spec(mmax_spec))
     allocate(ctab(mmax_spec, grd%nlon), stab(mmax_spec, grd%nlon))
-    ke_spec = 0.0_wp; mf_spec = 0.0_wp
+    allocate(ke_latm(grd%nlat, mmax_spec), ke_levm(nlev, mmax_spec))
+    ke_spec = 0.0_wp; mf_spec = 0.0_wp; ke_latm = 0.0_wp; ke_levm = 0.0_wp
     block
         integer :: mm, ii
         real(wp) :: ang, twopi
@@ -707,6 +712,30 @@ contains
                         100.0_wp*ke_spec(m)/max(sum(ke_spec),tiny(1.0_wp)), &
                         mf_spec(m)/real(n_wacc,wp), &
                         100.0_wp*mf_spec(m)/max(abs(sum(mf_spec)),tiny(1.0_wp))
+                end do
+            end block
+            ! Where the m=8 spike lives vs a transporting mode (m=4): KE by
+            ! latitude and by level, % of that wavenumber's total.
+            block
+                integer  :: j, k
+                integer, parameter :: ms(2) = [4, 8]
+                integer  :: mi, mm
+                real(wp) :: tot
+                do mi = 1, 2
+                    mm = ms(mi)
+                    if (mm > mmax_spec) cycle
+                    write(*,"(a,i0,a)") " m=", mm, " eddy KE by latitude (%, N+S folded):"
+                    tot = max(sum(ke_latm(:,mm)), tiny(1.0_wp))
+                    do j = 1, grd%nlat
+                        if (100.0_wp*ke_latm(j,mm)/tot > 3.0_wp) &
+                            write(*,"(a,f6.1,a,f6.1)") "    lat ", grd%lat(j), " : ", &
+                                100.0_wp*ke_latm(j,mm)/tot
+                    end do
+                    write(*,"(a,i0,a)") " m=", mm, " eddy KE by level (%, top=1):"
+                    tot = max(sum(ke_levm(:,mm)), tiny(1.0_wp))
+                    do k = 1, nlev
+                        write(*,"(a,i3,a,f6.1)") "    lev ", k, " : ", 100.0_wp*ke_levm(k,mm)/tot
+                    end do
                 end do
             end block
         end if
@@ -1135,7 +1164,7 @@ contains
         ! over the 2nd half. One-sided (factor 2 for +-m): sum_m ke_spec(m) is the
         ! total eddy KE, sum_m mf_spec(m) the total momentum flux.
         integer  :: i, j, k, m
-        real(wp) :: uzm, vzm, up, vp, w, dsig, rn, ur, ui, vr, vi, c, s
+        real(wp) :: uzm, vzm, up, vp, w, dsig, rn, ur, ui, vr, vi, c, s, kem
         rn = real(grd%nlon, wp)
         do k = 1, nlev
             dsig = vg%sigma_half(k) - vg%sigma_half(k-1)
@@ -1153,7 +1182,10 @@ contains
                         vr = vr + vp*c; vi = vi + vp*s
                     end do
                     ur = ur/rn; ui = ui/rn; vr = vr/rn; vi = vi/rn
-                    ke_spec(m) = ke_spec(m) + w*(ur*ur + ui*ui + vr*vr + vi*vi)
+                    kem = ur*ur + ui*ui + vr*vr + vi*vi
+                    ke_spec(m)   = ke_spec(m)   + w*kem
+                    ke_latm(j,m) = ke_latm(j,m) + dsig*kem
+                    ke_levm(k,m) = ke_levm(k,m) + grd%area(1,j)*kem
                     mf_spec(m) = mf_spec(m) + w*2.0_wp*(ur*vr + ui*vi)
                 end do
             end do

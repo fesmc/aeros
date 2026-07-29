@@ -82,9 +82,21 @@ half the energy sits in a small mode SW lacks, starving the transporting synopti
 scales. T42 is not the fix (prior null result; SW works at T21). The seed only
 perturbs m=1–6, so **m=8 is naturally selected by aeros's flow**, not seeded.
 
-Open: *why* does aeros select an m=8 mode SW doesn't? Numerical (a spurious mode)
-vs physical (the narrow 31–40 m/s jet making m=8 the most-unstable scale). Killing
-the m=8 spike / shifting energy to synoptic scales should close the descent/RH gap.
+**m=8 located → it's a jet instability (physical, not numerical).** By latitude the
+m=8 KE peaks at **30–41° (mid-troposphere, lev 5–7)** — the flanks of the
+subtropical jet; by contrast the transporting m=4 is spread and top-heavy. The jet
+itself is **anomalously strong/narrow: 51 m/s at 30.5°** (SW's is broader/weaker),
+and it peaks at **σ=0.07 = the L12 model-top level** (real subtropical jets peak at
+~200 hPa/σ~0.2). A narrow jet's instability sits at high wavenumber, so the energy
+piles into m=8 rather than the synoptic m=1–5 that transport.
+
+Chain: too-strong/narrow jet (piled at the lid) → m=8 instability → energy trapped
+at a non-transporting scale → weak flux → descent under-concentrates. **Next thread:
+why is aeros's jet too strong/narrow and peaked at σ=0.07 (the lid)?** Candidates:
+the axisymmetric Hadley jet too vigorous (unseeded jet already 40 m/s), or the L12
+top (σ=0.074) concentrating the jet core at the top level instead of ~200 hPa
+(a vertical-resolution / top-height question, distinct from the earlier sponge
+red herring).
 
 ## Code (this branch)
 
