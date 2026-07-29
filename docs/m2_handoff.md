@@ -434,6 +434,15 @@ New `rce_long` namelist knobs: `l_diag`, `l_dry_adjust`, `l_uniform_insol`,
   `timeout` is `gtimeout`. For live logs, redirect stdout to a file directly.
 - **The RCE driver is `drivers/rce_long.f90`** — namelist-configured, heavily
   instrumented; a diagnostic tool, not an acceptance test.
+- **Slab (`ocean_mode=1`) is unstable on the OLD core** — the pre-SW-faithful slab
+  recipe (`rce_slab5yr.nml`) now NaNs ~day 89 (git-bisected to `a5395d6`'s default
+  physics: Richardson-BL vdiff + precip reevaporation, validated on prescribed-SST
+  only, never the slab). Not a bug in the opt-in features (SW-faithful core and
+  `sst_shape` are bit-for-bit). Fix: run slab on the **SW-faithful recipe**
+  (`si_alpha=1`, `ndiff=8`/`tau_diff=4`, `tau_diff_div=1`, `diff_taper=T`,
+  `l_sponge=F`, `eps_filter=0.1`), which is stable with the new physics on; or, on
+  the old core, set `vdiff_richardson=.false.` **or** `cond_reevap=0`. No slab
+  stability test exists yet — worth adding.
 
 ## Carried M2 items (not blocking)
 

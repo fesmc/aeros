@@ -37,7 +37,7 @@ program rce_long
     use aeros_topography, only : aeros_topography_load, aeros_topography_scale
     use aeros_land,     only : aeros_land_init, aeros_land_couple_radiation
     use nml,            only : nml_read
-    use ncio,           only : nc_create, nc_write_dim, nc_write
+    use ncio,           only : nc_create, nc_write_dim, nc_write, nc_read, nc_size
 
     implicit none
 
@@ -48,6 +48,16 @@ program rce_long
     ! fatal on a missing key in this driver). The comparison against ERA5 is done
     ! offline by scripts/rce_humidity_vs_era5.jl.
     character(len=512) :: rh_out = "output/rce_rh.nc"
+    ! Monthly-mean climatology output (feat/seasonal). Optional &rce key: when
+    ! monthly_out /= "" the run bins zonal-mean T/u/RH/v (lat,lev,month) and
+    ! SST/precip (lat,month) by calendar month (from the seasonal day-of-year)
+    ! and writes a 12-month climatology for the ERA5 seasonal-cycle comparison.
+    ! "" (the rce_defaults.nml default) = off -> bit-for-bit unchanged.
+    character(len=512) :: monthly_out = ""
+    ! Spin-up days to exclude from the monthly climatology: accumulate a month
+    ! only once the elapsed model day exceeds this, so a single continuous run
+    ! can spin the slab up and then sample a clean climatology over its tail.
+    real(wp) :: mon_spinup_days = 0.0_wp
     integer  :: trunc = 21, nlev = 12, nstep = 4800, ndiff = 6
     integer  :: print_every = 96          ! ~2 model days at dt=1800
     real(wp) :: dt = 1800.0_wp, tau_diff = 6.0_wp
@@ -69,6 +79,21 @@ program rce_long
     logical  :: l_rad_clouds = .FALSE. ! diagnostic all-sky clouds in the radiation
     logical  :: l_uniform_insol = .FALSE. ! flatten insolation to its global mean (no meridional gradient)
     logical  :: l_nonrotating = .FALSE.   ! zero Coriolis (no jet organization; RCE vehicle)
+    ! Seasonal insolation (feat/seasonal): .FALSE. = annual-mean (bit-for-bit
+    ! default). When .TRUE. the TOA insolation is refreshed each radiation step
+    ! from the Laskar orbit at the running day-of-year (doy0 + elapsed days),
+    ! driving a seasonal cycle. Pair with monthly_out to sample the climatology.
+    logical  :: l_seasonal = .FALSE.
+    real(wp) :: doy0 = 0.0_wp             ! start day-of-year for seasonal mode
+    ! Prescribed *seasonal* SST (feat/seasonal): a zonally-symmetric SST(lat,month)
+    ! climatology (built from ERA5 by scripts/make_seasonal_sst.jl) that overrides
+    ! the static analytic profile in prescribed-SST mode (ocean_mode=0), updated
+    ! daily by interpolating the 12 monthly values at the running day-of-year. ""
+    ! = off. This is the stable stand-in for the slab, which is unstable on the
+    ! SW-faithful core (see docs/m2_handoff.md).
+    character(len=512) :: sst_seasonal_file = ""
+    logical  :: l_sst_seasonal = .FALSE.
+    real(wp), allocatable :: sst_clim(:,:) ! (nlat, 12) zonally-symmetric SST BC [K]
     ! Diagnostic prescribed heating (dry-core heating->ω isolation). When on, set
     ! all physics off; an analytic Q(lat,sigma) = amp * [equatorial, zero-mean] *
     ! sin(pi*sigma) is coupled on the in-solve seam. amp in K/day.
@@ -176,6 +201,14 @@ program rce_long
     real(wp), allocatable :: phis_full(:,:)   ! full (unramped) topography [m2 s-2]
     real(wp), allocatable :: w_tavg(:,:,:)    ! time-mean omega accumulator [Pa/s]
     integer            :: n_wacc = 0          ! samples in w_tavg
+    ! Monthly-mean climatology accumulators (feat/seasonal). Zonal-mean fields
+    ! summed into the calendar-month bin every ~day (nacc_mon steps); divided by
+    ! mon_cnt at the end. Allocated only when monthly_out is set.
+    integer, parameter :: NMON = 12
+    real(wp), allocatable :: mon_t(:,:,:), mon_u(:,:,:), mon_rh(:,:,:), mon_v(:,:,:)
+    real(wp), allocatable :: mon_sst(:,:), mon_pr(:,:)
+    integer,  allocatable :: mon_cnt(:)
+    integer            :: nacc_mon = 1        ! accumulate every nacc_mon steps (~1 day)
     ! Time-mean per-term diabatic heating accumulators [K/step], same 2nd-half
     ! sampling as w_tavg -- to see WHERE (lat,sigma) the latent heating fires.
     real(wp), allocatable :: cnv_tavg(:,:,:), cnd_tavg(:,:,:), &
@@ -262,6 +295,9 @@ program rce_long
     ts%surf%c_d = c_d
     ts%rad%enabled  = l_rad
     ts%rad%clouds   = l_rad_clouds
+    ! Seasonal insolation (feat/seasonal): read into ts%rad before init/apply.
+    ts%rad%seasonal = l_seasonal
+    ts%rad%doy0     = doy0
     ! Prognostic cloud fraction: when on, force radiation's all-sky path on too
     ! (clouds=.TRUE.) so it consumes the prognostic cf rather than clear-sky.
     ts%cpr%enabled  = l_cloud_prog
@@ -305,6 +341,33 @@ program rce_long
     ts%ocn%k_ice      = k_ice
     ts%ocn%t_frz      = t_frz
     call aeros_ocean_init(ts%ocn, grd)   ! recompute C, (re)allocate ice state
+
+    ! Prescribed seasonal SST (feat/seasonal): load the SST(lat,month) table and
+    ! seed the surface at doy0. Only in prescribed-SST mode -- in slab mode the
+    ! SST is prognostic and aeros_ocean_step owns it.
+    if (len_trim(sst_seasonal_file) > 0) then
+        if (ocean_mode /= 0) then
+            write(*,"(a)") " rce_long:: WARNING sst_seasonal_file ignored -- "// &
+                "prescribed seasonal SST needs ocean_mode=0 (slab SST is prognostic)."
+        else
+            block
+                integer :: nlat_f, nmon_f
+                nlat_f = nc_size(trim(sst_seasonal_file), "lat")
+                nmon_f = nc_size(trim(sst_seasonal_file), "month")
+                if (nlat_f /= grd%nlat .or. nmon_f /= 12) then
+                    write(*,"(a,i0,a,i0,a)") " rce_long:: error: sst_seasonal_file is (", &
+                        nlat_f, " lat, ", nmon_f, " month), expected (nlat, 12) on the model grid"
+                    error stop 1
+                end if
+                allocate(sst_clim(grd%nlat, 12))
+                call nc_read(trim(sst_seasonal_file), "sst", sst_clim)
+                l_sst_seasonal = .TRUE.
+                call set_seasonal_sst(doy0)   ! seed month at the start day
+                write(*,"(a,a)") " rce_long:: prescribed seasonal SST from ", &
+                    trim(sst_seasonal_file)
+            end block
+        end if
+    end if
 
     ! Land surface (feat/land). Configure the land state from the namelist and
     ! init it (reads the land-sea mask and albedo maps when on). Then compose the
@@ -502,6 +565,18 @@ program rce_long
     cnv_tavg = 0.0_wp; cnd_tavg = 0.0_wp; rad_tavg = 0.0_wp; surf_tavg = 0.0_wp
     allocate(uv_tavg(grd%nlat,nlev), ubar_tavg(grd%nlat,nlev), vbar_tavg(grd%nlat,nlev))
     uv_tavg = 0.0_wp; ubar_tavg = 0.0_wp; vbar_tavg = 0.0_wp
+    ! Monthly-mean climatology bins (feat/seasonal), only when requested.
+    if (len_trim(monthly_out) > 0) then
+        allocate(mon_t(grd%nlat,nlev,NMON), mon_u(grd%nlat,nlev,NMON), &
+                 mon_rh(grd%nlat,nlev,NMON), mon_v(grd%nlat,nlev,NMON), &
+                 mon_sst(grd%nlat,NMON), mon_pr(grd%nlat,NMON), mon_cnt(NMON))
+        mon_t = 0.0_wp; mon_u = 0.0_wp; mon_rh = 0.0_wp; mon_v = 0.0_wp
+        mon_sst = 0.0_wp; mon_pr = 0.0_wp; mon_cnt = 0
+        nacc_mon = max(1, nint(86400.0_wp/dt))   ! ~1 sample/day
+        if (.not. ts%rad%seasonal) write(*,"(a)") &
+            " rce_long:: WARNING monthly_out set but radiation%seasonal=.FALSE. -- "// &
+            "insolation is annual-mean, so all months bin the same forcing."
+    end if
     ! Eddy wavenumber spectrum: resolve m = 1..trunc; build the DFT trig table.
     mmax_spec = trunc
     allocate(ke_spec(mmax_spec), mf_spec(mmax_spec))
@@ -520,6 +595,11 @@ program rce_long
         end do
     end block
     do n = n0+1, n0+nstep
+        ! Prescribed seasonal SST (feat/seasonal): refresh the surface once a day
+        ! from the SST(lat,month) climatology at the running day-of-year, before
+        ! the step consumes it in the surface fluxes and radiation.
+        if (l_sst_seasonal .and. mod(n, max(1, nint(86400.0_wp/dt))) == 0) &
+            call set_seasonal_sst(doy0 + real(n,wp)*dt/86400.0_wp)
         ! Advance the topography ramp: a pure function of absolute elapsed time
         ! n*dt, so it is restart-safe -- a run resumed at n0 continues the ramp at
         ! the right amplitude. Only re-set phis while the factor is still changing
@@ -553,6 +633,11 @@ program rce_long
             call accum_espec()
             n_wacc = n_wacc + 1
         end if
+        ! Monthly-mean climatology sampling (feat/seasonal): bin the zonal-mean
+        ! state by calendar month on a ~daily cadence, once past the spin-up
+        ! window (mon_spinup_days) so the slab drift does not pollute the mean.
+        if (len_trim(monthly_out) > 0 .and. mod(n, nacc_mon) == 0 .and. &
+            real(n,wp)*dt/86400.0_wp >= mon_spinup_days) call accum_monthly(n)
         ! Periodic checkpoint (restart_interval > 0). The model time carried into
         ! the file is the absolute elapsed time n*dt.
         if (len_trim(restart_out) > 0 .and. restart_interval > 0) then
@@ -572,6 +657,7 @@ program rce_long
     end if
 
     if (len_trim(rh_out) > 0) call dump_rh(trim(rh_out))
+    if (len_trim(monthly_out) > 0 .and. .not. blew_up) call dump_monthly(trim(monthly_out))
 
     call aeros_timestep_end(ts)
     call aeros_state_end(now)
@@ -751,6 +837,125 @@ contains
         return
     end subroutine dump_rh
 
+    subroutine set_seasonal_sst(day)
+        ! Set the prescribed SST from the SST(lat,month) climatology at day-of-year
+        ! `day`, zonally symmetric. Monthly values are taken at mid-month centers
+        ! ((m-0.5)/12 of the year) and linearly interpolated cyclically, so the
+        ! surface carries a smooth seasonal cycle in phase with the insolation.
+        real(wp), intent(in) :: day
+        real(wp), parameter :: DAYS_YR = 365.0_wp
+        real(wp) :: dyr, x, w, sstj
+        integer  :: j, im0, m0, m1
+        dyr = modulo(day, DAYS_YR)
+        x   = dyr/DAYS_YR*12.0_wp - 0.5_wp        ! mid-month-centered month coordinate
+        im0 = floor(x)
+        w   = x - real(im0, wp)
+        m0  = modulo(im0,     12) + 1             ! 1..12
+        m1  = modulo(im0 + 1, 12) + 1
+        do j = 1, grd%nlat
+            sstj = (1.0_wp - w)*sst_clim(j, m0) + w*sst_clim(j, m1)
+            ts%ocn%sst(:, j) = sstj
+        end do
+    end subroutine set_seasonal_sst
+
+    subroutine accum_monthly(n)
+        ! Bin the current zonal-mean state into its calendar-month slot
+        ! (feat/seasonal). Called on a ~daily cadence. RH is diagnosed per column
+        ! (nonlinear in T,q) then zonal-averaged, exactly as dump_rh does. SST and
+        ! total (convective + large-scale) precip are surface fields.
+        integer, intent(in) :: n
+        real(wp), parameter :: DAYS_YR = 365.0_wp   ! radiative year (aeros_insol_day wrap)
+        real(wp) :: phc(0:nlev), pfc(nlev), dpcc(nlev)
+        real(wp) :: qsl, dqsl, day, frac, rnlon
+        integer  :: ii, jj, kk, imon
+        real(wp) :: tzm(grd%nlat,nlev), uzm(grd%nlat,nlev), vzm(grd%nlat,nlev), rzm(grd%nlat,nlev)
+        real(wp) :: sstz(grd%nlat), prz(grd%nlat)
+        logical  :: have_pr
+
+        day  = ts%rad%doy0 + real(n,wp)*dt/86400.0_wp
+        frac = modulo(day - 1.0_wp, DAYS_YR)                 ! 0-based day within year
+        imon = min(NMON, int(frac/(DAYS_YR/real(NMON,wp))) + 1)
+
+        have_pr = allocated(ts%cnv%precip) .and. allocated(ts%cnd%precip)
+        rnlon = real(grd%nlon, wp)
+        tzm = 0.0_wp; uzm = 0.0_wp; vzm = 0.0_wp; rzm = 0.0_wp
+        sstz = 0.0_wp; prz = 0.0_wp
+        do jj = 1, grd%nlat
+            do ii = 1, grd%nlon
+                call aeros_vgrid_pressure(vg, now%ps(ii,jj), phc, pfc, dpcc)
+                do kk = 1, nlev
+                    call aeros_qsat(now%temp_g(ii,jj,kk), pfc(kk), qsl, dqsl)
+                    tzm(jj,kk) = tzm(jj,kk) + now%temp_g(ii,jj,kk)
+                    uzm(jj,kk) = uzm(jj,kk) + now%u(ii,jj,kk)
+                    vzm(jj,kk) = vzm(jj,kk) + now%v(ii,jj,kk)
+                    rzm(jj,kk) = rzm(jj,kk) + &
+                        now%qv_g(ii,jj,kk)/max(qsl,1.0e-12_wp)*100.0_wp
+                end do
+                sstz(jj) = sstz(jj) + ts%ocn%sst(ii,jj)
+                if (have_pr) prz(jj) = prz(jj) + &
+                    (ts%cnv%precip(ii,jj) + ts%cnd%precip(ii,jj))*86400.0_wp   ! kg/m2/s -> mm/day
+            end do
+        end do
+        mon_t(:,:,imon)  = mon_t(:,:,imon)  + tzm/rnlon
+        mon_u(:,:,imon)  = mon_u(:,:,imon)  + uzm/rnlon
+        mon_v(:,:,imon)  = mon_v(:,:,imon)  + vzm/rnlon
+        mon_rh(:,:,imon) = mon_rh(:,:,imon) + rzm/rnlon
+        mon_sst(:,imon)  = mon_sst(:,imon)  + sstz/rnlon
+        mon_pr(:,imon)   = mon_pr(:,imon)   + prz/rnlon
+        mon_cnt(imon)    = mon_cnt(imon) + 1
+    end subroutine accum_monthly
+
+    subroutine dump_monthly(fname)
+        ! Write the 12-month zonal-mean climatology (feat/seasonal): T/u/v/RH
+        ! (lat,lev,month) and SST/precip (lat,month). Empty months (mon_cnt=0,
+        ! e.g. a sub-annual run) are written as the -9999 missing value.
+        character(len=*), intent(in) :: fname
+        real(wp), parameter :: MISS = -9999.0_wp
+        real(wp), allocatable :: latout(:), levout(:), monout(:)
+        real(wp), allocatable :: t_o(:,:,:), u_o(:,:,:), v_o(:,:,:), rh_o(:,:,:)
+        real(wp), allocatable :: sst_o(:,:), pr_o(:,:)
+        integer :: m
+        allocate(latout(grd%nlat), levout(nlev), monout(NMON))
+        allocate(t_o(grd%nlat,nlev,NMON), u_o(grd%nlat,nlev,NMON), &
+                 v_o(grd%nlat,nlev,NMON), rh_o(grd%nlat,nlev,NMON), &
+                 sst_o(grd%nlat,NMON), pr_o(grd%nlat,NMON))
+        latout = grd%lat(1:grd%nlat)
+        levout = vg%sigma_full(1:nlev)
+        do m = 1, NMON
+            monout(m) = real(m, wp)
+            if (mon_cnt(m) > 0) then
+                t_o(:,:,m)  = mon_t(:,:,m) /real(mon_cnt(m),wp)
+                u_o(:,:,m)  = mon_u(:,:,m) /real(mon_cnt(m),wp)
+                v_o(:,:,m)  = mon_v(:,:,m) /real(mon_cnt(m),wp)
+                rh_o(:,:,m) = mon_rh(:,:,m)/real(mon_cnt(m),wp)
+                sst_o(:,m)  = mon_sst(:,m) /real(mon_cnt(m),wp)
+                pr_o(:,m)   = mon_pr(:,m)  /real(mon_cnt(m),wp)
+            else
+                t_o(:,:,m) = MISS; u_o(:,:,m) = MISS; v_o(:,:,m) = MISS
+                rh_o(:,:,m) = MISS; sst_o(:,m) = MISS; pr_o(:,m) = MISS
+            end if
+        end do
+        call nc_create(fname)
+        call nc_write_dim(fname, "lat",   x=latout, units="degrees_north")
+        call nc_write_dim(fname, "lev",   x=levout, units="sigma")
+        call nc_write_dim(fname, "month", x=monout, units="1")
+        call nc_write(fname, "t",   t_o,  dim1="lat", dim2="lev", dim3="month", &
+            units="K",  long_name="monthly zonal-mean temperature")
+        call nc_write(fname, "u",   u_o,  dim1="lat", dim2="lev", dim3="month", &
+            units="m/s", long_name="monthly zonal-mean zonal wind")
+        call nc_write(fname, "v",   v_o,  dim1="lat", dim2="lev", dim3="month", &
+            units="m/s", long_name="monthly zonal-mean meridional wind")
+        call nc_write(fname, "rh",  rh_o, dim1="lat", dim2="lev", dim3="month", &
+            units="%",  long_name="monthly zonal-mean relative humidity")
+        call nc_write(fname, "sst", sst_o, dim1="lat", dim2="month", &
+            units="K",  long_name="monthly zonal-mean surface temperature")
+        call nc_write(fname, "precip", pr_o, dim1="lat", dim2="month", &
+            units="mm/day", long_name="monthly zonal-mean precipitation")
+        write(*,"(a,i0,a,a)") " rce_long:: wrote monthly climatology (", &
+            count(mon_cnt>0), " months populated) -> ", trim(fname)
+        deallocate(latout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o)
+    end subroutine dump_monthly
+
     subroutine read_config()
         logical :: ex
         inquire(file=trim(nmlfile), exist=ex)
@@ -905,6 +1110,19 @@ contains
         call nml_read(nmlfile, "rce", "sst_lat", sst_lat, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "sst_shape", sst_shape, &
+                      defaults_file="input/rce_defaults.nml")
+        ! Seasonal insolation + monthly-mean climatology output (feat/seasonal):
+        ! optional (inherit input/rce_defaults.nml = off / ""), so existing
+        ! rce_*.nml keep working unchanged.
+        call nml_read(nmlfile, "rce", "l_seasonal", l_seasonal, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "doy0", doy0, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "monthly_out", monthly_out, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "mon_spinup_days", mon_spinup_days, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "sst_seasonal_file", sst_seasonal_file, &
                       defaults_file="input/rce_defaults.nml")
         return
     end subroutine read_config

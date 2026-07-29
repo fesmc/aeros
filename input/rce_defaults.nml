@@ -99,4 +99,19 @@
     sst_eq           = 27.0
     sst_lat          = 60.0
     sst_shape        = 1.5
+    ! Seasonal insolation (feat/seasonal). .false. = annual-mean insolation
+    ! (bit-for-bit default). .true. drives a seasonal cycle from the Laskar orbit;
+    ! doy0 is the start day-of-year.
+    l_seasonal       = .false.
+    doy0             = 0.0
+    ! Monthly-mean climatology output path (feat/seasonal). "" = off (bit-for-bit
+    ! default). Set to a .nc path to bin zonal-mean T/u/RH/v (lat,lev,month) and
+    ! SST/precip (lat,month) by calendar month for the ERA5 seasonal comparison.
+    monthly_out      = ""
+    ! Spin-up days excluded from the monthly climatology (0 = accumulate all).
+    mon_spinup_days  = 0.0
+    ! Prescribed seasonal SST table (feat/seasonal). "" = off (static analytic
+    ! profile). A .nc with sst(lat,month) on the model grid (scripts/
+    ! make_seasonal_sst.jl) overrides SST daily in prescribed-SST mode.
+    sst_seasonal_file = ""
 /
