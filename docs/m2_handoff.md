@@ -1,25 +1,24 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION: break the jet–eddy loop — aeros's subtropical jet is too strong/narrow
+## ►► NEXT SESSION: the descent-concentration residual is ~closed — pick the next M-item
 
-**Prior state (`docs/descent_concentration_scope.md`) — LARGELY RESOLVED.** The residual moist bias
-traced to aeros's Hadley descent not concentrating at 30°, which traced to aeros having **no eddy
-momentum flux** — its RCE could not sustain baroclinic eddies (seeded eddies blew up at the model
-top by ~day 27). **That is now fixed** (see below): reproducing SpeedyWeather's core numerics lets
-aeros hold eddies, and the descent, jet, and subtropical RH all move a long way toward SW/ERA5.
+**RESOLVED (`docs/refs/sw_faithful_dynamics.md`).** The residual moist bias traced to aeros's Hadley
+descent not concentrating at 30°, which traced to aeros having **no eddy momentum flux** — its RCE
+could not sustain baroclinic eddies (seeded eddies blew up at the model top by ~day 27).
+Reproducing SpeedyWeather's core numerics fixed it (see below). **At equilibrium (~200–300 d) the
+SW-faithful config reaches descent +5.7 hPa/day @ 25° and subtropical RH 72%** — close to SW's
++6.4/62% and a huge move from the pre-fix 94% RH / no-eddies / descent-smeared-25→69°. (Beware: the
+descent needs ~200 d to equilibrate; a 100-day snapshot mis-reports it as +3.15/78%.)
 
-**The remaining gap is a coupled jet–eddy loop (`docs/refs/sw_faithful_dynamics.md`).** aeros now
-sustains eddies but they are **mis-scaled**: 43% of the eddy KE sits in an m=8 spike (SW has 2%;
-SW's energy is synoptic, m=1–5) that carries ~no momentum flux, so the descent only reaches +3.15
-hPa/day vs SW's +6.4. m=8 is a **jet instability**: it lives at 30–41°, mid-troposphere, on the
-flanks of aeros's jet — which is **too strong/narrow (51 m/s @ 30.5°)** and dominated by the
-*subtropical* (Hadley) jet, where SW's is the broader *eddy-driven* jet at ~47°. Self-reinforcing:
-weak/mis-scaled eddies → subtropical jet dominates → narrow jet → m=8 → weak eddies.
-
-**Next task = attack the jet (break the loop):** understand why aeros's Hadley/subtropical jet is so
-vigorous and equatorward, and broaden/weaken it toward SW's (a weaker SST meridional gradient, or
-whatever makes the axisymmetric jet over-strong). A broader jet → synoptic (low-m) instability →
-transporting eddies → concentrated descent. Open-ended coupled-dynamics research.
+**Understood but NOT worth chasing further:** aeros's sustained eddies are *mis-scaled* — 43% of the
+eddy KE sits in an m=8 spike (SW is synoptic m=1–5) that is an instability of aeros's too-strong,
+narrow subtropical jet (51 m/s @ 30°). BUT this is **cosmetic**: aeros concentrates its descent
+*thermally* via the steep APE-Control SST gradient at 30°, where SW does it via eddies — different
+routes, similar result. Swapping to SW's smoother cos²(φ) SST (`sst_shape=1.0`) fixes the eddy scale
+(m=8 43%→5%) but **weakens/diffuses the descent** (+5.7→+1.3), so the SST/jet is *not* a productive
+lever — the APE profile is load-bearing. Closing the last ~0.7 hPa/day and 10% RH to SW is deep
+coupled-dynamics work with low marginal value; better to move to the next M-item (land calibration,
+seasonal cycle, slab/sea-ice validation) and revisit only if a real application needs it.
 
 **►► THE FIX THAT LANDED THIS SESSION (all on `main`, opt-in / default off, bit-for-bit, 25 tests
 pass) — `docs/refs/sw_faithful_dynamics.md`, `hadley_edge_emf.md`:** aeros could not sustain eddies;
