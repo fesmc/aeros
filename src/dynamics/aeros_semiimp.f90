@@ -67,9 +67,12 @@ module aeros_semiimp
     ! === The scheme ==========================================================
     !
     ! CORRECTION form, over a step h (h = 2 dt leapfrog, h = dt on the startup
-    ! step), with X_bar = (X^new + X^old)/2:
+    ! step). The linear terms are evaluated at a DECENTERED average
+    ! X_a = alpha X^new + (1 - alpha) X^old (`si%alpha`; 0.5 = centered / neutral
+    ! gravity waves, the default; 1.0 = backward-implicit / SpeedyWeather, which
+    ! damps the fast gravity + computational modes in the solve):
     !
-    !     X^new = X^old + h R(X^now) + h [ L(X_bar) - L(X^now) ]
+    !     X^new = X^old + h R(X^now) + h [ L(X_a) - L(X^now) ]
     !
     ! R is the FULL nonlinear right-hand side from aeros_tendency -- nothing is
     ! split out of it. L appears twice with opposite signs, so the correction
@@ -81,14 +84,16 @@ module aeros_semiimp
     !
     ! Eliminating T^new and P^new from the D equation leaves, per coefficient,
     !
-    !     ( I + (h^2/4) lambda_l W ) D^new = ( I - (h^2/4) lambda_l W ) D^old
-    !                                      + h [ R_D + L_D(T*,P*) - L_D(T^now,P^now) ]
+    !   ( I + a^2 h^2 lambda_l W ) D^new = ( I - a(1-a) h^2 lambda_l W ) D^old
+    !                                    + h [ R_D + L_D(T*,P*) - L_D(T^now,P^now) ]
     !
-    !     W  = G tau + R_d T_ref (x) nu                     [nlev x nlev]
+    !     a = alpha,  W  = G tau + R_d T_ref (x) nu           [nlev x nlev]
     !     lambda_l = l(l+1)/a^2
-    !     T* = T^old + (h/2)( R_T - L_T(D^now) ),  P* likewise
+    !     T* = T^old + alpha h ( R_T - L_T(D^now) ),  P* likewise
     !
-    ! then T^new and P^new follow by back-substitution with D_bar. The matrix
+    ! (alpha = 1/2 gives the centered ( I +/- h^2/4 lambda W ) form, bit for bit.)
+    ! then T^new and P^new follow by back-substitution with D_a = alpha D^new +
+    ! (1-alpha) D^old. The matrix
     ! depends on l only through the scalar lambda_l, which is what makes the
     ! solve nlev x nlev per DEGREE rather than global -- the reason the core
     ! carries vorticity and divergence instead of u and v (section 3.2).
@@ -127,6 +132,10 @@ module aeros_semiimp
         integer  :: nlev = 0
         integer  :: lmax = 0
         real(wp) :: dt_step = 0.0_wp        ! the h the factors were built for [s]
+        ! Decentering weight on X^(n+1): 0.5 = centered (neutral gravity waves),
+        ! 1.0 = backward-implicit (SpeedyWeather; damps them). The factors depend
+        ! on it (I + alpha^2 h^2 lambda W), so it is fixed at init.
+        real(wp) :: alpha = 0.5_wp
 
         ! Reference-state column coefficients, at ps_ref.
         real(wp), allocatable :: dp_ref(:)     ! (nlev) layer thickness [Pa]
@@ -159,8 +168,13 @@ module aeros_semiimp
 
 contains
 
-    subroutine aeros_semiimp_init(si, vg, lmax, dt_step)
+    subroutine aeros_semiimp_init(si, vg, lmax, dt_step, alpha)
         ! Build the linear operators and factorize for a step of `dt_step`.
+        !
+        ! alpha is the decentering weight on X^(n+1) (optional, default 0.5 =
+        ! centered). 1.0 = backward-implicit (SpeedyWeather). Stored on si and
+        ! used by aeros_semiimp_set_step / _step; 0.5 reproduces the centered
+        ! scheme bit for bit.
 
         implicit none
 
@@ -168,12 +182,22 @@ contains
         type(aeros_vgrid_class),   intent(in)    :: vg
         integer,  intent(in) :: lmax
         real(wp), intent(in) :: dt_step        ! [s]
+        real(wp), intent(in), optional :: alpha
 
         real(wp) :: p_half(0:vg%nlev), p_full(vg%nlev)
+        real(wp) :: alpha_use
         integer  :: nlev, k, j, m
         logical  :: ztop
 
         nlev = vg%nlev
+
+        alpha_use = 0.5_wp
+        if (present(alpha)) alpha_use = alpha
+        if (alpha_use < 0.5_wp .or. alpha_use > 1.0_wp) then
+            write(io_unit_err,*) "aeros_semiimp_init:: error: alpha (decentering) must be in "// &
+                                    "[0.5, 1.0], got ", alpha_use
+            error stop 1
+        end if
 
         if (any(vg%t_ref /= vg%t_ref(1))) then
             write(io_unit_err,*) "aeros_semiimp_init:: error: the reference temperature is not "// &
@@ -187,6 +211,7 @@ contains
 
         si%nlev = nlev
         si%lmax = lmax
+        si%alpha = alpha_use
 
         allocate(si%dp_ref(nlev), si%alpha_ref(nlev), si%dlnp_ref(nlev))
         allocate(si%gmat(nlev,nlev), si%tmat(nlev,nlev), si%wmat(nlev,nlev))
@@ -298,7 +323,8 @@ contains
 
         si%dt_step = dt_step
 
-        hh = 0.25_wp*dt_step*dt_step
+        ! Helmholtz coefficient (alpha h)^2; alpha = 0.5 recovers the centered h^2/4.
+        hh = si%alpha*si%alpha*dt_step*dt_step
         a2 = r_earth*r_earth
 
         do l = 0, si%lmax
@@ -452,7 +478,7 @@ contains
         type(aeros_tend_class),    intent(in) :: tnd    ! R(X^n)
         type(aeros_spec_class), intent(inout) :: new    ! X^(n+1), out
 
-        real(wp) :: h, hh, lam, a2
+        real(wp) :: h, a1, astep, hh_old, lam, a2
         integer  :: lm, l, k, j, nlev
 
         complex(wp_sh) :: dold(si%nlev), dnow(si%nlev), told(si%nlev), tnow(si%nlev)
@@ -464,7 +490,10 @@ contains
 
         nlev = si%nlev
         h    = si%dt_step
-        hh   = 0.25_wp*h*h
+        ! Decentering coefficients (alpha = 0.5 -> the centered scheme, bit for bit).
+        a1     = si%alpha                     ! weight on X^(n+1) in the implicit average
+        astep  = a1*h                         ! starred explicit half-step (was 0.5 h)
+        hh_old = a1*(1.0_wp - a1)*h*h          ! rhs D^(n-1) damping (was h^2/4)
         a2   = r_earth*r_earth
 
         !$omp parallel do schedule(static) &
@@ -493,11 +522,11 @@ contains
             ! --- Linear terms at the current time level, L(X^n).
             call lin_column(si, lam, dnow, tnow, pnow, ldnow, ltnow, lpnow)
 
-            ! --- The starred state: T and P advanced half a step explicitly.
+            ! --- The starred state: T and P advanced alpha of a step explicitly.
             do k = 1, nlev
-                tstar(k) = told(k) + 0.5_wp*h*(rt(k) - ltnow(k))
+                tstar(k) = told(k) + astep*(rt(k) - ltnow(k))
             end do
-            pstar = pold + 0.5_wp*h*(rp - lpnow)
+            pstar = pold + astep*(rp - lpnow)
 
             call lin_div(si, lam, tstar, pstar, ldstar)
 
@@ -507,7 +536,7 @@ contains
                 do j = 1, nlev
                     acc = acc + si%wmat(k,j)*dold(j)
                 end do
-                rhs(k) = dold(k) - hh*lam*acc &
+                rhs(k) = dold(k) - hh_old*lam*acc &
                             + h*(rd(k) + ldstar(k) - ldnow(k))
             end do
 
@@ -515,7 +544,7 @@ contains
 
             do k = 1, nlev
                 new%div(lm,k) = rhs(k)
-                dbar(k)       = 0.5_wp*(rhs(k) + dold(k))
+                dbar(k)       = a1*rhs(k) + (1.0_wp - a1)*dold(k)
             end do
 
             ! --- Back-substitute for T and P.

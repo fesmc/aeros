@@ -377,6 +377,27 @@ contains
         call check(r_temp < 1.0e-12_dp, "temperature back-substitution is consistent", nfail)
         call check(r_lps  < 1.0e-12_dp, "ln(p_s) back-substitution is consistent", nfail)
 
+        ! Repeat at alpha = 1 (backward-implicit, SpeedyWeather). The SAME defining
+        ! equation must hold, now with the decentered average X_a = X^new (alpha=1).
+        ! This guards the alpha-generalized set_step / step against an algebra slip.
+        call aeros_semiimp_init(si, vg, s%lmax, h, alpha=1.0_wp)
+        call aeros_semiimp_step(si, s, old, now, tnd, new)
+        bar%div  = new%div            ! X_a = 1*new + 0*old
+        bar%temp = new%temp
+        bar%lnps = new%lnps
+        call aeros_semiimp_linear(si, s, bar, ldb, ltb, lpb)
+        call aeros_semiimp_linear(si, s, now, ldn, ltn, lpn)
+        r_div  = maxval(abs(new%div  - old%div  - h*(tnd%div  + ldb - ldn))) &
+                    /max(maxval(abs(new%div  - old%div)),  tiny(1.0_dp))
+        r_temp = maxval(abs(new%temp - old%temp - h*(tnd%temp + ltb - ltn))) &
+                    /max(maxval(abs(new%temp - old%temp)), tiny(1.0_dp))
+        r_lps  = maxval(abs(new%lnps - old%lnps - h*(tnd%lnps + lpb - lpn))) &
+                    /max(maxval(abs(new%lnps - old%lnps)), tiny(1.0_dp))
+        write(*,"(a40,es12.3)") "   [alpha=1] divergence residual ", r_div
+        call check(r_div  < 1.0e-10_dp, "the alpha=1 backward solve satisfies its equation", nfail)
+        call check(r_temp < 1.0e-12_dp, "alpha=1 temperature back-substitution is consistent", nfail)
+        call check(r_lps  < 1.0e-12_dp, "alpha=1 ln(p_s) back-substitution is consistent", nfail)
+
         deallocate(ldb, ltb, lpb, ldn, ltn, lpn)
         call aeros_semiimp_end(si)
         call aeros_tend_end(tnd)

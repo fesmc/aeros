@@ -51,12 +51,14 @@ program rce_long
     integer  :: trunc = 21, nlev = 12, nstep = 4800, ndiff = 6
     integer  :: print_every = 96          ! ~2 model days at dt=1800
     real(wp) :: dt = 1800.0_wp, tau_diff = 6.0_wp
+    real(wp) :: tau_diff_div = 0.0_wp     ! divergence-only diffusion timescale [h]; 0 => = tau_diff
     real(wp) :: t_ref = 300.0_wp          ! isothermal semi-implicit reference [K]
     logical  :: vert_vanleer = .FALSE.    ! van Leer (not donor-cell) vertical q transport
     ! Couple diabatic heating in-solve (step 1b) vs the default forward-split.
     ! Needs eps_filter ~0.15 to hold the convective computational mode.
     logical  :: couple_diabatic = .FALSE.
     real(wp) :: eps_filter = 0.06_wp, raw_alpha = 0.53_wp
+    real(wp) :: si_alpha = 0.5_wp         ! semi-implicit decentering: 0.5 centered, 1.0 backward (SW)
     real(wp) :: conv_tau = 7200.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp, u_min = 1.0_wp
     character(len=32) :: conv_scheme = "sbm_frierson" ! "sbm" | "sbm_frierson" | "manabe"
     real(wp) :: c_d = 1.5e-3_wp       ! surface momentum drag (0 = off; brakes the low-level jet)
@@ -214,6 +216,7 @@ program rce_long
     par%held_suarez   = .FALSE.
     par%eps_filter = eps_filter
     par%raw_alpha  = raw_alpha
+    par%si_alpha   = si_alpha
     par%ndiff = ndiff; par%tau_diff = tau_diff
     par%mass_fixer = .FALSE.
 
@@ -263,6 +266,9 @@ program rce_long
     ! (2) sigma-tapered order: the setter rebuilds the per-level ratios.
     if (diff_taper) call aeros_timestep_set_diff_taper(ts, vg, .TRUE., &
                             ndiff_top=diff_ndiff_top, taper_sigma=diff_taper_sigma)
+    ! Divergence-only diffusion timescale (SpeedyWeather-style). Namelist is in
+    ! hours; 0 => keep tau_diff (bit-for-bit single-timescale scheme).
+    ts%tau_diff_div = tau_diff_div*3600.0_wp
     ts%vd%enabled    = l_vdiff
     ts%vd%k0         = vdiff_k0
     ts%vd%sigma      = vdiff_sigma
@@ -811,6 +817,10 @@ contains
         call nml_read(nmlfile, "rce", "diff_ndiff_top", diff_ndiff_top, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "diff_taper_sigma", diff_taper_sigma, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "tau_diff_div", tau_diff_div, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "si_alpha", si_alpha, &
                       defaults_file="input/rce_defaults.nml")
         return
     end subroutine read_config

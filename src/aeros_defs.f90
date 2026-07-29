@@ -148,6 +148,11 @@ module aeros_defs
         ! reasoned about without knowing the truncation.
         real(wp) :: eps_filter    ! Robert-Asselin coefficient nu [-]
         real(wp) :: raw_alpha     ! Williams alpha [-]
+        ! Semi-implicit decentering weight on X^(n+1): 0.5 = centered (neutral on
+        ! gravity waves, the default), 1.0 = backward-implicit (SpeedyWeather; damps
+        ! the fast gravity/computational modes in the solve). Defaulted so drivers
+        ! and tests that never set it get the bit-for-bit centered scheme.
+        real(wp) :: si_alpha = 0.5_wp
         real(wp) :: tau_diff      ! diffusion e-folding time at l = lmax [h]
         integer  :: ndiff         ! diffusion order: 2, 4 or 6
 

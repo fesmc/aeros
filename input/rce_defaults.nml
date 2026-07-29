@@ -75,7 +75,9 @@
     ! diffusion coefficient per level by 1 + gain*max(0, |zeta|_rms/zeta_ref - 1),
     ! capped at diff_adapt_max, damping a spiking jet where and when it grows.
     ! (2) diff_taper lowers the order toward the model top (del^ndiff ->
-    ! del^diff_ndiff_top above diff_taper_sigma) -- an implicit top sponge.
+    ! del^diff_ndiff_top above diff_taper_sigma) on the DIVERGENCE (gravity-wave)
+    ! modes only -- SpeedyWeather's implicit top sponge; vorticity/temperature
+    ! keep the full untapered order.
     diff_adapt       = .false.
     diff_zeta_ref    = 1.0e-4
     diff_adapt_gain  = 1.0
@@ -83,4 +85,12 @@
     diff_taper       = .false.
     diff_ndiff_top   = 4
     diff_taper_sigma = 0.15
+    ! Divergence-only diffusion e-folding time [h] (SpeedyWeather runs the
+    ! divergent modes on a shorter timescale than vorticity/temperature to absorb
+    ! upward-propagating gravity waves at the lid). 0 = use tau_diff -> bit-for-bit.
+    tau_diff_div     = 0.0
+    ! Semi-implicit decentering weight on X^(n+1): 0.5 = centered (neutral gravity
+    ! waves, bit-for-bit default), 1.0 = backward-implicit (SpeedyWeather; damps
+    ! the fast gravity + computational modes in the solve).
+    si_alpha         = 0.5
 /

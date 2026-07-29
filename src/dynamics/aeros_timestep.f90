@@ -242,6 +242,12 @@ module aeros_timestep
         real(wp) :: eps_filter = 0.0_wp   ! Robert-Asselin coefficient nu [-]
         real(wp) :: raw_alpha  = 1.0_wp   ! Williams alpha; 1 = classical filter
         real(wp) :: tau_diff   = 0.0_wp   ! diffusion e-folding time at l=lmax [s]
+        ! Divergence-only diffusion e-folding time [s] (SpeedyWeather-style: the
+        ! divergent/gravity-wave modes are damped on their own, shorter timescale
+        ! than vorticity+temperature to absorb upward-propagating waves at the
+        ! model top). <= 0 means "use tau_diff" -> bit-for-bit the single-timescale
+        ! scheme. SpeedyWeather runs tau_diff=4 h, tau_diff_div=1 h.
+        real(wp) :: tau_diff_div = 0.0_wp
         integer  :: ndiff      = 6        ! diffusion order (6 = del^6)
         logical  :: semi_implicit = .TRUE.
 
@@ -358,6 +364,13 @@ module aeros_timestep
         !     ndiff_lev is the per-level even order it was built with. Always
         !     allocated and built; when diff_taper is off every level uses ndiff,
         !     so dratio_lev(:,k) == dratio(:) exactly and the scheme is unchanged.
+        !     The taper is applied to the DIVERGENCE (gravity-wave) modes only,
+        !     matching SpeedyWeather (power 4 -> power_stratosphere 2 above
+        !     tapering_sigma 0.2, on the divergent field): it broadens the damping
+        !     of the upward-propagating waves at the model top without touching the
+        !     balanced vorticity/temperature order, so the baroclinic eddies keep
+        !     their full scale-selectivity. Vorticity and temperature always use
+        !     the untapered dratio(:).
         logical  :: diff_taper       = .FALSE.      ! sigma-tapered order
         integer  :: diff_ndiff_top   = 4            ! order at the model top
         real(wp) :: diff_taper_sigma = 0.15_wp      ! ramp threshold [sigma]
@@ -510,7 +523,7 @@ contains
         call aeros_work_alloc(ts%wrk, grd%nlon, grd%nlat, vg%nlev)
 
         ! Factorized for the start-up step; switched to 2 dt after it.
-        call aeros_semiimp_init(ts%si, vg, lmax, ts%dt)
+        call aeros_semiimp_init(ts%si, vg, lmax, ts%dt, alpha=par%si_alpha)
 
         call aeros_hs_init(ts%hs, grd, par%held_suarez)
 
@@ -1649,13 +1662,20 @@ contains
     end subroutine sponge
 
     subroutine diffuse(ts, sht, h)
-        ! Implicit del^ndiff damping of vorticity, divergence and temperature.
+        ! Implicit del^ndiff damping of vorticity, divergence and temperature,
+        ! SpeedyWeather-style: vorticity and temperature share one factor,
+        ! divergence gets its own (the divergent/gravity-wave modes are damped on
+        ! a separate, generally shorter timescale and a sigma-tapered order to
+        ! absorb upward-propagating waves at the model top).
         !
-        ! The per-level factor is fac(l,k) = 1/(1 + mult_k (h/tau) dratio_lev(l,k)),
-        ! where dratio_lev carries the (optionally sigma-tapered) order and mult_k
-        ! the (optional) vorticity scaling. With both adaptive mechanisms off,
-        ! mult_k = 1 and dratio_lev(:,k) = dratio(:), so fac reduces exactly to the
-        ! fixed 1-D scheme -- bit for bit. See the module header.
+        !   fac_vt (l,k) = 1/(1 + mult_k (h/tau_diff)     dratio(l))       vor, temp
+        !   fac_div(l,k) = 1/(1 + mult_k (h/tau_diff_div) dratio_lev(l,k)) div
+        !
+        ! mult_k is the optional vorticity scaling. Vorticity+temperature use the
+        ! untapered dratio(:); divergence uses the (optionally sigma-tapered)
+        ! dratio_lev(:,k). With the taper off dratio_lev(:,k) == dratio(:), and
+        ! with tau_diff_div <= 0 the divergence timescale falls back to tau_diff,
+        ! so fac_div == fac_vt == the old single-factor scheme -- bit for bit.
 
         implicit none
 
@@ -1663,24 +1683,31 @@ contains
         type(aeros_sht_class),      intent(in)    :: sht
         real(wp), intent(in) :: h
 
-        real(wp) :: fac(0:sht%lmax, ts%new%nlev), rate, mult
+        real(wp) :: fac_vt(0:sht%lmax, ts%new%nlev)
+        real(wp) :: fac_div(0:sht%lmax, ts%new%nlev)
+        real(wp) :: rate, rate_div, mult, tau_div
         integer  :: l, k, lm
 
         rate = h/ts%tau_diff
+        tau_div = ts%tau_diff_div
+        if (tau_div <= 0.0_wp) tau_div = ts%tau_diff
+        rate_div = h/tau_div
+
         do k = 1, ts%new%nlev
             mult = 1.0_wp
             if (ts%diff_adapt) mult = diff_adapt_mult(ts, sht, k)
             do l = 0, sht%lmax
-                fac(l,k) = 1.0_wp/(1.0_wp + mult*rate*ts%dratio_lev(l,k))
+                fac_vt(l,k)  = 1.0_wp/(1.0_wp + mult*rate*ts%dratio(l))
+                fac_div(l,k) = 1.0_wp/(1.0_wp + mult*rate_div*ts%dratio_lev(l,k))
             end do
         end do
 
         !$omp parallel do collapse(2) schedule(static) private(k,lm)
         do k = 1, ts%new%nlev
             do lm = 1, sht%nlm
-                ts%new%vor(lm,k)  = fac(sht%l_of_lm(lm),k)*ts%new%vor(lm,k)
-                ts%new%div(lm,k)  = fac(sht%l_of_lm(lm),k)*ts%new%div(lm,k)
-                ts%new%temp(lm,k) = fac(sht%l_of_lm(lm),k)*ts%new%temp(lm,k)
+                ts%new%vor(lm,k)  = fac_vt (sht%l_of_lm(lm),k)*ts%new%vor(lm,k)
+                ts%new%div(lm,k)  = fac_div(sht%l_of_lm(lm),k)*ts%new%div(lm,k)
+                ts%new%temp(lm,k) = fac_vt (sht%l_of_lm(lm),k)*ts%new%temp(lm,k)
             end do
         end do
         !$omp end parallel do
