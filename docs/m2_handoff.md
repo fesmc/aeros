@@ -506,12 +506,31 @@ land, sensitive to the few narrow continents), so the global land-mean edges dow
 **Task 2 — close the NH land amplitude gap (missing physics, NOT c_soil).**
 `c_soil` is NOT the lever — a 10× sweep (2e6→2e5) moved the land-mean amplitude
 <0.5 K; the soil already equilibrates. The NH-midlat gap (model 21 vs ERA5 37 K at
-65°N; model winters too warm + ~2-month phase lag, see
-`docs/figures/land_t2m_amp.png`) is structural:
-  (a) **No snow-albedo feedback** — the dominant lever. ERA5's winter continents
-      brighten under snow and cool hard. Build on the land `freeze_floor` hook and
-      the sea-ice `ice_albedo` path (`aeros_ocean`/`aeros_land`): a snow-cover →
-      albedo bump when the soil/skin drops below freezing.
-  (b) Lowest model level is ~170 m, not 2 m, so it misses the winter surface
-      inversion — partly a fair-comparison artifact. A proper 2 m surface-layer
-      diagnostic (from the surface flux + stability) would help the comparison.
+65°N; model winters too warm + ~2-month phase lag) is structural:
+
+  (a) **Snow-albedo feedback — ✅ DONE (2026-07-30).** Diagnostic, `t_soil`-keyed:
+      land albedo ramps from the bare ERA5 `fal` value toward `snow_albedo` as the
+      skin temp falls below T0, over `snow_dt` K (`f_snow` 0 at/above T0, 1 at
+      T0−snow_dt). Refreshed each step by `aeros_land_couple_radiation`; the
+      timestep albedo block now fires on land-snow too, not only `l_seaice`. New
+      `&rce` knobs `snow_albedo` (default −1 = **off, bit-for-bit**) / `snow_dt`
+      (5 K); needs `freeze_floor=.FALSE.` (the default) so t_soil can go sub-zero.
+      No prognostic snow / no hysteresis (v1). Test: `test_land` §6b (bump on/off,
+      ramp midpoint, ocean untouched). 25/25 tests pass. Config
+      `output/land_cal/land_topo_snow.nml` (α_snow=0.6), 4 yr, NaN-free, top-jet
+      regime unchanged. **Result** (`docs/figures/land_t2m_amp_toposnow.png`):
+      amplitude 65°N 24.6→**26.0**, 50°N 25.0→**26.7**, −35° 8.8→**10.8** (SH
+      recovered), land-mean 9.5→**10.3** (ERA5 14.9). Correct-signed but **modest**,
+      and the reason is diagnosed: ERA5 `fal` is **already 0.36 at 65°N** (the
+      annual-mean field is snow-contaminated), so the bump to 0.6 has little
+      headroom exactly where the gap is largest (50°N, fal 0.18, has more room and
+      moves more). **The residual 65°N gap (26 vs 37.5) is therefore NOT an albedo
+      problem — it is (b).** Follow-ups if pursued: raise α_snow to 0.7–0.8 (cheap,
+      headroom-limited); or prescribe ERA5 *seasonal* `fal` per-month (it is a
+      12-month field) as the bare baseline with the snow feedback on top (a
+      boundary condition + feedback, more faithful to the observed albedo cycle).
+
+  (b) **Lowest model level ~170 m, not 2 m → misses the winter surface inversion.**
+      Now the leading residual for the NH high-lat gap (albedo is spent). Partly a
+      fair-comparison artifact; a proper 2 m surface-layer diagnostic (from the
+      surface flux + stability) is the next lever, not more albedo tuning.

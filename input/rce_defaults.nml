@@ -45,6 +45,8 @@
     w_crit           = -1.0
     c_soil           = 2.0e6
     land_albedo      = 0.20
+    snow_albedo      = -1.0            ! snow-albedo feedback cold endpoint; <0 = off (bit-for-bit)
+    snow_dt          = 5.0             ! ramp width [K] below T0
     restart_in       = ""
     restart_out      = ""
     restart_interval = 0

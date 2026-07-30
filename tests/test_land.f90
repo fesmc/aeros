@@ -119,6 +119,32 @@ program test_land
     call check(abs(alb_map(1,1) - 0.35_wp) < tol, "alb_map = land albedo on land", nfail)
     call check(abs(alb_map(2,1) - 0.06_wp) < tol, "alb_map = ocean albedo over ocean", nfail)
 
+    ! === (6b) snow-albedo feedback (diagnostic, t_soil-keyed) ==============
+    ! Bare albedo 0.2 -> snow 0.6 over 5 K below T0. f_snow: 0 at/above T0,
+    ! 0.5 at T0-2.5, 1 (clamped) well below. Off (snow_albedo<0) => bare, exact.
+    land%albedo(1,1) = 0.2_wp
+    land%snow_dt     = 5.0_wp
+    ! (i) warm land -> no bump
+    land%snow_albedo = 0.6_wp
+    land%t_soil(1,1) = 280.0_wp
+    call aeros_land_couple_radiation(land, alb_map, 0.06_wp)
+    call check(abs(alb_map(1,1) - 0.2_wp) < tol, "snow: warm land keeps bare albedo", nfail)
+    ! (ii) ramp midpoint (T0 - 2.5 K) -> halfway to snow
+    land%t_soil(1,1) = T0 - 2.5_wp
+    call aeros_land_couple_radiation(land, alb_map, 0.06_wp)
+    call check(abs(alb_map(1,1) - 0.4_wp) < tol, "snow: mid-ramp albedo halfway to snow", nfail)
+    ! (iii) deep cold -> clamped to snow albedo
+    land%t_soil(1,1) = T0 - 20.0_wp
+    call aeros_land_couple_radiation(land, alb_map, 0.06_wp)
+    call check(abs(alb_map(1,1) - 0.6_wp) < tol, "snow: deep cold clamps to snow albedo", nfail)
+    ! (iv) ocean cell never gets a snow bump
+    call check(abs(alb_map(2,1) - 0.06_wp) < tol, "snow: ocean cell unaffected", nfail)
+    ! (v) disabled (snow_albedo<0) is bit-for-bit the bare map at any t_soil
+    land%snow_albedo = -1.0_wp
+    land%t_soil(1,1) = T0 - 20.0_wp
+    call aeros_land_couple_radiation(land, alb_map, 0.06_wp)
+    call check(abs(alb_map(1,1) - 0.2_wp) < tol, "snow: off => bare albedo, bit-for-bit", nfail)
+
     ! === (7) disabled land is inert (bit-for-bit ocean-only) ===============
     call check_disabled(nfail)
 

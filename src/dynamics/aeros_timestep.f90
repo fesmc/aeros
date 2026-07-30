@@ -787,28 +787,37 @@ contains
         type(aeros_sht_class), pointer :: s
         real(wp) :: h
         integer  :: k, lm
+        logical  :: land_snow, seaice_alb
 
         s => pool%sht(1)
 
-        ! Per-cell surface albedo -> radiation (rad%alb_map). Two schemes can set
-        ! it and they COMPOSE (land and sea ice occupy disjoint cells -- ice never
+        ! Per-cell surface albedo -> radiation (rad%alb_map). Two schemes set it
+        ! and they COMPOSE (land and sea ice occupy disjoint cells -- ice never
         ! forms on land), so this is the one place both are folded into the single
-        ! field radiation reads. Only entered when sea ice is on, because the ice
-        ! albedo evolves and must be refreshed each step; the land-only map is
-        ! static and built once at init (unchanged, bit-for-bit). When neither is
-        ! on, rad%alb_map stays unallocated and radiation uses its scalar albedo.
-        if (ts%ocn%l_seaice .and. allocated(ts%ocn%alb)) then
+        ! field radiation reads. Refreshed each step when either evolves in time:
+        ! the sea-ice albedo (ice fraction changes) or the land snow-albedo
+        ! feedback (land skin temp drives it). When neither time-varying scheme is
+        ! on the land-only map is static (built once at init) and this is skipped,
+        ! bit-for-bit; with no land or ice, rad%alb_map stays unallocated and
+        ! radiation uses its scalar albedo.
+        land_snow  = ts%land%enabled .and. ts%land%snow_albedo >= 0.0_wp
+        seaice_alb = ts%ocn%l_seaice .and. allocated(ts%ocn%alb)
+        if (land_snow .or. seaice_alb) then
+            ! Land albedo on land (with the snow bump when active), ocean scalar on
+            ! sea -- rebuilt fresh so a melted-ice cell reverts to ocean albedo.
             if (ts%land%enabled) then
-                ! Land albedo on land, ocean scalar on sea (rebuilt fresh so a
-                ! melted-ice cell reverts to ocean albedo)...
                 call aeros_land_couple_radiation(ts%land, ts%rad%alb_map, ts%rad%albedo)
-                ! ...then the ice albedo on ice-covered (ocean) cells.
-                where (ts%ocn%a_ice > 0.0_wp) ts%rad%alb_map = ts%ocn%alb
-            else
-                ! No land: ocn%alb already encodes ocean-vs-ice albedo everywhere.
-                if (.not. allocated(ts%rad%alb_map)) &
-                    allocate(ts%rad%alb_map(ts%ocn%nlon, ts%ocn%nlat))
-                ts%rad%alb_map = ts%ocn%alb
+            end if
+            if (seaice_alb) then
+                if (ts%land%enabled) then
+                    ! ...then the ice albedo on ice-covered (ocean) cells.
+                    where (ts%ocn%a_ice > 0.0_wp) ts%rad%alb_map = ts%ocn%alb
+                else
+                    ! No land: ocn%alb already encodes ocean-vs-ice albedo everywhere.
+                    if (.not. allocated(ts%rad%alb_map)) &
+                        allocate(ts%rad%alb_map(ts%ocn%nlon, ts%ocn%nlat))
+                    ts%rad%alb_map = ts%ocn%alb
+                end if
             end if
         end if
 

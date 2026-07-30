@@ -169,6 +169,8 @@ program rce_long
     real(wp) :: w_crit           = -1.0_wp  ! beta knee [m]; <0 => 0.75*capacity
     real(wp) :: c_soil           = 2.0e6_wp ! soil areal heat capacity [J m-2 K-1]
     real(wp) :: land_albedo      = 0.20_wp  ! fallback land albedo (no albedo file)
+    real(wp) :: snow_albedo      = -1.0_wp  ! snow-albedo feedback cold endpoint [-]; <0 = off
+    real(wp) :: snow_dt          = 5.0_wp   ! snow-albedo ramp width below T0 [K]
 
     ! --- prognostic cloud fraction (feat/clouds) ----------------------------
     ! Default off = the diagnostic RH->cover scheme, bit-for-bit unchanged. When
@@ -409,6 +411,8 @@ program rce_long
     ts%land%w_crit           = w_crit
     ts%land%c_soil           = c_soil
     ts%land%land_albedo      = land_albedo
+    ts%land%snow_albedo      = snow_albedo
+    ts%land%snow_dt          = snow_dt
     call aeros_land_init(ts%land, grd, l_land)
     if (l_land) then
         call aeros_land_couple_radiation(ts%land, ts%rad%alb_map, ts%rad%albedo)
@@ -1098,6 +1102,10 @@ contains
         call nml_read(nmlfile, "rce", "c_soil", c_soil, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "land_albedo", land_albedo, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "snow_albedo", snow_albedo, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "snow_dt", snow_dt, &
                       defaults_file="input/rce_defaults.nml")
         ! Restart knobs (feat/restart): optional (inherit input/rce_defaults.nml)
         ! so existing rce_*.nml files that omit them keep cold-starting, not erroring.

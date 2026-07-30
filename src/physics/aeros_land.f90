@@ -81,6 +81,17 @@ module aeros_land
         real(wp) :: c_e_land         = 1.5e-3_wp    ! land moisture exchange coeff
         logical  :: freeze_floor     = .FALSE.      ! clamp t_soil >= T0 (no snow)
 
+        ! Snow-albedo feedback (diagnostic). As the land skin temperature drops
+        ! below freezing the surface albedo ramps from its bare (ERA5 fal) value
+        ! toward snow_albedo over snow_dt kelvin, brightening winter continents so
+        ! they cool harder (the dominant NH seasonal-amplitude lever). It is a
+        ! pure function of t_soil (no snow prognostic, no hysteresis), refreshed
+        ! each step by aeros_land_couple_radiation. snow_albedo < 0 disables it:
+        ! the albedo map stays the static bare field, bit-for-bit. Requires
+        ! freeze_floor = .FALSE. so t_soil can fall below T0 in the first place.
+        real(wp) :: snow_albedo      = -1.0_wp      ! cold-endpoint albedo [-]; <0 = off
+        real(wp) :: snow_dt          = 5.0_wp       ! ramp width below T0 [K]
+
         ! Initial conditions for the prognostics on a cold start (overwritten on
         ! restart). Kept off the namelist: they equilibrate quickly under the
         ! small soil heat capacity and are not a tuning knob.
@@ -205,6 +216,7 @@ contains
         character(len=512) :: lsm_file, albedo_file
         real(wp)           :: lsm_threshold, w_field_capacity, w_crit, c_soil
         real(wp)           :: land_albedo, c_h_land, c_e_land
+        real(wp)           :: snow_albedo, snow_dt
 
         enabled          = land%enabled
         lsm_file         = land%lsm_file
@@ -217,6 +229,8 @@ contains
         c_h_land         = land%c_h_land
         c_e_land         = land%c_e_land
         freeze_floor     = land%freeze_floor
+        snow_albedo      = land%snow_albedo
+        snow_dt          = land%snow_dt
 
         call nml_read(filename, "land", "enabled",          enabled, defaults_file=defaults_file)
         call nml_read(filename, "land", "lsm_file",         lsm_file, defaults_file=defaults_file)
@@ -229,6 +243,8 @@ contains
         call nml_read(filename, "land", "c_h_land",         c_h_land, defaults_file=defaults_file)
         call nml_read(filename, "land", "c_e_land",         c_e_land, defaults_file=defaults_file)
         call nml_read(filename, "land", "freeze_floor",     freeze_floor, defaults_file=defaults_file)
+        call nml_read(filename, "land", "snow_albedo",      snow_albedo, defaults_file=defaults_file)
+        call nml_read(filename, "land", "snow_dt",          snow_dt, defaults_file=defaults_file)
 
         land%lsm_file         = lsm_file
         land%albedo_file      = albedo_file
@@ -240,6 +256,8 @@ contains
         land%c_h_land         = c_h_land
         land%c_e_land         = c_e_land
         land%freeze_floor     = freeze_floor
+        land%snow_albedo      = snow_albedo
+        land%snow_dt          = snow_dt
 
         call aeros_land_init(land, grd, enabled)
 
@@ -365,22 +383,38 @@ contains
         ! scalar albedo everywhere, overwritten by the land albedo on land
         ! points. Allocated on first call; a no-op when disabled, so radiation
         ! keeps its scalar albedo and the ocean run is bit-for-bit.
+        !
+        ! When the snow-albedo feedback is on (snow_albedo >= 0) the land value
+        ! is brightened toward snow_albedo as the skin temperature falls below
+        ! T0, ramped over snow_dt kelvin (f_snow: 0 at/above T0, 1 at T0-snow_dt).
+        ! Off (snow_albedo < 0) this reduces exactly to the bare map, bit-for-bit.
 
         implicit none
         type(aeros_land_class),            intent(in)    :: land
         real(wp), allocatable,             intent(inout) :: alb_map(:,:)
         real(wp),                          intent(in)    :: ocean_albedo
 
-        integer :: i, j
+        integer  :: i, j
+        logical  :: snow_on
+        real(wp) :: a_bare, f_snow
 
         if (.not. land%enabled) return
 
         if (.not. allocated(alb_map)) allocate(alb_map(land%nlon, land%nlat))
 
+        snow_on = land%snow_albedo >= 0.0_wp
+
         do j = 1, land%nlat
             do i = 1, land%nlon
                 if (land%mask(i,j)) then
-                    alb_map(i,j) = land%albedo(i,j)
+                    a_bare = land%albedo(i,j)
+                    if (snow_on) then
+                        f_snow = (T0 - land%t_soil(i,j)) / land%snow_dt
+                        f_snow = max(0.0_wp, min(1.0_wp, f_snow))
+                        alb_map(i,j) = a_bare + (land%snow_albedo - a_bare)*f_snow
+                    else
+                        alb_map(i,j) = a_bare
+                    end if
                 else
                     alb_map(i,j) = ocean_albedo
                 end if
@@ -407,6 +441,9 @@ contains
         write(io_unit, '(a,f6.3,a,f6.3,a)') "    w_field_capacity/w_crit = ", &
             land%w_field_capacity, " / ", land%w_crit, " m"
         write(io_unit, '(a,es9.2,a)') "    c_soil = ", land%c_soil, " J m-2 K-1"
+        if (land%snow_albedo >= 0.0_wp) &
+            write(io_unit, '(a,f5.2,a,f4.1,a)') "    snow-albedo feedback on: alb -> ", &
+                land%snow_albedo, " over ", land%snow_dt, " K below T0"
         if (allocated(land%t_soil)) &
             write(io_unit, '(a,f7.2,a,f7.2,a)') "    t_soil = ", &
                 minval(land%t_soil, mask=land%mask), " to ", &
