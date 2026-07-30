@@ -208,6 +208,9 @@ program rce_long
     integer, parameter :: NMON = 12
     real(wp), allocatable :: mon_t(:,:,:), mon_u(:,:,:), mon_rh(:,:,:), mon_v(:,:,:)
     real(wp), allocatable :: mon_sst(:,:), mon_pr(:,:)
+    ! Full 2D near-surface-air T (lowest level), (nlon,nlat,12) -- land-resolved,
+    ! so land vs ocean can be separated in post for the land seasonal calibration.
+    real(wp), allocatable :: mon_t2m(:,:,:)
     integer,  allocatable :: mon_cnt(:)
     integer            :: nacc_mon = 1        ! accumulate every nacc_mon steps (~1 day)
     ! Time-mean per-term diabatic heating accumulators [K/step], same 2nd-half
@@ -596,8 +599,9 @@ program rce_long
         allocate(mon_t(grd%nlat,nlev,NMON), mon_u(grd%nlat,nlev,NMON), &
                  mon_rh(grd%nlat,nlev,NMON), mon_v(grd%nlat,nlev,NMON), &
                  mon_sst(grd%nlat,NMON), mon_pr(grd%nlat,NMON), mon_cnt(NMON))
+        allocate(mon_t2m(grd%nlon,grd%nlat,NMON))
         mon_t = 0.0_wp; mon_u = 0.0_wp; mon_rh = 0.0_wp; mon_v = 0.0_wp
-        mon_sst = 0.0_wp; mon_pr = 0.0_wp; mon_cnt = 0
+        mon_sst = 0.0_wp; mon_pr = 0.0_wp; mon_cnt = 0; mon_t2m = 0.0_wp
         nacc_mon = max(1, nint(86400.0_wp/dt))   ! ~1 sample/day
         if (.not. ts%rad%seasonal) write(*,"(a)") &
             " rce_long:: WARNING monthly_out set but radiation%seasonal=.FALSE. -- "// &
@@ -927,6 +931,7 @@ contains
         mon_rh(:,:,imon) = mon_rh(:,:,imon) + rzm/rnlon
         mon_sst(:,imon)  = mon_sst(:,imon)  + sstz/rnlon
         mon_pr(:,imon)   = mon_pr(:,imon)   + prz/rnlon
+        mon_t2m(:,:,imon) = mon_t2m(:,:,imon) + now%temp_g(:,:,nlev)  ! full 2D near-surface T
         mon_cnt(imon)    = mon_cnt(imon) + 1
     end subroutine accum_monthly
 
@@ -936,15 +941,17 @@ contains
         ! e.g. a sub-annual run) are written as the -9999 missing value.
         character(len=*), intent(in) :: fname
         real(wp), parameter :: MISS = -9999.0_wp
-        real(wp), allocatable :: latout(:), levout(:), monout(:)
+        real(wp), allocatable :: latout(:), lonout(:), levout(:), monout(:)
         real(wp), allocatable :: t_o(:,:,:), u_o(:,:,:), v_o(:,:,:), rh_o(:,:,:)
-        real(wp), allocatable :: sst_o(:,:), pr_o(:,:)
+        real(wp), allocatable :: sst_o(:,:), pr_o(:,:), t2m_o(:,:,:)
         integer :: m
-        allocate(latout(grd%nlat), levout(nlev), monout(NMON))
+        allocate(latout(grd%nlat), lonout(grd%nlon), levout(nlev), monout(NMON))
         allocate(t_o(grd%nlat,nlev,NMON), u_o(grd%nlat,nlev,NMON), &
                  v_o(grd%nlat,nlev,NMON), rh_o(grd%nlat,nlev,NMON), &
-                 sst_o(grd%nlat,NMON), pr_o(grd%nlat,NMON))
+                 sst_o(grd%nlat,NMON), pr_o(grd%nlat,NMON), &
+                 t2m_o(grd%nlon,grd%nlat,NMON))
         latout = grd%lat(1:grd%nlat)
+        lonout = grd%lon(1:grd%nlon)
         levout = vg%sigma_full(1:nlev)
         do m = 1, NMON
             monout(m) = real(m, wp)
@@ -955,13 +962,16 @@ contains
                 rh_o(:,:,m) = mon_rh(:,:,m)/real(mon_cnt(m),wp)
                 sst_o(:,m)  = mon_sst(:,m) /real(mon_cnt(m),wp)
                 pr_o(:,m)   = mon_pr(:,m)  /real(mon_cnt(m),wp)
+                t2m_o(:,:,m) = mon_t2m(:,:,m)/real(mon_cnt(m),wp)
             else
                 t_o(:,:,m) = MISS; u_o(:,:,m) = MISS; v_o(:,:,m) = MISS
                 rh_o(:,:,m) = MISS; sst_o(:,m) = MISS; pr_o(:,m) = MISS
+                t2m_o(:,:,m) = MISS
             end if
         end do
         call nc_create(fname)
         call nc_write_dim(fname, "lat",   x=latout, units="degrees_north")
+        call nc_write_dim(fname, "lon",   x=lonout, units="degrees_east")
         call nc_write_dim(fname, "lev",   x=levout, units="sigma")
         call nc_write_dim(fname, "month", x=monout, units="1")
         call nc_write(fname, "t",   t_o,  dim1="lat", dim2="lev", dim3="month", &
@@ -976,9 +986,11 @@ contains
             units="K",  long_name="monthly zonal-mean surface temperature")
         call nc_write(fname, "precip", pr_o, dim1="lat", dim2="month", &
             units="mm/day", long_name="monthly zonal-mean precipitation")
+        call nc_write(fname, "t2m", t2m_o, dim1="lon", dim2="lat", dim3="month", &
+            units="K", long_name="monthly near-surface (lowest level) air temperature")
         write(*,"(a,i0,a,a)") " rce_long:: wrote monthly climatology (", &
             count(mon_cnt>0), " months populated) -> ", trim(fname)
-        deallocate(latout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o)
+        deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o)
     end subroutine dump_monthly
 
     subroutine read_config()
