@@ -49,14 +49,16 @@ module aeros_bcinput
 contains
 
     subroutine aeros_bcinput_read_field(filename, varname, tgt_lon, tgt_lat, field, &
-                                        lon_name, lat_name)
+                                        lon_name, lat_name, itime)
         ! Read `varname` from `filename` and bilinearly interpolate it onto the
         ! target grid defined by (tgt_lon [deg east], tgt_lat [deg north]),
         ! returning field(size(tgt_lon), size(tgt_lat)).
         !
         ! lon_name/lat_name name the source coordinate variables; they default to
         ! the CF-standard "longitude"/"latitude" (ERA5). The field variable may
-        ! be 2D (lat,lon) or 3D (time,lat,lon); a time dimension is averaged out.
+        ! be 2D (lat,lon) or 3D (time,lat,lon). For a 3D field, `itime` selects a
+        ! single time slice (1-based); when absent the time dimension is averaged
+        ! out (bit-for-bit unchanged from before this argument existed).
 
         implicit none
 
@@ -64,6 +66,7 @@ contains
         real(wp),         intent(in)  :: tgt_lon(:), tgt_lat(:)
         real(wp),         intent(out) :: field(:,:)
         character(len=*), intent(in), optional :: lon_name, lat_name
+        integer,          intent(in), optional :: itime
 
         character(len=64) :: lonnm, latnm
         integer  :: nsx, nsy, ndims, nt, it
@@ -110,11 +113,22 @@ contains
             end block
             allocate(raw3(nsx, nsy, nt))
             call nc_read(trim(filename), trim(varname), raw3)
-            src = raw3(:,:,1)
-            do it = 2, nt
-                src = src + raw3(:,:,it)
-            end do
-            src = src/real(nt, wp)
+            if (present(itime)) then
+                ! Single time slice (e.g. one month of a seasonal climatology).
+                if (itime < 1 .or. itime > nt) then
+                    write(io_unit_err,*) "aeros_bcinput_read_field:: error: itime ", &
+                        itime, " out of range 1..", nt, " for '", trim(varname), "'"
+                    error stop 1
+                end if
+                src = raw3(:,:,itime)
+            else
+                ! Time-average (default, bit-for-bit unchanged).
+                src = raw3(:,:,1)
+                do it = 2, nt
+                    src = src + raw3(:,:,it)
+                end do
+                src = src/real(nt, wp)
+            end if
             deallocate(raw3)
         case default
             write(io_unit_err,*) "aeros_bcinput_read_field:: error: variable '", &

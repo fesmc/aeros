@@ -36,8 +36,9 @@ program rce_long
     use aeros_ocean,    only : aeros_ocean_init
     use aeros_topography, only : aeros_topography_load, aeros_topography_scale
     use aeros_land,     only : aeros_land_init, aeros_land_couple_radiation
+    use aeros_bcinput,  only : aeros_bcinput_read_field
     use nml,            only : nml_read
-    use ncio,           only : nc_create, nc_write_dim, nc_write, nc_read, nc_size
+    use ncio,           only : nc_create, nc_write_dim, nc_write, nc_read, nc_size, nc_ndims
 
     implicit none
 
@@ -93,7 +94,7 @@ program rce_long
     ! SW-faithful core (see docs/m2_handoff.md).
     character(len=512) :: sst_seasonal_file = ""
     logical  :: l_sst_seasonal = .FALSE.
-    real(wp), allocatable :: sst_clim(:,:) ! (nlat, 12) zonally-symmetric SST BC [K]
+    real(wp), allocatable :: sst_clim(:,:,:) ! (nlon, nlat, 12) prescribed SST BC [K]
     ! Diagnostic prescribed heating (dry-core heating->ω isolation). When on, set
     ! all physics off; an analytic Q(lat,sigma) = amp * [equatorial, zero-mean] *
     ! sin(pi*sigma) is coupled on the in-solve seam. amp in K/day.
@@ -342,29 +343,54 @@ program rce_long
     ts%ocn%t_frz      = t_frz
     call aeros_ocean_init(ts%ocn, grd)   ! recompute C, (re)allocate ice state
 
-    ! Prescribed seasonal SST (feat/seasonal): load the SST(lat,month) table and
-    ! seed the surface at doy0. Only in prescribed-SST mode -- in slab mode the
-    ! SST is prognostic and aeros_ocean_step owns it.
+    ! Prescribed seasonal SST (feat/seasonal): load the SST climatology into
+    ! sst_clim(nlon,nlat,12) and seed the surface at doy0. Only in prescribed-SST
+    ! mode -- in slab mode the SST is prognostic and aeros_ocean_step owns it.
+    ! Two input formats, dispatched on the `sst` variable's rank:
+    !   3D sst(lon,lat,month) on the ERA5 grid -> bilinearly regridded per month
+    !     (aeros_bcinput_read_field, itime=month); the full 2D field.
+    !   2D sst(lat,month) already on the model grid -> broadcast zonally (the
+    !     legacy aquaplanet table from make_seasonal_sst.jl).
     if (len_trim(sst_seasonal_file) > 0) then
         if (ocean_mode /= 0) then
             write(*,"(a)") " rce_long:: WARNING sst_seasonal_file ignored -- "// &
                 "prescribed seasonal SST needs ocean_mode=0 (slab SST is prognostic)."
         else
             block
-                integer :: nlat_f, nmon_f
-                nlat_f = nc_size(trim(sst_seasonal_file), "lat")
-                nmon_f = nc_size(trim(sst_seasonal_file), "month")
-                if (nlat_f /= grd%nlat .or. nmon_f /= 12) then
-                    write(*,"(a,i0,a,i0,a)") " rce_long:: error: sst_seasonal_file is (", &
-                        nlat_f, " lat, ", nmon_f, " month), expected (nlat, 12) on the model grid"
-                    error stop 1
+                integer :: sst_rank, nmon_f, nlat_f, mm, ii
+                real(wp), allocatable :: sst_zm(:,:)
+                allocate(sst_clim(grd%nlon, grd%nlat, 12))
+                sst_rank = nc_ndims(trim(sst_seasonal_file), "sst")
+                if (sst_rank == 3) then
+                    ! ERA5-grid (lon,lat,month): regrid each month to the model grid.
+                    do mm = 1, 12
+                        call aeros_bcinput_read_field(trim(sst_seasonal_file), "sst", &
+                            grd%lon, grd%lat, sst_clim(:,:,mm), itime=mm)
+                    end do
+                    write(*,"(a,a)") " rce_long:: prescribed seasonal SST (2D, regridded) from ", &
+                        trim(sst_seasonal_file)
+                else
+                    ! Legacy model-grid zonal table (lat,month): broadcast over lon.
+                    nlat_f = nc_size(trim(sst_seasonal_file), "lat")
+                    nmon_f = nc_size(trim(sst_seasonal_file), "month")
+                    if (nlat_f /= grd%nlat .or. nmon_f /= 12) then
+                        write(*,"(a,i0,a,i0,a)") " rce_long:: error: sst_seasonal_file is (", &
+                            nlat_f, " lat, ", nmon_f, " month), expected (nlat, 12) on the model grid"
+                        error stop 1
+                    end if
+                    allocate(sst_zm(grd%nlat, 12))
+                    call nc_read(trim(sst_seasonal_file), "sst", sst_zm)
+                    do mm = 1, 12
+                        do ii = 1, grd%nlon
+                            sst_clim(ii, :, mm) = sst_zm(:, mm)
+                        end do
+                    end do
+                    deallocate(sst_zm)
+                    write(*,"(a,a)") " rce_long:: prescribed seasonal SST (zonal) from ", &
+                        trim(sst_seasonal_file)
                 end if
-                allocate(sst_clim(grd%nlat, 12))
-                call nc_read(trim(sst_seasonal_file), "sst", sst_clim)
                 l_sst_seasonal = .TRUE.
                 call set_seasonal_sst(doy0)   ! seed month at the start day
-                write(*,"(a,a)") " rce_long:: prescribed seasonal SST from ", &
-                    trim(sst_seasonal_file)
             end block
         end if
     end if
@@ -838,24 +864,23 @@ contains
     end subroutine dump_rh
 
     subroutine set_seasonal_sst(day)
-        ! Set the prescribed SST from the SST(lat,month) climatology at day-of-year
-        ! `day`, zonally symmetric. Monthly values are taken at mid-month centers
+        ! Set the prescribed SST from the sst_clim(lon,lat,month) climatology at
+        ! day-of-year `day`. Monthly values are taken at mid-month centers
         ! ((m-0.5)/12 of the year) and linearly interpolated cyclically, so the
         ! surface carries a smooth seasonal cycle in phase with the insolation.
+        ! (A zonally-symmetric table is stored broadcast over lon at load, so this
+        ! one path serves both the 2D and the legacy aquaplanet cases.)
         real(wp), intent(in) :: day
         real(wp), parameter :: DAYS_YR = 365.0_wp
-        real(wp) :: dyr, x, w, sstj
-        integer  :: j, im0, m0, m1
+        real(wp) :: dyr, x, w
+        integer  :: im0, m0, m1
         dyr = modulo(day, DAYS_YR)
         x   = dyr/DAYS_YR*12.0_wp - 0.5_wp        ! mid-month-centered month coordinate
         im0 = floor(x)
         w   = x - real(im0, wp)
         m0  = modulo(im0,     12) + 1             ! 1..12
         m1  = modulo(im0 + 1, 12) + 1
-        do j = 1, grd%nlat
-            sstj = (1.0_wp - w)*sst_clim(j, m0) + w*sst_clim(j, m1)
-            ts%ocn%sst(:, j) = sstj
-        end do
+        ts%ocn%sst(:,:) = (1.0_wp - w)*sst_clim(:,:,m0) + w*sst_clim(:,:,m1)
     end subroutine set_seasonal_sst
 
     subroutine accum_monthly(n)
