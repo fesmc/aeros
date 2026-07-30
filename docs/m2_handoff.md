@@ -489,11 +489,19 @@ The aquaplanet-symmetric seasonal run is fine at 1800.
 - Reference run + configs: `output/land_cal/land_csoil2e6.nml` (dt=900, 4 yr,
   accumulate last 2). `c_soil` sweep nmls alongside.
 
-**Task 1 — orography.** Turn on `l_topography=.true.` (ERA5 orography,
-`topo_file`, `topo_ramp_days`) on top of the calibrated flat-land dt=900 config;
-re-run and re-validate the seasonal cycle. Independent of the amplitude gap below.
-Watch: topography may add its own stability stress at dt=900 (check, may need
-shorter dt or a longer topo ramp).
+**Task 1 — orography. ✅ DONE (2026-07-30).** `l_topography=.true.` on the
+calibrated flat-land dt=900 config (`output/land_cal/land_topo.nml`), 4 yr,
+NaN-free. **Stability-neutral:** the model-top jet (`max|u|` lev 1, 61–84 m/s
+over yr 3–4) is bounded/stationary and matches the flat config's own top-jet
+regime (flat vs topo lev-1 baroclinicity `peak|[u]|` 52 vs 50 m/s at day 90) —
+topography added no stress, no shorter-dt/longer-ramp needed. T21 phis loaded OK
+(max ~5.0e4 m²/s² ≈ 5100 m; expected Gibbs undershoot at the min). **Seasonal-cycle
+validation** (`land_validate_era5.jl`, `docs/figures/land_t2m_amp_{flat,topo}.png`):
+topography **helps the NH mid/high lats** — land t2m amplitude at 50°N 18.7→**25.0**
+(+6.3 K), 65°N 21.6→**24.6** (+3.0), toward ERA5 (32.2 / 37.5); elevated, isolated
+continental interiors cool harder in winter. SH −35° drops 11.4→8.8 (little SH
+land, sensitive to the few narrow continents), so the global land-mean edges down
+10.1→9.5. The residual 65°N gap (24.6 vs 37.5) is Task 2's snow-albedo lever.
 
 **Task 2 — close the NH land amplitude gap (missing physics, NOT c_soil).**
 `c_soil` is NOT the lever — a 10× sweep (2e6→2e5) moved the land-mean amplitude
