@@ -464,3 +464,46 @@ van Leer; per-row polar sub-cycling; `tau_diff`/∇⁶ retune.
   cadence. New test `test_ecckd` (suite now **19**). **Recommended scheme going
   forward — switching the default from SESAM to ecCKD is a deliberate call still to
   be made** (it changes all results / breaks bit-reproducibility of past runs).
+
+## Land calibration handoff (2026-07-30) — two open tasks for the next session
+
+**State.** Coupled land runs work and are validated against ERA5. The seasonal
+cycle (prescribed 2D ERA5 SST + seasonal insolation + real land mask, flat) runs
+stably and land fixes most of the aquaplanet's missing seasonality (NH-midlat
+amplitude ~9.5 K aquaplanet → ~21 K land; ERA5 ~37 K). All on branch `land-cal`,
+merged to main. See [[model-top-instability]], [[slab-instability-a5395d6]].
+
+**THE dt=900 REQUIREMENT (critical).** Coupled/asymmetric runs (land, or seeded
+eddies, or slab) blow up at the model top on the SW-faithful core at the usual
+`dt=1800` — it is a **CFL/time-stability limit**, not diffusion or spectral-pole
+(git-diagnosed: every damping/inertia lever only *delayed* it; halving `dt`→900
+*cures* it, 4 yr steady). So every asymmetric run must use **`dt=900`** (≈2× cost).
+The aquaplanet-symmetric seasonal run is fine at 1800.
+
+**Infra in place (all opt-in, default-off, 25 tests pass):**
+- 2D seasonal SST: `scripts/make_seasonal_sst_2d.jl` → `input/sst_seasonal_2d.nc`
+  (ocean-masked, land-filled ERA5 skt); `aeros_bcinput_read_field(...,itime=m)`
+  regrids per month; driver dispatches on the `sst` var rank.
+- `monthly_out` now also writes `t2m(lon,lat,month)` (2D near-surface air T).
+- `scripts/land_validate_era5.jl` — land-masked t2m amplitude vs ERA5.
+- Reference run + configs: `output/land_cal/land_csoil2e6.nml` (dt=900, 4 yr,
+  accumulate last 2). `c_soil` sweep nmls alongside.
+
+**Task 1 — orography.** Turn on `l_topography=.true.` (ERA5 orography,
+`topo_file`, `topo_ramp_days`) on top of the calibrated flat-land dt=900 config;
+re-run and re-validate the seasonal cycle. Independent of the amplitude gap below.
+Watch: topography may add its own stability stress at dt=900 (check, may need
+shorter dt or a longer topo ramp).
+
+**Task 2 — close the NH land amplitude gap (missing physics, NOT c_soil).**
+`c_soil` is NOT the lever — a 10× sweep (2e6→2e5) moved the land-mean amplitude
+<0.5 K; the soil already equilibrates. The NH-midlat gap (model 21 vs ERA5 37 K at
+65°N; model winters too warm + ~2-month phase lag, see
+`docs/figures/land_t2m_amp.png`) is structural:
+  (a) **No snow-albedo feedback** — the dominant lever. ERA5's winter continents
+      brighten under snow and cool hard. Build on the land `freeze_floor` hook and
+      the sea-ice `ice_albedo` path (`aeros_ocean`/`aeros_land`): a snow-cover →
+      albedo bump when the soil/skin drops below freezing.
+  (b) Lowest model level is ~170 m, not 2 m, so it misses the winter surface
+      inversion — partly a fair-comparison artifact. A proper 2 m surface-layer
+      diagnostic (from the surface flux + stability) would help the comparison.
