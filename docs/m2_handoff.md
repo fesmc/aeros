@@ -87,6 +87,22 @@ Remaining first-order deficit: **evaporation ~35% low** — aeros' lowest-level 
 vs SW's 5.6 (its lowest level is ~500 m vs aeros' ~120 m), so V0 is 5.8 vs 7.7 m/s; the
 exchange coefficient (1.5e-3 fixed vs SW's Richardson ~1e-3) is not the gap.
 
+**Update 2026-09-05 (night, commit 6f55928).** Surface exchange coefficient is now
+SpeedyWeather's bulk-Richardson log-law (Frierson 2006), per point, one coefficient for
+heat/moisture/momentum; the BL diffusion was already the same scheme. Findings on the
+**evaporation deficit** (aeros 1.7 vs SW 3.3 vs ERA5 2.9 mm/day): zonal-mean near-surface
+winds match ERA5 and SW (|[u]| 2–3 m/s), the wind *speed* is low (4.6 vs SW 5.6 vs ERA5 ~7)
+because aeros' eddies are weaker; and the lowest-level RH is 82% (SW 75%) — aeros' lowest
+level sits at ~160 m (L12 stretched grid) vs SW's ~500 m, and a thin, moist lowest layer
+gives a small saturation deficit at the same coefficient. With the fixed 1.5e-3 coefficient
+E was 1.85; with the log-law (~7e-4 at 160 m over sea) 1.70. Momentum drag is weaker too, so
+the winter lid jet reaches ~95 m/s and **dt=3600 dies at day 422; the harness runs dt=2700**
+(drag_vmax=70 survives 2 yr at 3600 with 94 m/s peaks — an option). **Vertical levels:** the
+same real-Earth run at **L8** is +15% faster (2145 SYPD), NaN-free, and its climate metrics
+are as good or better (precip 2.1, Z* 69 m, lid 223 K); **L20 blows up at day 354** at
+dt=3600 (untested at smaller dt). The L12 grid's motivation (design §4.1: polar boundary
+layer / inversions for the ice-sheet SMB) has not yet been tested by any metric.
+
 **►► NEXT (in order):**
 1. **Re-validate the climate at full-rate physics.** The 1-yr aquaplanet at dt=3600 has OLR
    ~117 W/m² (was ~155), a 188 K level-1 mean (172 K min) and an 81 m/s lid jet — the
