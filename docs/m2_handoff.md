@@ -47,6 +47,28 @@ untested whether CFL or physics). Throughput on 10 cores (Apple M5): **~1850 SYP
 before, and vs SpeedyWeather 0.21.1 default T21L8 (slab ocean, sea ice, land, orography):
 1357 SYPD at dt=3600. aeros is ~2.5× faster per step than SW; per model-year now 1.4× faster.
 
+**Update 2026-09-05 (later, commits 6bf625d / 9eb5868).** (i) The N-cycle now applies the
+physics increment to the stepped state instead of through the weighted accumulator G (the
+Lorenz weights extrapolated the relaxation terms: −5.9..+0.1 K/day sub-cycle swings and a
+dt-dependent OLR; gone: OLR 131.6/131.3/130.2 at dt 900/1800/3600). (ii) The real-Earth 1-1
+harness exists: `mwm/D_realearth/` (`sw_realearth.jl`, `compare_realearth.jl`,
+`aeros_realearth_T21L12_dt2700.nml`; figures `docs/figures/realearth_*.png`, table
+`docs/refs/realearth_metrics_2026-09-05.md`). (iii) **`monthly_out` was sampling stale grid
+diagnostics** (refreshed only at `print_every`) — every earlier seasonal/land number (land
+Task 1/2 amplitudes, `rce_seasonal_*`) was taken from months that were snapshots of the last
+report; fixed. (iv) **dt = 3600 dies in the second winter** (lid jet 91 m/s at level 1 →
+past the N-cycle advective limit ~0.7 of leapfrog's); **dt = 2700 is the working production
+step** (3 yr NaN-free, ~1600 SYPD with monthly sampling). (v) Ozone is NOT the issue: the
+real-Earth lid is 214 K vs ERA5 207 K at 70 hPa (the 188 K was the aquaplanet's).
+
+First real-Earth numbers (T21, 2 yr spin-up + 1 yr): aeros / SpeedyWeather / ERA5 —
+precip 2.1 / 3.3 / 2.9 mm/day; lid T 214 / 235 / 207 K; lowest-level T 288 / 278 / 288 K;
+max [u] 63 / 63 / 34 m/s; DJF NH Z500* RMS 47 / 68 / 76 m; NH-land t2m |Jul−Jan| 29 / 29 /
+34 K; 1606 / 1016 SYPD. aeros' zonal T is closer to ERA5 than SW's (SW is cold aloft with a
+warm lid); aeros' deficits are **too little precipitation/evaporation (LH ~35 W/m²)**, a
+**saturated upper troposphere/lid (RH ~100% above 200 hPa)**, **spurious polar precipitation**,
+and weak stationary waves; both models over-strong upper jets.
+
 **►► NEXT (in order):**
 1. **Re-validate the climate at full-rate physics.** The 1-yr aquaplanet at dt=3600 has OLR
    ~117 W/m² (was ~155), a 188 K level-1 mean (172 K min) and an 81 m/s lid jet — the
