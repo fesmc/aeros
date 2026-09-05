@@ -164,6 +164,13 @@ module aeros_defs
         character(len=16) :: time_scheme    = "ncycle"
         integer           :: ncycle         = 4
         character(len=8)  :: ncycle_variant = "A"
+        ! -- Speed-limit drag (src/dynamics/aeros_timestep.f90, "Speed-limit
+        ! drag"): SpeedyWeather's default `SpeedLimitDrag` -- a quadratic drag on
+        ! the wind speed in excess of drag_vmax [m/s], coefficient drag_coef
+        ! [1/m]; 0 disables it. What keeps the winter lid jet inside the
+        ! advective stability limit at dt = 1 h.
+        real(wp) :: drag_vmax = 80.0_wp
+        real(wp) :: drag_coef = 4.0e-7_wp
         real(wp) :: tau_diff      ! diffusion e-folding time at l = lmax [h]
         integer  :: ndiff         ! diffusion order: 2, 4 or 6
 
@@ -345,6 +352,8 @@ contains
         call nml_read(filename, nml_group, "time_scheme",    par%time_scheme, defaults_file=defaults_file)
         call nml_read(filename, nml_group, "ncycle",         par%ncycle, defaults_file=defaults_file)
         call nml_read(filename, nml_group, "ncycle_variant", par%ncycle_variant, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "drag_vmax",      par%drag_vmax, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "drag_coef",      par%drag_coef, defaults_file=defaults_file)
         call nml_read(filename, nml_group, "held_suarez",   par%held_suarez, defaults_file=defaults_file)
         call nml_read(filename, nml_group, "mass_fixer",    par%mass_fixer, defaults_file=defaults_file)
 

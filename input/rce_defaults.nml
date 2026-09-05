@@ -119,6 +119,10 @@
     time_scheme      = "ncycle"
     ncycle           = 4
     ncycle_variant   = "A"
+    ! Speed-limit drag (SpeedyWeather's default SpeedLimitDrag): quadratic drag
+    ! on the wind speed above drag_vmax [m/s], coefficient drag_coef [1/m]; 0 = off.
+    drag_vmax        = 80.0
+    drag_coef        = 4.0e-7
     ! Prescribed-SST meridional profile: T_s = T0 + sst_eq*(1 - sin^2(sst_shape*phi))
     ! for |phi| < sst_lat. Defaults are the APE Control profile (gradient steepest at
     ! 30 deg). sst_shape=1.0 + sst_lat=90 gives SpeedyWeather's cos^2(phi).

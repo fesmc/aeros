@@ -71,6 +71,8 @@ program rce_long
     character(len=16) :: time_scheme = "ncycle"
     integer           :: ncycle = 4
     character(len=8)  :: ncycle_variant = "A"
+    ! Speed-limit drag (aeros_timestep header): SpeedyWeather's default; drag_coef = 0 off.
+    real(wp) :: drag_vmax = 80.0_wp, drag_coef = 4.0e-7_wp
     real(wp) :: conv_tau = 14400.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp, u_min = 1.0_wp
     character(len=32) :: conv_scheme = "sbm_frierson" ! "sbm" | "sbm_frierson" | "manabe"
     real(wp) :: c_d = 1.5e-3_wp       ! surface momentum drag (0 = off; brakes the low-level jet)
@@ -281,6 +283,8 @@ program rce_long
     par%time_scheme    = time_scheme
     par%ncycle         = ncycle
     par%ncycle_variant = ncycle_variant
+    par%drag_vmax      = drag_vmax
+    par%drag_coef      = drag_coef
     par%ndiff = ndiff; par%tau_diff = tau_diff
     par%mass_fixer = .FALSE.
 
@@ -1217,6 +1221,10 @@ contains
         call nml_read(nmlfile, "rce", "ncycle", ncycle, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "ncycle_variant", ncycle_variant, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "drag_vmax", drag_vmax, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "drag_coef", drag_coef, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "sst_eq", sst_eq, &
                       defaults_file="input/rce_defaults.nml")

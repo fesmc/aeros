@@ -69,6 +69,10 @@
     time_scheme    = "ncycle"
     ncycle         = 4
     ncycle_variant = "A"
+    ! Speed-limit drag (SpeedyWeather's default SpeedLimitDrag): quadratic drag
+    ! on the wind speed above drag_vmax [m/s], coefficient drag_coef [1/m]; 0 = off.
+    drag_vmax      = 80.0
+    drag_coef      = 4.0e-7
 
     ! Time filter. Williams (2009) RAW: nu is the classical Robert-Asselin
     ! coefficient and alpha splits the displacement between the two time

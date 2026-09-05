@@ -78,6 +78,19 @@ module aeros_timestep
     ! coupling forced on the leapfrog. Restart carries G (`gacc_*`) and the
     ! substep index rides on nstep.
     !
+    ! === Speed-limit drag ====================================================
+    !
+    ! SpeedyWeather's default `SpeedLimitDrag` (dynamics/drag.jl): on the grid,
+    ! a quadratic drag on the wind speed in excess of drag_vmax,
+    !
+    !     F_u = -c max(0, |V| - vmax)^2 sign(u),   F_v likewise,
+    !
+    ! c = drag_coef [1/m] (4e-7), vmax = 80 m/s. Zero below the limit, so it is
+    ! bit-neutral on every run that never exceeds it; on the real-Earth run it
+    ! caps the winter lid jet (~91 m/s at level 1 without it) inside the
+    ! advective stability limit at dt = 1 h, which is how SpeedyWeather holds
+    ! that step. Applied at the grid seam with the Held-Suarez friction.
+    !
     ! === The time filter (leapfrog only) =====================================
     !
     ! Leapfrog admits a computational mode that must be damped or it grows. The
@@ -309,6 +322,10 @@ module aeros_timestep
         real(wp) :: tau_diff_div = 0.0_wp
         integer  :: ndiff      = 6        ! diffusion order (6 = del^6)
         logical  :: semi_implicit = .TRUE.
+
+        ! Speed-limit drag (module header). drag_coef = 0 disables it.
+        real(wp) :: drag_vmax = 80.0_wp
+        real(wp) :: drag_coef = 4.0e-7_wp
 
         ! Time scheme (module header, "The Lorenz N-cycle").
         integer  :: scheme   = SCHEME_LEAPFROG
@@ -586,6 +603,8 @@ contains
         call aeros_timestep_end(ts)
 
         ts%scheme        = ischeme
+        ts%drag_vmax     = par%drag_vmax
+        ts%drag_coef     = par%drag_coef
         ts%ncycle        = par%ncycle
         ts%nvariant      = ivariant
         ts%dt            = par%dt
@@ -941,6 +960,7 @@ contains
         call aeros_tendency_grid(pool, vg, grd, now%spec, ts%wrk)
 
         if (ts%hs%enabled) call aeros_hs_apply(ts%hs, vg, ts%wrk)
+        if (ts%drag_coef > 0.0_wp) call speed_limit_drag(ts, vg)
 
         ! Diabatic heating accumulator. Surface fluxes, convection, condensation
         ! and radiation each add a temperature increment [K] here over one dt.
@@ -1191,6 +1211,37 @@ contains
         return
 
     end subroutine aeros_timestep_step
+
+    subroutine speed_limit_drag(ts, vg)
+        ! Module header, "Speed-limit drag": F = -c max(0,|V|-vmax)^2 sign(u,v)
+        ! added to the grid momentum RHS (wrk%ae/an, like Held-Suarez friction).
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_vgrid_class),    intent(in)    :: vg
+
+        real(wp) :: spd, ex
+        integer  :: i, j, k
+
+        !$omp parallel do collapse(2) schedule(static) private(i,j,k,spd,ex)
+        do k = 1, vg%nlev
+            do j = 1, ts%wrk%nlat
+                do i = 1, ts%wrk%nlon
+                    spd = sqrt(ts%wrk%u(i,j,k)**2 + ts%wrk%v(i,j,k)**2)
+                    if (spd > ts%drag_vmax) then
+                        ex = ts%drag_coef*(spd - ts%drag_vmax)**2
+                        ts%wrk%ae(i,j,k) = ts%wrk%ae(i,j,k) - sign(ex, ts%wrk%u(i,j,k))
+                        ts%wrk%an(i,j,k) = ts%wrk%an(i,j,k) - sign(ex, ts%wrk%v(i,j,k))
+                    end if
+                end do
+            end do
+        end do
+        !$omp end parallel do
+
+        return
+
+    end subroutine speed_limit_drag
 
     subroutine advance_leapfrog(ts, s, vg, now, h)
         ! X^(n+1) into ts%new from X^(n-1) = ts%old, X^n = now%spec and the RHS
