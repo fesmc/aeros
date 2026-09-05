@@ -59,7 +59,7 @@ program rce_long
     ! only once the elapsed model day exceeds this, so a single continuous run
     ! can spin the slab up and then sample a clean climatology over its tail.
     real(wp) :: mon_spinup_days = 0.0_wp
-    integer  :: trunc = 21, nlev = 8, nstep = 4800, ndiff = 8
+    integer  :: trunc = 21, nlev = 6, nstep = 4800, ndiff = 8
     integer  :: print_every = 96          ! ~2 model days at dt=1800
     real(wp) :: dt = 3600.0_wp, tau_diff = 4.0_wp
     real(wp) :: tau_diff_div = 0.0_wp     ! divergence-only diffusion timescale [h]; 0 => = tau_diff

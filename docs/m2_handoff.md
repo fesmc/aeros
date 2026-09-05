@@ -9,7 +9,7 @@ All on `main` (last commits 59657fa, 90e9408, 63c7c4e), 26/26 tests, built with
 real-Earth T21 run: ERA5 orography, ERA5 land-sea mask with the bucket land + snow albedo,
 prescribed 2D seasonal ERA5 SST, seasonal insolation, ecCKD radiation with diagnostic clouds,
 Frierson SBM convection, SpeedyWeather-style condensation. **Namelist:**
-`mwm/D_realearth/aeros_realearth_T21L8.nml` (only physical keys; every numerical/core knob
+`mwm/D_realearth/aeros_realearth_T21L6.nml` (only physical keys; every numerical/core knob
 comes from `input/rce_defaults.nml`, which now IS the production recipe).
 
 Since the 2026-07-30 handoff the integration and the coupling were rebuilt (details in the
@@ -23,7 +23,7 @@ log sections below). What is different and load-bearing:
 | surface exchange | bulk-Richardson log-law coefficient per point (SW/Frierson 2006); SW surface wind (0.95 slowdown + 5 m/s gust) | fixed 1.5e-3, 1 m/s wind floor |
 | speed-limit drag | quadratic above 70 m/s (SW's default is 80) | none |
 | dynamical core | ∇⁸/4 h, divergence ∇⁸→∇⁴ above σ=0.2 on 1 h, α=1, no sponge — as defaults | opt-in |
-| vertical grid | **L8** default (stretched hybrid; L12 a namelist choice) | L12 |
+| vertical grid | **L6** default (stretched hybrid; L8/L12 namelist choices) | L12 |
 | dt | **3600 s** at T21 | 900 s |
 | monthly climatology | grid diagnostics refreshed at each sample; + precip2d, z500, vlow, evap, shf | stale (state of the last report) |
 
@@ -37,8 +37,8 @@ water-creating transport and stale monthly sampling. Treat them as history, not 
 |---|---|---|
 | L4 | 3650 | stable; harness metrics as good as L8 |
 | L5 | 3250 | |
-| L6 | 2860 | **to become the default next session** |
-| L8 | 2190 | current default; the 3-yr climatology below |
+| L6 | 2810 | **default since 2026-09-06**; the 3-yr climatology below |
+| L8 | 2190 | default 2026-09-05/06; `docs/refs/realearth_metrics_2026-09-05.md` |
 | L12 | 1870 | previous default |
 | SpeedyWeather T21L8 default | 1040 (1360 without the diagnostic callback) | leapfrog, dt 3600 |
 
@@ -46,12 +46,15 @@ Cost is close to linear in levels with a fixed overhead (transforms and physics 
 per level); aeros is ~2.5× faster than SpeedyWeather per step. L20 blew up at day 354 at
 dt=3600 (not investigated). SpeedyWeather's 8 levels are SPEEDY's (Molteni 2003).
 
-### Climatology, L8, 3 yr (aeros / SpeedyWeather / ERA5) — `docs/refs/realearth_metrics_2026-09-05.md`
+### Climatology, L6, 3 yr (aeros / SpeedyWeather / ERA5) — `docs/refs/realearth_metrics_2026-09-06_L6.md`
 
-precip = evap 2.0 / 3.3 / 2.9 mm/day · TOA −0.2 W/m² · lowest-level T 284.7 / 278 / 287.5 K
-· max [u] 56 / 63 / 34 m/s · DJF NH Z500* RMS 77 / 68 / 76 m · NH-land t2m Jul−Jan
-32.5 / 29 / 33.6 K. Figures in `docs/figures/realearth_*.png`. aeros' zonal temperature
-structure is closer to ERA5 than SpeedyWeather's (SW is cold aloft with a 235 K lid).
+precip = evap 2.2 / 3.3 / 2.9 mm/day · TOA +3.2 W/m² in yr 3 (−3.7 in yr 2: ±3 interannual)
+· lowest-level T 283.5 / 278 / 287.5 K · max [u] 52 / 63 / 34 m/s · DJF NH Z500* RMS
+85 / 68 / 76 m · NH-land t2m Jul−Jan 31.9 / 29 / 33.6 K · 2810 SYPD. Figures in
+`docs/figures/realearth_*.png`. Against L8 (`docs/refs/realearth_metrics_2026-09-05.md`):
+precip +0.2, lowest level 1.2 K colder, lid 226 vs 222 K, Z500* 85 vs 77 m (ERA5 76), +28%
+throughput. aeros' zonal temperature structure is closer to ERA5 than SpeedyWeather's
+(SW is cold aloft with a 235 K lid).
 
 **Known deficits, in the order to attack them:**
 1. **Saturated upper troposphere / lid** (RH ~100% above 200 hPa; ERA5 30–50%, SW dry at its
@@ -78,10 +81,10 @@ make all openmp=1 && make rce-long openmp=1
 # the 26 tests
 for t in libaeros/bin/test_*.x; do OMP_NUM_THREADS=5 $t > logs/suite_$(basename $t .x).log 2>&1 || echo FAIL $t; done
 # aeros 3-yr real-Earth climatology (2-yr spin-up + 1 yr monthly), ~2 min
-OMP_NUM_THREADS=10 libaeros/bin/rce_long.x mwm/D_realearth/aeros_realearth_T21L8.nml
+OMP_NUM_THREADS=10 libaeros/bin/rce_long.x mwm/D_realearth/aeros_realearth_T21L6.nml
 # SpeedyWeather yardstick (~3.5 min), then the comparison (figures + metrics table)
 julia --project=mwm/D_realearth -t 10 mwm/D_realearth/sw_realearth.jl 730 1 21 8
-julia mwm/D_realearth/compare_realearth.jl mwm/D_realearth/output/aeros_realearth_T21L8.nc
+julia mwm/D_realearth/compare_realearth.jl mwm/D_realearth/output/aeros_realearth_T21L6.nc
 ```
 
 The `rce_long` report prints a `TOA:` and a `WATER:` line every `print_every` steps; the
@@ -96,9 +99,8 @@ at a clean end (not on a NaN).
 
 ### First actions next session
 
-1. Make **L6** the default: `input/aeros_defaults.nml` (`nlev`), the `nlev` declaration in
-   `drivers/rce_long.f90`, a new `mwm/D_realearth/aeros_realearth_T21L6.nml`; rerun the
-   climatology and `compare_realearth.jl`; commit with the numbers.
+1. ~~Make **L6** the default~~ — done 2026-09-06 (library + driver defaults, harness namelist
+   `aeros_realearth_T21L6.nml`, climatology above).
 2. Deficit 1 (upper-troposphere moisture), then deficit 2 (polar precipitation).
 3. Re-do the land t2m calibration through the harness afterwards (the old numbers are void).
 
@@ -225,6 +227,14 @@ Z500* 77 m (ERA5 76), t2m amplitude 32.5 K (ERA5 33.6), lowest-level T 284.7 (ER
 2190 SYPD (SW 1040). The evaporation gap is now the wind speed (5.2 m/s lowest level vs
 ERA5 ~7 at 10 m; the zonal means match, the eddies are weak) and the moist lowest layer
 (RH 80%).
+
+**Update 2026-09-06 (L6 default).** (xii) **L6 is the default vertical grid** (library + driver;
+L8/L12 stay namelist choices, Held–Suarez keeps L20). L6 real-Earth 3 yr, dt=3600, NaN-free,
+water residual −0.007 mm/day: P = E = 2.2 mm/day (L8 2.0; SW 3.3; ERA5 2.9), TOA −3.0/−3.7/+3.2
+W/m² over the three years, lowest-level T 283.5 K (L8 284.7; ERA5 287.5), lid 226 K (L8 222),
+max [u] 52 m/s (L8 56), DJF NH Z500* RMS 85 m (L8 77; ERA5 76), NH-land t2m amplitude 31.9 K
+(L8 32.5; ERA5 33.6), **2810 SYPD** (L8 2190; SW 1040). The metrics move within the level-sweep
+scatter; the stationary wave is the one that worsens (85 vs 76 m).
 
 **►► NEXT (in order):**
 1. **Re-validate the climate at full-rate physics.** The 1-yr aquaplanet at dt=3600 has OLR

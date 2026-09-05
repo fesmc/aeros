@@ -44,8 +44,10 @@
     ! Vertical levels. docs/design.md section 4.1: L16-20, with 3-4 levels
     ! below 850 hPa. Fix this before tuning anything -- level count moves the
     ! jet latitude, and therefore the storm track, and therefore ice-sheet
-    ! precipitation.
-    nlev     = 8
+    ! precipitation. L6 is the production default (level sweep 2026-09-06:
+    ! harness metrics as good as L8 and L12, 2860 vs 2190 SYPD); L8/L12 are
+    ! namelist choices.
+    nlev     = 6
 
     ! Dynamics timestep [s]. ~30 min at T42 (section 4).
     !

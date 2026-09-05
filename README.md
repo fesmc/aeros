@@ -14,7 +14,7 @@ with a divergence-only top taper, and the Held–Suarez (1994) benchmark.
 Moisture (FV transport, condensation, Betts–Miller convection), ecCKD/SESAM
 radiation, clouds, a slab ocean with sea ice, a bucket land surface with ERA5
 orography, and seasonal/orbital insolation are in; all column physics couples
-as rates or implicit boundary conditions. The real-Earth T21L8 configuration
+as rates or implicit boundary conditions. The real-Earth T21L6 configuration
 runs at dt = 3600 s, ~2200 model-yr/day on 10 cores. `docs/m2_handoff.md` is the current state.
 
 ```bash
