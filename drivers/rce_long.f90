@@ -38,7 +38,7 @@ program rce_long
     use aeros_land,     only : aeros_land_init, aeros_land_couple_radiation
     use aeros_bcinput,  only : aeros_bcinput_read_field
     use nml,            only : nml_read
-    use ncio,           only : nc_create, nc_write_dim, nc_write, nc_read, nc_size, nc_ndims
+    use ncio,           only : nc_create, nc_write_dim, nc_write, nc_write_attr, nc_read, nc_size, nc_ndims
 
     implicit none
 
@@ -215,6 +215,10 @@ program rce_long
     ! Full 2D near-surface-air T (lowest level), (nlon,nlat,12) -- land-resolved,
     ! so land vs ocean can be separated in post for the land seasonal calibration.
     real(wp), allocatable :: mon_t2m(:,:,:)
+    ! 2D precipitation [mm/day] and 500 hPa geopotential height [m] (hydrostatic
+    ! column, log-p interpolated), for the real-Earth comparison (stationary
+    ! waves, precipitation pattern) against SpeedyWeather / ERA5.
+    real(wp), allocatable :: mon_pr2d(:,:,:), mon_z500(:,:,:)
     integer,  allocatable :: mon_cnt(:)
     integer            :: nacc_mon = 1        ! accumulate every nacc_mon steps (~1 day)
     ! Time-mean per-term diabatic heating accumulators [K/step], same 2nd-half
@@ -609,8 +613,10 @@ program rce_long
                  mon_rh(grd%nlat,nlev,NMON), mon_v(grd%nlat,nlev,NMON), &
                  mon_sst(grd%nlat,NMON), mon_pr(grd%nlat,NMON), mon_cnt(NMON))
         allocate(mon_t2m(grd%nlon,grd%nlat,NMON))
+        allocate(mon_pr2d(grd%nlon,grd%nlat,NMON), mon_z500(grd%nlon,grd%nlat,NMON))
         mon_t = 0.0_wp; mon_u = 0.0_wp; mon_rh = 0.0_wp; mon_v = 0.0_wp
         mon_sst = 0.0_wp; mon_pr = 0.0_wp; mon_cnt = 0; mon_t2m = 0.0_wp
+        mon_pr2d = 0.0_wp; mon_z500 = 0.0_wp
         nacc_mon = max(1, nint(86400.0_wp/dt))   ! ~1 sample/day
         if (.not. ts%rad%seasonal) write(*,"(a)") &
             " rce_long:: WARNING monthly_out set but radiation%seasonal=.FALSE. -- "// &
@@ -675,8 +681,15 @@ program rce_long
         ! Monthly-mean climatology sampling (feat/seasonal): bin the zonal-mean
         ! state by calendar month on a ~daily cadence, once past the spin-up
         ! window (mon_spinup_days) so the slab drift does not pollute the mean.
+        ! The sampled grid fields (now%temp_g/u/v/ps) are diagnostics that only
+        ! aeros_timestep_diagnose refreshes -- refresh them here, or the sample
+        ! is the state at the last report (which is what silently happened up to
+        ! 2026-09: months identical between prints).
         if (len_trim(monthly_out) > 0 .and. mod(n, nacc_mon) == 0 .and. &
-            real(n,wp)*dt/86400.0_wp >= mon_spinup_days) call accum_monthly(n)
+            real(n,wp)*dt/86400.0_wp >= mon_spinup_days) then
+            call aeros_timestep_diagnose(ts, pool, vg, grd, now)
+            call accum_monthly(n)
+        end if
         ! Periodic checkpoint (restart_interval > 0). The model time carried into
         ! the file is the absolute elapsed time n*dt.
         if (len_trim(restart_out) > 0 .and. restart_interval > 0) then
@@ -903,11 +916,13 @@ contains
         ! total (convective + large-scale) precip are surface fields.
         integer, intent(in) :: n
         real(wp), parameter :: DAYS_YR = 365.0_wp   ! radiative year (aeros_insol_day wrap)
+        real(wp), parameter :: P500 = 50000.0_wp    ! [Pa] level of the geopotential diagnostic
         real(wp) :: phc(0:nlev), pfc(nlev), dpcc(nlev)
         real(wp) :: qsl, dqsl, day, frac, rnlon
         integer  :: ii, jj, kk, imon
         real(wp) :: tzm(grd%nlat,nlev), uzm(grd%nlat,nlev), vzm(grd%nlat,nlev), rzm(grd%nlat,nlev)
         real(wp) :: sstz(grd%nlat), prz(grd%nlat)
+        real(wp) :: phif(nlev), phih, alph, pr_ij, wgt
         logical  :: have_pr
 
         day  = ts%rad%doy0 + real(n,wp)*dt/86400.0_wp
@@ -930,8 +945,33 @@ contains
                         now%qv_g(ii,jj,kk)/max(qsl,1.0e-12_wp)*100.0_wp
                 end do
                 sstz(jj) = sstz(jj) + ts%ocn%sst(ii,jj)
-                if (have_pr) prz(jj) = prz(jj) + &
-                    (ts%cnv%precip(ii,jj) + ts%cnd%precip(ii,jj))*86400.0_wp   ! kg/m2/s -> mm/day
+                if (have_pr) then
+                    pr_ij = (ts%cnv%precip(ii,jj) + ts%cnd%precip(ii,jj))*86400.0_wp  ! kg/m2/s -> mm/day
+                    prz(jj) = prz(jj) + pr_ij
+                    mon_pr2d(ii,jj,imon) = mon_pr2d(ii,jj,imon) + pr_ij
+                end if
+                ! Hydrostatic geopotential on the full levels, integrated up from
+                ! the surface (Simmons-Burridge layer alpha; ln 2 in the top
+                ! layer) -- a diagnostic, not the dynamics' own -- then Z500 by
+                ! log-p interpolation (the lowest layer extrapolated where the
+                ! surface is above 500 hPa).
+                phih = phis2(ii,jj)
+                do kk = nlev, 1, -1
+                    if (kk == 1) then
+                        alph = log(2.0_wp)
+                    else
+                        alph = 1.0_wp - phc(kk-1)/dpcc(kk)*log(phc(kk)/phc(kk-1))
+                    end if
+                    phif(kk) = phih + real(R_d,wp)*now%temp_g(ii,jj,kk)*alph
+                    if (kk > 1) phih = phih + real(R_d,wp)*now%temp_g(ii,jj,kk)*log(phc(kk)/phc(kk-1))
+                end do
+                kk = nlev - 1
+                do while (kk > 1 .and. pfc(kk) > P500)
+                    kk = kk - 1
+                end do
+                wgt = (log(P500) - log(pfc(kk)))/(log(pfc(kk+1)) - log(pfc(kk)))
+                mon_z500(ii,jj,imon) = mon_z500(ii,jj,imon) + &
+                    (phif(kk) + wgt*(phif(kk+1) - phif(kk)))/real(grav,wp)
             end do
         end do
         mon_t(:,:,imon)  = mon_t(:,:,imon)  + tzm/rnlon
@@ -953,12 +993,14 @@ contains
         real(wp), allocatable :: latout(:), lonout(:), levout(:), monout(:)
         real(wp), allocatable :: t_o(:,:,:), u_o(:,:,:), v_o(:,:,:), rh_o(:,:,:)
         real(wp), allocatable :: sst_o(:,:), pr_o(:,:), t2m_o(:,:,:)
+        real(wp), allocatable :: pr2d_o(:,:,:), z500_o(:,:,:)
         integer :: m
         allocate(latout(grd%nlat), lonout(grd%nlon), levout(nlev), monout(NMON))
         allocate(t_o(grd%nlat,nlev,NMON), u_o(grd%nlat,nlev,NMON), &
                  v_o(grd%nlat,nlev,NMON), rh_o(grd%nlat,nlev,NMON), &
                  sst_o(grd%nlat,NMON), pr_o(grd%nlat,NMON), &
-                 t2m_o(grd%nlon,grd%nlat,NMON))
+                 t2m_o(grd%nlon,grd%nlat,NMON), pr2d_o(grd%nlon,grd%nlat,NMON), &
+                 z500_o(grd%nlon,grd%nlat,NMON))
         latout = grd%lat(1:grd%nlat)
         lonout = grd%lon(1:grd%nlon)
         levout = vg%sigma_full(1:nlev)
@@ -972,10 +1014,12 @@ contains
                 sst_o(:,m)  = mon_sst(:,m) /real(mon_cnt(m),wp)
                 pr_o(:,m)   = mon_pr(:,m)  /real(mon_cnt(m),wp)
                 t2m_o(:,:,m) = mon_t2m(:,:,m)/real(mon_cnt(m),wp)
+                pr2d_o(:,:,m) = mon_pr2d(:,:,m)/real(mon_cnt(m),wp)
+                z500_o(:,:,m) = mon_z500(:,:,m)/real(mon_cnt(m),wp)
             else
                 t_o(:,:,m) = MISS; u_o(:,:,m) = MISS; v_o(:,:,m) = MISS
                 rh_o(:,:,m) = MISS; sst_o(:,m) = MISS; pr_o(:,m) = MISS
-                t2m_o(:,:,m) = MISS
+                t2m_o(:,:,m) = MISS; pr2d_o(:,:,m) = MISS; z500_o(:,:,m) = MISS
             end if
         end do
         call nc_create(fname)
@@ -997,9 +1041,14 @@ contains
             units="mm/day", long_name="monthly zonal-mean precipitation")
         call nc_write(fname, "t2m", t2m_o, dim1="lon", dim2="lat", dim3="month", &
             units="K", long_name="monthly near-surface (lowest level) air temperature")
+        call nc_write(fname, "precip2d", pr2d_o, dim1="lon", dim2="lat", dim3="month", &
+            units="mm/day", long_name="monthly precipitation")
+        call nc_write(fname, "z500", z500_o, dim1="lon", dim2="lat", dim3="month", &
+            units="m", long_name="monthly 500 hPa geopotential height (hydrostatic, log-p interpolated)")
         write(*,"(a,i0,a,a)") " rce_long:: wrote monthly climatology (", &
             count(mon_cnt>0), " months populated) -> ", trim(fname)
-        deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o)
+        deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o, &
+                   pr2d_o, z500_o)
     end subroutine dump_monthly
 
     subroutine read_config()
