@@ -184,9 +184,9 @@ program rce_long
     ! on, radiation consumes the Sundqvist prognostic cf (aeros_cloud_prog).
     logical  :: l_cloud_prog   = .FALSE.
     ! Diagnostic (RH-based) cloud scheme, aeros_cloud: critical-RH endpoints and
-    ! in-cloud water contents [kg m-3]; defaults = the ERA5-column calibration.
-    real(wp) :: cld_rhc_sfc = 0.52_wp, cld_rhc_top = 0.35_wp
-    real(wp) :: cld_lwc = 0.017e-3_wp, cld_iwc = 0.018e-3_wp
+    ! in-cloud water contents [kg m-3]; the coupled calibration (rce_defaults.nml).
+    real(wp) :: cld_rhc_sfc = 0.52_wp, cld_rhc_top = 1.07_wp
+    real(wp) :: cld_lwc = 0.020e-3_wp, cld_iwc = 0.014e-3_wp
     real(wp) :: cloud_rhc_sfc  = 0.40_wp    ! critical RH at the surface (calibrated)
     real(wp) :: cloud_rhc_top  = 0.60_wp    ! critical RH at the model top (higher aloft)
     real(wp) :: cloud_tau_form = 10800.0_wp ! formation timescale [s] (~3 h; de-patchifies)

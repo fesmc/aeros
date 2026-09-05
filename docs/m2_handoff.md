@@ -46,15 +46,19 @@ Cost is close to linear in levels with a fixed overhead (transforms and physics 
 per level); aeros is ~2.5× faster than SpeedyWeather per step. L20 blew up at day 354 at
 dt=3600 (not investigated). SpeedyWeather's 8 levels are SPEEDY's (Molteni 2003).
 
-### Climatology, L6, 3 yr (aeros / SpeedyWeather / ERA5) — `docs/refs/realearth_metrics_2026-09-06_L6.md`
+### Climatology, L6, 3 yr (aeros / SpeedyWeather / ERA5) — `docs/refs/realearth_metrics_2026-09-06_L6_clouds.md`
 
-precip = evap 2.2 / 3.3 / 2.9 mm/day · TOA +3.2 W/m² in yr 3 (−3.7 in yr 2: ±3 interannual)
-· lowest-level T 283.5 / 278 / 287.5 K · max [u] 52 / 63 / 34 m/s · DJF NH Z500* RMS
-85 / 68 / 76 m · NH-land t2m Jul−Jan 31.9 / 29 / 33.6 K · 2810 SYPD. Figures in
-`docs/figures/realearth_*.png`. Against L8 (`docs/refs/realearth_metrics_2026-09-05.md`):
-precip +0.2, lowest level 1.2 K colder, lid 226 vs 222 K, Z500* 85 vs 77 m (ERA5 76), +28%
-throughput. aeros' zonal temperature structure is closer to ERA5 than SpeedyWeather's
-(SW is cold aloft with a 235 K lid).
+(after the mixed-phase saturation and the coupled cloud calibration, evening 2026-09-06)
+precip = evap **2.7** / 3.3 / 2.9 mm/day · TOA +1.3 W/m² (yr-3 mean) · absorbed SW 231 (ERA5 243),
+OLR 230 (242), CRE SW −57 / LW +31 (ERA5 −46 / +22), cloud cover 0.52 (0.63) · lowest-level T
+283.3 / 278 / 287.5 K · max [u] 57 / 63 / 34 m/s · DJF NH Z500* RMS **93** / 68 / 76 m · NH-land
+t2m Jul−Jan **36.9** / 29 / 33.6 K · 2830 SYPD. Figures in `docs/figures/realearth_*.png`.
+Before the cloud retune (mixed phase only): P 2.2, Z500* 68.5, t2m amplitude 29.8 — the
+brighter planet (LH 79 vs 59 W/m²) over-drives the stationary wave and the land seasonal
+cycle; the land calibration was already flagged void. Earlier L6 (liquid, old clouds):
+`docs/refs/realearth_metrics_2026-09-06_L6.md` (P 2.2, Z500* 85, t2m 31.9); L8:
+`..._2026-09-05.md`. aeros' zonal temperature structure is closer to ERA5 than
+SpeedyWeather's (SW is cold aloft with a 235 K lid).
 
 **Known deficits, in the order to attack them:**
 1. **Saturated upper troposphere / lid** (RH ~100% above 200 hPa; ERA5 30–50%, SW dry at its
@@ -312,6 +316,29 @@ one change at a time; "lid" = tropical (|lat|<15) top-layer T / q (ERA5 layer me
 - SW-cloud fix (`cld_rhc_top=1`) brings the CRE to −59/+35 (ERA5 −46/+22) and P to 2.64 but leaves
   TOA at +17 W/m² (albedo was tuned against the old clouds) — a retune is a 4-knob / 3-target job.
 - Polar-cap precipitation is NOT a deficit at L6/L8 (see the morning entry).
+
+**Update 2026-09-06 (night): mixed-phase saturation and the coupled cloud calibration.**
+- **Mixed-phase saturation** (577b9ca): `aeros_qsat` blends liquid Tetens (≥ 0 °C) and ice Tetens
+  (≤ −23 °C) with the IFS quadratic weight; `aeros_latent(T)` returns the matching L_v→L_s and is
+  used by condensation, convection (per-layer L held through a step, so the Betts–Miller /
+  Frierson / Manabe energy closures stay exact; the Frierson shallow branch now shifts T_ref by
+  the latent heat of the redistributed water), the surface latent heat flux (L_s over ice/snow)
+  and the diagnostics. RH in the monthly file is now the ERA5 convention. Effect alone: lid water
+  −15%, P 2.2, Z500* 68.5 m, t2m amplitude 29.8 K.
+- **The energy-budget report is a time mean** (aed113e) — the snapshot at the Dec-31 report
+  date had SWin 352 (perihelion) and a ±10 W/m² noise on the net.
+- **Cloud calibration** (this commit): the clear-sky budget was already ERA5's (absorbed 288 / 289,
+  OLR 262 / 264), so the whole dim-planet excess was the cloud effect. The LW CRE is set by the
+  lid layer's cloud FRACTION, not its ice content: the 0–250 hPa layer is ~13 km deep, so any
+  ice makes it black at 231 K under 65% cover (iwc/4 → LW +61). Sweep R1–R12 (`logs/cld_R*.log`):
+  `cld_rhc_top = 1.07` (threshold ≈ 1 in the lid, 0.87 at 365 hPa, unchanged below), `cld_lwc
+  0.020e-3`, `cld_iwc 0.014e-3` → CRE −56/+31, cover 0.52, net +1.6 with no albedo change,
+  P 2.70, LH 79 W/m². The LW floor of ~+30 with no lid cloud is the mid-level layers' geometry.
+- **Cost:** Z500* 93 m (ERA5 76) and NH-land t2m amplitude 36.9 K (33.6): the stronger
+  hydrological cycle over-drives both. Next: the land calibration (already void), and the
+  stationary wave (orographic + thermal forcing at T21).
+- The tropical lid is unchanged (225 K top-level mean; the mechanism entry above stands).
+
 
 
 

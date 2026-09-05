@@ -77,12 +77,19 @@
     ! to spin up a runaway near-equatorial jet).
     ! Diagnostic RH-based cloud scheme (l_rad_clouds, l_cloud_prog = .false.):
     ! critical-RH endpoints at the surface / model top (Sundqvist fraction) and
-    ! in-cloud liquid / ice water contents [kg m-3]. Defaults = the ERA5-column
-    ! calibration (docs/m2_results.md section 19); an endpoint of 1.0 = no cloud.
+    ! in-cloud liquid / ice water contents [kg m-3]. Calibrated 2026-09-06 on the
+    ! coupled L6 real-Earth run against ERA5's TOA budget: rhc_top above 1 puts
+    ! the lid layer's threshold at ~1 (that layer, 0-250 hPa, sits at RH 90% by
+    ! construction and its "cloud" was a black 231 K deck under 65% cover: CRE
+    ! -113/+67 W/m2 vs ERA5 -46/+22). With these: CRE -56/+31, cover 0.52
+    ! (ERA5 0.63), net TOA +2 with the clear-sky budget already at ERA5's
+    ! (absorbed 288/289, OLR 261/264), P 2.7 mm/day. The module's own defaults
+    ! (0.52/0.35, 0.017/0.018) are the offline ERA5-column calibration
+    ! (docs/m2_results.md section 19) and stay for validate_era5.
     cld_rhc_sfc      = 0.52
-    cld_rhc_top      = 0.35
-    cld_lwc          = 0.017e-3
-    cld_iwc          = 0.018e-3
+    cld_rhc_top      = 1.07
+    cld_lwc          = 0.020e-3
+    cld_iwc          = 0.014e-3
     l_cloud_prog     = .false.
     cloud_rhc_sfc    = 0.40
     cloud_rhc_top    = 0.60
