@@ -1,6 +1,110 @@
 # M2 handoff — where to pick up
 
-## ►► 2026-09-05: the time integration was the speed AND stability problem — fixed
+## ►► NEXT SESSION (written 2026-09-06): state, performance, recipe, and what to do
+
+### Where the model is
+
+All on `main` (last commits 59657fa, 90e9408, 63c7c4e), 26/26 tests, built with
+`make all openmp=1 && make rce-long openmp=1`. The production configuration is the
+real-Earth T21 run: ERA5 orography, ERA5 land-sea mask with the bucket land + snow albedo,
+prescribed 2D seasonal ERA5 SST, seasonal insolation, ecCKD radiation with diagnostic clouds,
+Frierson SBM convection, SpeedyWeather-style condensation. **Namelist:**
+`mwm/D_realearth/aeros_realearth_T21L8.nml` (only physical keys; every numerical/core knob
+comes from `input/rce_defaults.nml`, which now IS the production recipe).
+
+Since the 2026-07-30 handoff the integration and the coupling were rebuilt (details in the
+log sections below). What is different and load-bearing:
+
+| item | now | was |
+|---|---|---|
+| time scheme | semi-implicit Lorenz 4-cycle (`time_scheme="ncycle"`), no time filter | RAW-filtered leapfrog |
+| physics coupling | increments on the one time chain; surface fluxes + vdiff implicit on the stepped state | forward-split onto n+1 (**half rate**, a 2Δt computational mode) |
+| tracer transport | FV tracer mass divided by the spectral Δp(n+1); water conserved to ~1% of P | divided by the FV Δp (**created ~30% of the precipitation**) |
+| surface exchange | bulk-Richardson log-law coefficient per point (SW/Frierson 2006); SW surface wind (0.95 slowdown + 5 m/s gust) | fixed 1.5e-3, 1 m/s wind floor |
+| speed-limit drag | quadratic above 70 m/s (SW's default is 80) | none |
+| dynamical core | ∇⁸/4 h, divergence ∇⁸→∇⁴ above σ=0.2 on 1 h, α=1, no sponge — as defaults | opt-in |
+| vertical grid | **L8** default (stretched hybrid; L12 a namelist choice) | L12 |
+| dt | **3600 s** at T21 | 900 s |
+| monthly climatology | grid diagnostics refreshed at each sample; + precip2d, z500, vlow, evap, shf | stale (state of the last report) |
+
+**Every number in this file older than 2026-09-05 (RCE tuning, land amplitudes, seasonal
+validation, the SpeedyWeather omega comparison) was produced with half-rate physics, a
+water-creating transport and stale monthly sampling. Treat them as history, not baselines.**
+
+### Performance (Apple M5, 10 threads, real-Earth T21, dt = 3600, 2-yr runs with monthly sampling)
+
+| levels | SYPD | comment |
+|---|---|---|
+| L4 | 3650 | stable; harness metrics as good as L8 |
+| L5 | 3250 | |
+| L6 | 2860 | **to become the default next session** |
+| L8 | 2190 | current default; the 3-yr climatology below |
+| L12 | 1870 | previous default |
+| SpeedyWeather T21L8 default | 1040 (1360 without the diagnostic callback) | leapfrog, dt 3600 |
+
+Cost is close to linear in levels with a fixed overhead (transforms and physics are both
+per level); aeros is ~2.5× faster than SpeedyWeather per step. L20 blew up at day 354 at
+dt=3600 (not investigated). SpeedyWeather's 8 levels are SPEEDY's (Molteni 2003).
+
+### Climatology, L8, 3 yr (aeros / SpeedyWeather / ERA5) — `docs/refs/realearth_metrics_2026-09-05.md`
+
+precip = evap 2.0 / 3.3 / 2.9 mm/day · TOA −0.2 W/m² · lowest-level T 284.7 / 278 / 287.5 K
+· max [u] 56 / 63 / 34 m/s · DJF NH Z500* RMS 77 / 68 / 76 m · NH-land t2m Jul−Jan
+32.5 / 29 / 33.6 K. Figures in `docs/figures/realearth_*.png`. aeros' zonal temperature
+structure is closer to ERA5 than SpeedyWeather's (SW is cold aloft with a 235 K lid).
+
+**Known deficits, in the order to attack them:**
+1. **Saturated upper troposphere / lid** (RH ~100% above 200 hPa; ERA5 30–50%, SW dry at its
+   top). Establish the mechanism first: the FV transport carries q into the cold lid, and the
+   condensation there (rh_crit·q_sat with a tiny q_sat) may be removing next to nothing
+   per step, or rain re-evaporating aloft, or the σ-coordinate vertical flux at k=1. Compare
+   with SW's `rh` at its top level in the harness output; the per-operator water tally
+   (`l_diag`) can be extended per level.
+2. **Spurious polar precipitation** (Antarctic ~4 mm/day in DJF, Arctic in JJA; ERA5 < 0.5).
+   The prescribed SST over the polar ocean is the 271 K freeze floor with no sea ice, so cold
+   air over "open water" evaporates and condenses. Sea ice (`l_seaice`, needs `ocean_mode=1`)
+   or an ice-concentration mask on the ocean flux (ERA5 `siconc` is on disk) is the physical
+   fix; the lowest-level cold trap may add to it.
+3. **Evaporation ~30% low.** Near-surface wind speed 5.2 m/s vs ERA5 ~7 m/s at 10 m: the
+   zonal means match ERA5, the transient eddies are weak (T21), and the lowest layer sits at
+   RH 80%. Not a surface-scheme problem any more; a T31 harness run (both models) would show
+   what resolution buys.
+4. Upper jets ~1.6× ERA5 in both models.
+
+### Recipe
+
+```bash
+make all openmp=1 && make rce-long openmp=1
+# the 26 tests
+for t in libaeros/bin/test_*.x; do OMP_NUM_THREADS=5 $t > logs/suite_$(basename $t .x).log 2>&1 || echo FAIL $t; done
+# aeros 3-yr real-Earth climatology (2-yr spin-up + 1 yr monthly), ~2 min
+OMP_NUM_THREADS=10 libaeros/bin/rce_long.x mwm/D_realearth/aeros_realearth_T21L8.nml
+# SpeedyWeather yardstick (~3.5 min), then the comparison (figures + metrics table)
+julia --project=mwm/D_realearth -t 10 mwm/D_realearth/sw_realearth.jl 730 1 21 8
+julia mwm/D_realearth/compare_realearth.jl mwm/D_realearth/output/aeros_realearth_T21L8.nc
+```
+
+The `rce_long` report prints a `TOA:` and a `WATER:` line every `print_every` steps; the
+water-budget residual must stay ~0.01 mm/day (it was +0.6–0.9 before the transport fix).
+With `l_diag = .true.` it adds a per-operator water tally and per-term heating tables (the
+`surf` column is now zero: the surface fluxes live inside `vdiff`). `nlev`, `dt`,
+`drag_vmax`, `gust_speed`, `z0_ocean/z0_land`, `c_h/c_e/c_d` (≤ 0 = log-law), `cond_time_scale`,
+`conv_tau`, `time_scheme`, `ncycle_variant` are `&rce` keys with defaults in
+`input/rce_defaults.nml`. Gotchas: `make all` does not build `rce_long` (separate target);
+`rce_long` reports no wall time (use `/usr/bin/time -p`); the monthly file is written only
+at a clean end (not on a NaN).
+
+### First actions next session
+
+1. Make **L6** the default: `input/aeros_defaults.nml` (`nlev`), the `nlev` declaration in
+   `drivers/rce_long.f90`, a new `mwm/D_realearth/aeros_realearth_T21L6.nml`; rerun the
+   climatology and `compare_realearth.jl`; commit with the numbers.
+2. Deficit 1 (upper-troposphere moisture), then deficit 2 (polar precipitation).
+3. Re-do the land t2m calibration through the harness afterwards (the old numbers are void).
+
+---
+
+## Log 2026-09-05/06 — the time integration was the speed AND stability problem (detail)
 
 **Two structural defects in the physics coupling, both gone (branch `fix/physics-coupling`).**
 
