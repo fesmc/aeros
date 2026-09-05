@@ -121,7 +121,7 @@
     ncycle_variant   = "A"
     ! Speed-limit drag (SpeedyWeather's default SpeedLimitDrag): quadratic drag
     ! on the wind speed above drag_vmax [m/s], coefficient drag_coef [1/m]; 0 = off.
-    drag_vmax        = 80.0
+    drag_vmax        = 70.0
     drag_coef        = 4.0e-7
     ! Surface wind the bulk fluxes and the momentum drag see (SpeedyWeather's
     ! SurfaceCondition): sqrt((wind_slowdown*|V_low|)^2 + gust_speed^2).

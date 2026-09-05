@@ -59,7 +59,7 @@ program rce_long
     ! only once the elapsed model day exceeds this, so a single continuous run
     ! can spin the slab up and then sample a clean climatology over its tail.
     real(wp) :: mon_spinup_days = 0.0_wp
-    integer  :: trunc = 21, nlev = 12, nstep = 4800, ndiff = 8
+    integer  :: trunc = 21, nlev = 8, nstep = 4800, ndiff = 8
     integer  :: print_every = 96          ! ~2 model days at dt=1800
     real(wp) :: dt = 3600.0_wp, tau_diff = 4.0_wp
     real(wp) :: tau_diff_div = 0.0_wp     ! divergence-only diffusion timescale [h]; 0 => = tau_diff
@@ -72,7 +72,7 @@ program rce_long
     integer           :: ncycle = 4
     character(len=8)  :: ncycle_variant = "A"
     ! Speed-limit drag (aeros_timestep header): SpeedyWeather's default; drag_coef = 0 off.
-    real(wp) :: drag_vmax = 80.0_wp, drag_coef = 4.0e-7_wp
+    real(wp) :: drag_vmax = 70.0_wp, drag_coef = 4.0e-7_wp
     real(wp) :: conv_tau = 14400.0_wp, c_h = -1.0_wp, c_e = -1.0_wp   ! <= 0: bulk-Richardson log-law
     real(wp) :: z0_ocean = 1.0e-4_wp, z0_land = 0.5_wp                ! roughness lengths [m]
     real(wp) :: gust_speed = 5.0_wp, wind_slowdown = 0.95_wp   ! surface wind for the fluxes (SW)

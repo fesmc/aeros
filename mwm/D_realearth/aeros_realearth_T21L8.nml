@@ -1,8 +1,8 @@
 &rce
     trunc = 21
-    nlev = 12
-    nstep = 35040
-    dt = 2700.0
+    nlev = 8
+    nstep = 26280
+    dt = 3600.0
     conv_tau = 14400.0
     u_min = 1.0
     print_every = 8760
@@ -31,7 +31,7 @@
     c_soil = 2.0e6
     snow_albedo = 0.6
     snow_dt = 5.0
-    monthly_out = "mwm/D_realearth/output/aeros_realearth_T21L12.nc"
+    monthly_out = "mwm/D_realearth/output/aeros_realearth_T21L8.nc"
     mon_spinup_days = 730.0
     l_topography = .true.
     topo_file = "/Users/alrobi001/data/era5/era5_orography.nc"

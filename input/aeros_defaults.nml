@@ -45,7 +45,7 @@
     ! below 850 hPa. Fix this before tuning anything -- level count moves the
     ! jet latitude, and therefore the storm track, and therefore ice-sheet
     ! precipitation.
-    nlev     = 16
+    nlev     = 8
 
     ! Dynamics timestep [s]. ~30 min at T42 (section 4).
     !
@@ -71,7 +71,7 @@
     ncycle_variant = "A"
     ! Speed-limit drag (SpeedyWeather's default SpeedLimitDrag): quadratic drag
     ! on the wind speed above drag_vmax [m/s], coefficient drag_coef [1/m]; 0 = off.
-    drag_vmax      = 80.0
+    drag_vmax      = 70.0
     drag_coef      = 4.0e-7
 
     ! Time filter. Williams (2009) RAW: nu is the classical Robert-Asselin

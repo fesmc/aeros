@@ -324,7 +324,7 @@ module aeros_timestep
         logical  :: semi_implicit = .TRUE.
 
         ! Speed-limit drag (module header). drag_coef = 0 disables it.
-        real(wp) :: drag_vmax = 80.0_wp
+        real(wp) :: drag_vmax = 70.0_wp
         real(wp) :: drag_coef = 4.0e-7_wp
 
         ! Time scheme (module header, "The Lorenz N-cycle").
