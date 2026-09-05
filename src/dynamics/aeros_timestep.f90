@@ -31,10 +31,10 @@ module aeros_timestep
     ! === Physics coupling ====================================================
     !
     ! Every column-physics term adds its temperature INCREMENT over one dt to
-    ! wrk%dt_phys on the grid; step 1b divides by dt and adds the RATE to the
-    ! dynamical heating dtdt, so it is integrated over h with the dynamics
-    ! (SPEEDY / SpeedyWeather coupling) and the divergent circulation responds
-    ! to the heating within the step. Humidity is a gridpoint field with a
+    ! wrk%dt_phys on the grid. Leapfrog: step 1b divides by dt and adds the
+    ! RATE to the dynamical heating dtdt, so it is integrated over h with the
+    ! dynamics (SPEEDY / SpeedyWeather coupling). N-cycle: the increment is
+    ! added to the stepped state (advance_ncycle). Humidity is a gridpoint field with a
     ! single time level advanced forward by dt each step, so the drying and the
     ! heating deposit at the same mean rate.
     !
@@ -67,9 +67,12 @@ module aeros_timestep
     ! and is 4th order for N = 4. Every substep advances the clock by dt, so
     ! the cost per model-day equals the leapfrog's. What it buys: ONE time
     ! chain. The gridpoint humidity is forward-in-time on that same chain and
-    ! the physics rates are evaluated and applied on it, so there is no
-    ! cross-chain physics (see "Physics coupling"), no computational mode and
-    ! no time filter -- eps_filter/raw_alpha are ignored. The advective
+    ! the physics increment dt*P(X) is added to X_new after the solve (process
+    ! split, NOT through G: with weights up to N the accumulator would
+    ! extrapolate a relaxation term and the column physics oscillates over the
+    ! sub-cycle at large dt), so there is no cross-chain physics (see "Physics
+    ! coupling"), no computational mode and no time filter -- eps_filter/
+    ! raw_alpha are ignored. The advective
     ! stability limit is ~0.7 of the leapfrog's per evaluation (Hotta 2016,
     ! Fig. 2), which for aeros is a smaller price than the dt the physics
     ! coupling forced on the leapfrog. Restart carries G (`gacc_*`) and the
@@ -1103,8 +1106,12 @@ contains
         !
         ! Guarded on the same physics-enabled condition that zeroed dt_phys, so
         ! the pure-dynamics / Held-Suarez path leaves dtdt untouched, bit-exact.
-        if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled &
-            .or. ts%cnd%enabled) &
+        ! Leapfrog only. The N-cycle applies the increment to the stepped state
+        ! instead (advance_ncycle): its weights (up to N) would otherwise
+        ! extrapolate the state-dependent physics and drive a sub-cycle
+        ! oscillation of the column physics at large dt.
+        if (ts%scheme == SCHEME_LEAPFROG .and. (ts%surf%enabled .or. ts%cnv%enabled &
+            .or. ts%rad%enabled .or. ts%cnd%enabled)) &
             ts%wrk%dtdt = ts%wrk%dtdt + ts%wrk%dt_phys/ts%dt
 
         ! Diagnostic prescribed heating, on the same in-solve seam. A controlled
@@ -1246,6 +1253,7 @@ contains
 
         real(wp) :: w, w1
         integer  :: k, lm
+        complex(wp_sh) :: tlm(s%nlm)
 
         w  = ncycle_weight(ts%nvariant, mod(ts%nstep, ts%ncycle), ts%ncycle, &
                             ts%nstep/ts%ncycle)
@@ -1292,6 +1300,21 @@ contains
             end do
             do lm = 1, s%nlm
                 ts%new%lnps(lm) = now%spec%lnps(lm) + h*ts%tnd%lnps(lm)
+            end do
+        end if
+
+        ! Column physics, process-split: the increment dt*P diagnosed on X goes
+        ! onto X_new directly, one analysis per level -- full rate on the one
+        ! time chain, and kept out of the weighted accumulator (whose weights
+        ! reach N and would extrapolate a relaxation term). The gridpoint
+        ! humidity got its part of the same increment in place, so drying and
+        ! heating stay on one discretization.
+        if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled .or. ts%cnd%enabled) then
+            do k = 1, vg%nlev
+                call aeros_sht_analysis(s, ts%wrk%dt_phys(:,:,k), tlm)
+                do lm = 1, s%nlm
+                    ts%new%temp(lm,k) = ts%new%temp(lm,k) + tlm(lm)
+                end do
             end do
         end if
 
