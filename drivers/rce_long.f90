@@ -28,7 +28,7 @@ program rce_long
     use aeros_grid
     use aeros_state
     use aeros_vertical
-    use aeros_condensation, only : aeros_qsat
+    use aeros_condensation, only : aeros_qsat, aeros_latent
     use aeros_cloud,    only : aeros_cloud_diagnose, aeros_cloud_configure
     use aeros_convection, only : SCHEME_SBM, SCHEME_SBM_FRIERSON, SCHEME_MANABE
     use aeros_timestep
@@ -1448,9 +1448,9 @@ contains
         ! traps. RH shows whether the boundary layer is drying out of buoyancy.
         integer, intent(in) :: jstar
         real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev), phi(nlev)
-        real(wp) :: tzm(nlev), qzm(nlev), qs, dqs, hb, hstar, rh, psj, cp, lv
+        real(wp) :: tzm(nlev), qzm(nlev), qs, dqs, hb, hstar, rh, psj, cp
         integer  :: k
-        cp = real(cp_d, wp); lv = real(L_v, wp)
+        cp = real(cp_d, wp)
         psj = sum(now%ps(:,jstar))/real(grd%nlon, wp)
         call aeros_vgrid_pressure(vg, psj, phalf, pfull, dpc)
         do k = 1, nlev
@@ -1461,14 +1461,14 @@ contains
         do k = nlev-1, 1, -1
             phi(k) = phi(k+1) + R_d*0.5_wp*(tzm(k)+tzm(k+1))*log(pfull(k+1)/pfull(k))
         end do
-        hb = cp*tzm(nlev) + phi(nlev) + lv*qzm(nlev)
+        hb = cp*tzm(nlev) + phi(nlev) + aeros_latent(tzm(nlev))*qzm(nlev)
         write(*,"(a,f8.1,a)") "   BL parcel h_b = ", hb/1000.0_wp, &
             " kJ/kg;  buoyancy hb-h*_env (>0 = convecting band):"
         write(*,"(a)") "   lev   RH[%]   h*_env[kJ/kg]   hb-h*[kJ/kg]"
         do k = 1, nlev
             call aeros_qsat(tzm(k), pfull(k), qs, dqs)
             rh = qzm(k)/max(qs, 1.0e-12_wp)*100.0_wp
-            hstar = cp*tzm(k) + phi(k) + lv*qs
+            hstar = cp*tzm(k) + phi(k) + aeros_latent(tzm(k))*qs
             write(*,"(i6,f8.1,f15.1,f14.2)") k, rh, hstar/1000.0_wp, (hb-hstar)/1000.0_wp
         end do
         return

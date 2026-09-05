@@ -3,8 +3,11 @@ module aeros_condensation
     !
     ! Where the air is supersaturated, the excess vapour condenses, the latent
     ! heat warms the air, and the condensate falls out as precipitation. No cloud
-    ! water is stored and there is no ice phase (condensate is liquid, latent heat
-    ! L_v, everywhere). Condensation removes vapour down to rh_crit*q_sat (default
+    ! water is stored. Saturation is MIXED-PHASE (aeros_qsat: over liquid at and
+    ! above 0 C, over ice at and below -23 C, IFS/ERA5's quadratic blend between)
+    ! and the latent heat follows the same blend (aeros_latent: L_v -> L_s), so the
+    ! cold upper troposphere condenses toward ice saturation and releases the heat
+    ! of sublimation. Condensation removes vapour down to rh_crit*q_sat (default
     ! 0.95, not full saturation), and the falling precipitation RE-EVAPORATES into
     ! sub-saturated layers below (moistening + latent cooling) before what remains
     ! reaches the surface -- both following SpeedyWeather's ImplicitCondensation,
@@ -58,7 +61,7 @@ module aeros_condensation
     ! the same. time_scale = 1 recovers the exact one-step adjustment (what
     ! tests/test_condensation checks the budgets on).
 
-    use aeros_defs,     only : dp, wp, io_unit_err, R_d, R_v, cp_d, grav, L_v, &
+    use aeros_defs,     only : dp, wp, io_unit_err, R_d, R_v, cp_d, grav, L_v, L_s, &
                                 aeros_grid_class
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure
 
@@ -70,11 +73,18 @@ module aeros_condensation
 
     ! Tetens (1930) saturation vapour pressure over liquid water [Pa]:
     !   e_s(T) = ES0 exp( ATET (T - T_TET) / (T - BTET) )
-    ! with the derivative de_s/dT = e_s ATET (T_TET - BTET) / (T - BTET)^2.
+    ! with the derivative de_s/dT = e_s ATET (T_TET - BTET) / (T - BTET)^2;
+    ! over ice the IFS Tetens form e_i = ESI0 exp( AICE (T - T_TET) / (T - BICE) ).
+    ! Phase blend (IFS/ERA5 convention): liquid fraction alpha = 1 at T >= T_TET,
+    ! 0 at T <= T_ICEP, alpha = ((T - T_ICEP)/(T_TET - T_ICEP))^2 between.
     real(wp), parameter :: ES0   = 610.78_wp
     real(wp), parameter :: ATET  = 17.27_wp
     real(wp), parameter :: T_TET = 273.16_wp
     real(wp), parameter :: BTET  = 35.86_wp
+    real(wp), parameter :: ESI0  = 611.21_wp
+    real(wp), parameter :: AICE  = 22.587_wp
+    real(wp), parameter :: BICE  = -0.7_wp
+    real(wp), parameter :: T_ICEP = 250.16_wp       ! all ice at and below (-23 C)
     real(wp), parameter :: EPS   = R_d/R_v          ! ~0.622
 
     type aeros_cond_class
@@ -118,7 +128,9 @@ module aeros_condensation
     public :: aeros_condensation_end
     public :: aeros_condensation_apply
     public :: aeros_condensation_report
-    public :: aeros_qsat            ! exposed for the test
+    public :: aeros_qsat            ! mixed-phase saturation (shared by all physics)
+    public :: aeros_latent          ! matching latent heat L(T) = alpha L_v + (1-alpha) L_s
+    public :: aeros_liquid_fraction ! the phase blend alpha(T)
 
 contains
 
@@ -234,10 +246,8 @@ contains
 
         if (.not. cnd%enabled) return
 
-        hcp = real(L_v, wp)/real(cp_d, wp)
-
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,k,it,phalf,pfull,dpc,qs,dqsdt,gam,dqc,pfall,qthr,frac,dqe)
+        !$omp   private(i,j,k,it,phalf,pfull,dpc,qs,dqsdt,gam,dqc,pfall,hcp,qthr,frac,dqe)
         do j = 1, cnd%nlat
             do i = 1, cnd%nlon
                 call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
@@ -249,6 +259,10 @@ contains
                 pfall = 0.0_wp
 
                 do k = 1, vg%nlev
+                    ! latent heat of the layer's phase (L_v warm, L_s cold), per K of
+                    ! humidity change; held at the pre-adjustment temperature so the
+                    ! heat equals L times the water that leaves, exactly
+                    hcp = aeros_latent(t_g(i,j,k))/real(cp_d, wp)
                     call aeros_qsat(t_g(i,j,k), pfull(k), qs, dqsdt)
                     qthr = cnd%rh_crit*qs
 
@@ -307,9 +321,39 @@ contains
 
     end subroutine aeros_condensation_apply
 
+    pure real(wp) function aeros_liquid_fraction(t) result(alpha)
+        ! Liquid fraction of the saturation blend: 1 at/above 0 C, 0 at/below
+        ! -23 C, quadratic between (IFS/ERA5).
+        implicit none
+        real(wp), intent(in) :: t
+        real(wp) :: x
+        if (t >= T_TET) then
+            alpha = 1.0_wp
+        else if (t <= T_ICEP) then
+            alpha = 0.0_wp
+        else
+            x = (t - T_ICEP)/(T_TET - T_ICEP)
+            alpha = x*x
+        end if
+        return
+    end function aeros_liquid_fraction
+
+    pure real(wp) function aeros_latent(t) result(lat)
+        ! Latent heat [J kg-1] matching aeros_qsat's phase blend: vaporization
+        ! for the liquid part, sublimation for the ice part.
+        implicit none
+        real(wp), intent(in) :: t
+        real(wp) :: alpha
+        alpha = aeros_liquid_fraction(t)
+        lat = alpha*real(L_v, wp) + (1.0_wp - alpha)*real(L_s, wp)
+        return
+    end function aeros_latent
+
     subroutine aeros_qsat(t, p, qs, dqsdt)
         ! Saturation specific humidity [kg kg-1] and its temperature derivative
-        ! [kg kg-1 K-1], over liquid water (Tetens).
+        ! [kg kg-1 K-1], mixed-phase: e_s = alpha e_liq + (1 - alpha) e_ice with
+        ! the blend alpha(T) of aeros_liquid_fraction (pure liquid Tetens at and
+        ! above 0 C, so warm results are unchanged).
         !
         !   q_sat = eps e_s / (p - (1 - eps) e_s)
         !
@@ -322,10 +366,21 @@ contains
         real(wp), intent(in)  :: t, p
         real(wp), intent(out) :: qs, dqsdt
 
-        real(wp) :: es, desdt, den
+        real(wp) :: es, desdt, den, el, deldt, ei, deidt, alpha, daldt
 
-        es    = ES0*exp(ATET*(t - T_TET)/(t - BTET))
-        desdt = es*ATET*(T_TET - BTET)/(t - BTET)**2
+        el    = ES0*exp(ATET*(t - T_TET)/(t - BTET))
+        deldt = el*ATET*(T_TET - BTET)/(t - BTET)**2
+        alpha = aeros_liquid_fraction(t)
+        if (alpha >= 1.0_wp) then
+            es = el; desdt = deldt
+        else
+            ei    = ESI0*exp(AICE*(t - T_TET)/(t - BICE))
+            deidt = ei*AICE*(T_TET - BICE)/(t - BICE)**2
+            daldt = 0.0_wp
+            if (alpha > 0.0_wp) daldt = 2.0_wp*(t - T_ICEP)/(T_TET - T_ICEP)**2
+            es    = alpha*el + (1.0_wp - alpha)*ei
+            desdt = alpha*deldt + (1.0_wp - alpha)*deidt + daldt*(el - ei)
+        end if
 
         den   = p - (1.0_wp - EPS)*es
         ! Guard the (very high, very warm) case where saturation vapour pressure

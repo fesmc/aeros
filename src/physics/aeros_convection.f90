@@ -98,7 +98,7 @@ module aeros_convection
     use aeros_defs,       only : dp, wp, io_unit_err, R_d, cp_d, grav, L_v, &
                                     kappa, p0, aeros_grid_class
     use aeros_vertical,   only : aeros_vgrid_class, aeros_vgrid_pressure
-    use aeros_condensation, only : aeros_qsat
+    use aeros_condensation, only : aeros_qsat, aeros_latent
 
     use nml,              only : nml_read
 
@@ -413,12 +413,17 @@ contains
         integer,  intent(in)    :: nlev
         real(wp), intent(in)    :: tau, rh_ref, dt
 
-        real(wp) :: phi(nlev), tref(nlev), qref(nlev), hstar(nlev)
-        real(wp) :: hb, qs, dqs, cp, lv, a
-        real(wp) :: sumdp, pq, pt, shift, ct
+        real(wp) :: phi(nlev), tref(nlev), qref(nlev), hstar(nlev), lvk(nlev)
+        real(wp) :: hb, qs, dqs, cp, a
+        real(wp) :: sumdp, pq, lpq, pt, shift, ct
         integer  :: k, ktop, kb
 
-        cp = real(cp_d, wp); lv = real(L_v, wp)
+        ! latent heat per layer at the pre-adjustment temperature (mixed phase),
+        ! held fixed through the step so the energy closure is exact
+        cp = real(cp_d, wp)
+        do k = 1, nlev
+            lvk(k) = aeros_latent(t(k))
+        end do
 
         ! Geopotential relative to the surface, from the environment profile.
         phi(nlev) = 0.0_wp
@@ -428,10 +433,10 @@ contains
 
         ! Boundary-layer MSE (actual humidity) anchors the reference adiabat, and
         ! the saturated environmental MSE sets the buoyancy of a lifted parcel.
-        hb = cp*t(nlev) + phi(nlev) + lv*q(nlev)
+        hb = cp*t(nlev) + phi(nlev) + lvk(nlev)*q(nlev)
         do k = 1, nlev
             call aeros_qsat(t(k), pfull(k), qs, dqs)
-            hstar(k) = cp*t(k) + phi(k) + lv*qs
+            hstar(k) = cp*t(k) + phi(k) + lvk(k)*qs
         end do
 
         ! Convecting band: the first contiguous layer, scanning up from the
@@ -465,12 +470,13 @@ contains
             qref(k) = rh_ref*qs
         end do
 
-        ! Column integrals over the band.
-        sumdp = 0.0_wp; pq = 0.0_wp; pt = 0.0_wp
+        ! Column integrals over the band (lpq: the latent heat of the water).
+        sumdp = 0.0_wp; pq = 0.0_wp; lpq = 0.0_wp; pt = 0.0_wp
         do k = ktop, kb
             sumdp = sumdp + dp(k)
-            pq    = pq + (q(k)    - qref(k))*dp(k)
-            pt    = pt + cp*(tref(k) - t(k))*dp(k)
+            pq    = pq  + (q(k)    - qref(k))*dp(k)
+            lpq   = lpq + lvk(k)*(q(k) - qref(k))*dp(k)
+            pt    = pt  + cp*(tref(k) - t(k))*dp(k)
         end do
 
         a = (dt/tau)/(1.0_wp + dt/tau)
@@ -478,7 +484,7 @@ contains
         if (pq > 0.0_wp) then
             ! Deep: shift T_ref so the heating balances L * precip exactly, then
             ! relax both temperature and humidity toward the reference.
-            shift = (lv*pq - pt)/(cp*sumdp)
+            shift = (lpq - pt)/(cp*sumdp)
             do k = ktop, kb
                 t(k) = t(k) + a*(tref(k) + shift - t(k))
                 q(k) = q(k) + a*(qref(k) - q(k))
@@ -540,11 +546,14 @@ contains
         real(wp), intent(in)    :: tau, rh_ref, dt
 
         real(wp) :: phi(nlev), tref(nlev), qref(nlev)
-        real(wp) :: hb, hstar, qs, dqs, cp, lv, a
+        real(wp) :: hb, hstar, qs, dqs, cp, a, lvk(nlev), lpq
         real(wp) :: sumdp, sumqref, pq, pt, shift, ct, fq
         integer  :: k, ktop
 
-        cp = real(cp_d, wp); lv = real(L_v, wp)
+        cp = real(cp_d, wp)
+        do k = 1, nlev
+            lvk(k) = aeros_latent(t(k))    ! per-layer latent heat, held through the step
+        end do
 
         ! Geopotential relative to the surface, from the environment profile.
         phi(nlev) = 0.0_wp
@@ -553,7 +562,7 @@ contains
         end do
 
         ! Boundary-layer parcel MSE (actual humidity) anchors the reference adiabat.
-        hb = cp*t(nlev) + phi(nlev) + lv*q(nlev)
+        hb = cp*t(nlev) + phi(nlev) + lvk(nlev)*q(nlev)
 
         ! Lift the surface parcel: the convecting layer is [ktop, nlev], ktop the
         ! level of zero buoyancy. Scan up from the surface and stop at the first
@@ -561,7 +570,7 @@ contains
         ktop = nlev
         do k = nlev - 1, 1, -1
             call aeros_qsat(t(k), pfull(k), qs, dqs)
-            hstar = cp*t(k) + phi(k) + lv*qs
+            hstar = cp*t(k) + phi(k) + lvk(k)*qs
             if (hb > hstar) then
                 ktop = k
             else
@@ -578,13 +587,14 @@ contains
             qref(k) = rh_ref*qs
         end do
 
-        ! Column integrals over the layer.
-        sumdp = 0.0_wp; sumqref = 0.0_wp; pq = 0.0_wp; pt = 0.0_wp
+        ! Column integrals over the layer (lpq: the latent heat of the water).
+        sumdp = 0.0_wp; sumqref = 0.0_wp; pq = 0.0_wp; lpq = 0.0_wp; pt = 0.0_wp
         do k = ktop, nlev
             sumdp   = sumdp   + dp(k)
             sumqref = sumqref + qref(k)*dp(k)
-            pq      = pq + (q(k)      - qref(k))*dp(k)
-            pt      = pt + cp*(tref(k) - t(k))*dp(k)
+            pq      = pq  + (q(k)      - qref(k))*dp(k)
+            lpq     = lpq + lvk(k)*(q(k) - qref(k))*dp(k)
+            pt      = pt  + cp*(tref(k) - t(k))*dp(k)
         end do
 
         ! Pt <= 0: the column is warmer than the reference adiabat on integral --
@@ -595,16 +605,23 @@ contains
 
         if (pq > 0.0_wp) then
             ! Deep: shift T_ref so the heating balances L * precip, relax T and q.
-            shift = (lv*pq - pt)/(cp*sumdp)
+            shift = (lpq - pt)/(cp*sumdp)
             do k = ktop, nlev
                 t(k) = t(k) + a*(tref(k) + shift - t(k))
                 q(k) = q(k) + a*(qref(k) - q(k))
             end do
         else
-            ! Shallow: rescale q_ref for zero net moisture change, shift T_ref for
-            ! zero net heating, relax both. No precipitation.
+            ! Shallow: rescale q_ref for zero net moisture change; shift T_ref so
+            ! the heating equals minus the latent heat of the redistributed water
+            ! (zero when L is uniform; with the mixed-phase L it is the
+            ! phase-change energy of moving vapour between warm and cold layers),
+            ! relax both. No precipitation, column water and MSE both conserved.
             fq = 1.0_wp + pq/max(sumqref, 1.0e-30_wp)
-            ct = pt/(cp*sumdp)
+            lpq = 0.0_wp
+            do k = ktop, nlev
+                lpq = lpq + lvk(k)*(fq*qref(k) - q(k))*dp(k)
+            end do
+            ct = (pt + lpq)/(cp*sumdp)
             do k = ktop, nlev
                 t(k) = t(k) + a*(tref(k) - ct - t(k))
                 q(k) = q(k) + a*(fq*qref(k) - q(k))
@@ -628,11 +645,12 @@ contains
         real(wp) :: qs, dqs, f, fp, cp, lv
         integer  :: it
 
-        cp = real(cp_d, wp); lv = real(L_v, wp)
+        cp = real(cp_d, wp)
 
         tsol = tguess
         do it = 1, 8
             call aeros_qsat(tsol, p, qs, dqs)
+            lv   = aeros_latent(tsol)          ! mixed-phase L at the iterate
             f    = cp*tsol + lv*qs - rhs
             fp   = cp + lv*dqs
             tsol = tsol - f/fp
@@ -651,10 +669,16 @@ contains
         real(wp), intent(in)    :: pfull(:), dp(:)
         integer,  intent(in)    :: nlev
 
-        real(wp) :: phi(nlev), theta(nlev)
+        real(wp) :: phi(nlev), theta(nlev), lvk(nlev)
         real(wp) :: qsk, qsk1, dqs, hstar_k, hstar_k1
         logical  :: changed, sat_k, sat_k1
         integer  :: k, sweep
+
+        ! mixed-phase latent heat per layer at the entry temperature, held through
+        ! all sweeps so the pairwise adjustments conserve one moist static energy
+        do k = 1, nlev
+            lvk(k) = aeros_latent(t(k))
+        end do
 
         do sweep = 1, MAXSWEEP
             changed = .FALSE.
@@ -685,10 +709,10 @@ contains
 
                 if (sat_k .and. sat_k1) then
                     ! Moist instability: saturated MSE decreasing upward.
-                    hstar_k  = cp_d*t(k)   + phi(k)   + L_v*qsk
-                    hstar_k1 = cp_d*t(k+1) + phi(k+1) + L_v*qsk1
+                    hstar_k  = cp_d*t(k)   + phi(k)   + lvk(k)*qsk
+                    hstar_k1 = cp_d*t(k+1) + phi(k+1) + lvk(k+1)*qsk1
                     if (hstar_k < hstar_k1 - 1.0e-6_wp) then
-                        call moist_pair(t, q, pfull, dp, phi(k) - phi(k+1), k)
+                        call moist_pair(t, q, pfull, dp, phi(k) - phi(k+1), k, lvk(k), lvk(k+1))
                         changed = .TRUE.
                     end if
                 else
@@ -789,7 +813,7 @@ contains
 
     end subroutine dry_pair
 
-    subroutine moist_pair(t, q, pfull, dp, dphi, k)
+    subroutine moist_pair(t, q, pfull, dp, dphi, k, lv1, lv2)
         ! Relax a moist-unstable saturated pair to a moist adiabat, conserving
         ! the moist static energy int (c_p T + L q) dp and holding both layers
         ! at saturation. Two unknowns (the new temperatures), two constraints,
@@ -807,13 +831,14 @@ contains
         real(wp), intent(inout) :: t(:), q(:)
         real(wp), intent(in)    :: pfull(:), dp(:), dphi
         integer,  intent(in)    :: k
+        real(wp), intent(in)    :: lv1, lv2     ! per-layer latent heat (caller holds it)
 
         real(wp) :: t1, t2, qs1, qs2, d1, d2
         real(wp) :: h0, rh, rn, j11, j12, j21, j22, det, det_t1, det_t2
-        real(wp) :: cp, lv, dp1, dp2
+        real(wp) :: cp, dp1, dp2
         integer  :: it
 
-        cp = real(cp_d, wp); lv = real(L_v, wp)
+        cp = real(cp_d, wp)
         dp1 = dp(k); dp2 = dp(k+1)
 
         t1 = t(k); t2 = t(k+1)
@@ -821,17 +846,17 @@ contains
         call aeros_qsat(t2, pfull(k+1), qs2, d2)
 
         ! Conserved moist static energy, from the pre-adjustment saturated state.
-        h0 = cp*(t1*dp1 + t2*dp2) + lv*(qs1*dp1 + qs2*dp2)
+        h0 = cp*(t1*dp1 + t2*dp2) + lv1*qs1*dp1 + lv2*qs2*dp2
 
         do it = 1, 6
             call aeros_qsat(t1, pfull(k),   qs1, d1)
             call aeros_qsat(t2, pfull(k+1), qs2, d2)
 
-            rh = cp*(t1*dp1 + t2*dp2) + lv*(qs1*dp1 + qs2*dp2) - h0
-            rn = (cp*t1 + lv*qs1) - (cp*t2 + lv*qs2) + dphi
+            rh = cp*(t1*dp1 + t2*dp2) + lv1*qs1*dp1 + lv2*qs2*dp2 - h0
+            rn = (cp*t1 + lv1*qs1) - (cp*t2 + lv2*qs2) + dphi
 
-            j11 = (cp + lv*d1)*dp1;   j12 = (cp + lv*d2)*dp2
-            j21 =  cp + lv*d1;        j22 = -(cp + lv*d2)
+            j11 = (cp + lv1*d1)*dp1;   j12 = (cp + lv2*d2)*dp2
+            j21 =  cp + lv1*d1;        j22 = -(cp + lv2*d2)
 
             det = j11*j22 - j12*j21
             if (abs(det) < 1.0e-30_wp) exit

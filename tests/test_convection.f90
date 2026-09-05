@@ -34,13 +34,14 @@ program test_convection
     use aeros_spectral
     use aeros_grid
     use aeros_vertical
-    use aeros_condensation, only : aeros_qsat
+    use aeros_condensation, only : aeros_qsat, aeros_latent
     use aeros_convection
 
     implicit none
 
     integer, parameter :: trunc = 21
     integer, parameter :: nlev  = 20
+    real(wp) :: tl0(nlev)   ! pre-adjustment T for the latent heat in col_mse
 
     type(aeros_sht_pool_class), target :: pool
     type(aeros_grid_class)  :: grd
@@ -103,15 +104,17 @@ program test_convection
 
 contains
 
-    real(dp) function col_mse(t, q, dpc) result(h)
+    real(dp) function col_mse(t, q, dpc, tl) result(h)
         ! int (c_p T + L q) dp, the conserved moist static energy (minus the
-        ! geopotential term, which the adjustment holds fixed).
+        ! geopotential term, which the adjustment holds fixed). L is the
+        ! mixed-phase latent heat at tl -- the PRE-adjustment temperature, which
+        ! the scheme holds fixed through a step (so this is its exact invariant).
         implicit none
-        real(wp), intent(in) :: t(:), q(:), dpc(:)
+        real(wp), intent(in) :: t(:), q(:), dpc(:), tl(:)
         integer :: k
         h = 0.0_dp
         do k = 1, nlev
-            h = h + (real(cp_d,dp)*real(t(k),dp) + real(L_v,dp)*real(q(k),dp))*real(dpc(k),dp)
+            h = h + (real(cp_d,dp)*real(t(k),dp) + real(aeros_latent(tl(k)),dp)*real(q(k),dp))*real(dpc(k),dp)
         end do
     end function col_mse
 
@@ -137,11 +140,12 @@ contains
         w = w/real(grav,dp)
     end function col_water
 
-    logical function moist_stable(t, q, pf, dpc) result(ok)
+    logical function moist_stable(t, q, pf, dpc, tl) result(ok)
         ! True if every saturated adjacent pair is moist-neutral or stable
-        ! (saturated MSE non-decreasing upward).
+        ! (saturated MSE non-decreasing upward), with the mixed-phase latent
+        ! heat at tl -- the entry temperature the scheme holds through its sweeps.
         implicit none
-        real(wp), intent(in) :: t(:), q(:), pf(:), dpc(:)
+        real(wp), intent(in) :: t(:), q(:), pf(:), dpc(:), tl(:)
         real(wp) :: phi(nlev), qsk, qsk1, d, hk, hk1
         integer  :: k
         ok = .TRUE.
@@ -153,8 +157,8 @@ contains
             call aeros_qsat(t(k),   pf(k),   qsk,  d)
             call aeros_qsat(t(k+1), pf(k+1), qsk1, d)
             if (q(k) >= 0.999_wp*qsk .and. q(k+1) >= 0.999_wp*qsk1) then
-                hk  = cp_d*t(k)   + phi(k)   + L_v*qsk
-                hk1 = cp_d*t(k+1) + phi(k+1) + L_v*qsk1
+                hk  = cp_d*t(k)   + phi(k)   + aeros_latent(tl(k))*qsk
+                hk1 = cp_d*t(k+1) + phi(k+1) + aeros_latent(tl(k+1))*qsk1
                 if (hk < hk1 - 100.0_wp) ok = .FALSE.
             end if
         end do
@@ -196,7 +200,7 @@ contains
         do k = 1, nlev
             tcol(k) = t_g(1,1,k); qcol(k) = qv(1,1,k)
         end do
-        h0 = col_mse(tcol, qcol, dpc)
+        tl0 = tcol; h0 = col_mse(tcol, qcol, dpc, tl0)
 
         call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
 
@@ -204,7 +208,7 @@ contains
             tcol(k) = t_g(1,1,k) + dt_phys(1,1,k)
             qcol(k) = qv(1,1,k)
         end do
-        h1   = col_mse(tcol, qcol, dpc)
+        h1   = col_mse(tcol, qcol, dpc, tl0)
         dmse = abs(h1 - h0)/abs(h0)
 
         water_removed = col_water(qv0(1,1,:), dpc) - col_water(qv(1,1,:), dpc)
@@ -293,7 +297,7 @@ contains
         do k = 1, nlev
             tcol(k) = t_g(1,1,k); qcol(k) = qv(1,1,k)
         end do
-        h0 = col_mse(tcol, qcol, dpc)
+        tl0 = tcol; h0 = col_mse(tcol, qcol, dpc, tl0)
 
         call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
 
@@ -301,7 +305,7 @@ contains
             tcol(k) = t_g(1,1,k) + dt_phys(1,1,k)
             qcol(k) = qv(1,1,k)
         end do
-        h1   = col_mse(tcol, qcol, dpc)
+        h1   = col_mse(tcol, qcol, dpc, tl0)
         dmse = abs(h1 - h0)/abs(h0)
 
         water_removed = col_water(qv0(1,1,:), dpc) - col_water(qv(1,1,:), dpc)
@@ -358,7 +362,7 @@ contains
         do k = 1, nlev
             tcol(k) = t_g(1,1,k); qcol(k) = qv(1,1,k)
         end do
-        h0 = col_mse(tcol, qcol, dpc)
+        tl0 = tcol; h0 = col_mse(tcol, qcol, dpc, tl0)
         w0 = col_water(qv0(1,1,:), dpc)
 
         call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
@@ -367,7 +371,7 @@ contains
             tcol(k) = t_g(1,1,k) + dt_phys(1,1,k)
             qcol(k) = qv(1,1,k)
         end do
-        h1    = col_mse(tcol, qcol, dpc)
+        h1    = col_mse(tcol, qcol, dpc, tl0)
         dmse  = abs(h1 - h0)/abs(h0)
         w1    = col_water(qv(1,1,:), dpc)
         dtmax = maxval(abs(dt_phys))
@@ -405,13 +409,13 @@ contains
         p_first = 0.0_dp; p_last = 0.0_dp
 
         do it = 1, nit
-            h0 = col_mse(t_g(1,1,:), qv(1,1,:), dpc)
+            tl0 = t_g(1,1,:); h0 = col_mse(t_g(1,1,:), qv(1,1,:), dpc, tl0)
             dt_phys = 0.0_wp
             call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
             do k = 1, nlev
                 t_g(:,:,k) = t_g(:,:,k) + dt_phys(:,:,k)
             end do
-            h1 = col_mse(t_g(1,1,:), qv(1,1,:), dpc)
+            h1 = col_mse(t_g(1,1,:), qv(1,1,:), dpc, tl0)
             worst_mse = max(worst_mse, abs(h1 - h0)/abs(h0))
             qmin = min(qmin, minval(qv))
             if (any(t_g /= t_g) .or. any(qv /= qv)) nan_seen = .TRUE.
@@ -472,7 +476,7 @@ contains
         do k = 1, nlev
             tcol(k) = t_g(1,1,k); qcol(k) = qv(1,1,k)
         end do
-        h0 = col_mse(tcol, qcol, dpc)
+        tl0 = tcol; h0 = col_mse(tcol, qcol, dpc, tl0)
 
         call aeros_convection_apply(cnv, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
 
@@ -480,13 +484,13 @@ contains
             tcol(k) = t_g(1,1,k) + dt_phys(1,1,k)
             qcol(k) = qv(1,1,k)
         end do
-        h1 = col_mse(tcol, qcol, dpc)
+        h1 = col_mse(tcol, qcol, dpc, tl0)
         worst_mse = abs(h1 - h0)/abs(h0)
 
         water_removed = col_water(qv0(1,1,:), dpc) - col_water(qv(1,1,:), dpc)
         precip_water  = real(cnv%precip(1,1),dp)*1800.0_dp
 
-        all_stable = moist_stable(tcol, qcol, pf, dpc)
+        all_stable = moist_stable(tcol, qcol, pf, dpc, tl0)
         qminv = minval(qv)
 
         write(*,"(a40,es12.3)")   "   |dMSE|/MSE                    ", worst_mse

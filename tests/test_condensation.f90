@@ -172,8 +172,6 @@ contains
         write(*,*) ""
         write(*,*) " -- a supersaturated column: budgets close"
 
-        hcp = real(L_v,wp)/real(cp_d,wp)
-
         call set_temperature(t_g)
         ! Load every level 15% above its own saturation -- a physical
         ! supersaturation the adjustment must remove, not the absurd 500% a
@@ -202,10 +200,12 @@ contains
                     ! to the latent heat itself (which is ~1e4, so an absolute
                     ! bound would just be measuring its roundoff). dt_phys is the
                     ! forward [K] increment, so no dt factor here.
+                    ! (mixed phase: L of the cell's own temperature)
+                    hcp = aeros_latent(t_g(i,j,k))/real(cp_d,wp)
                     if (dqc > 0.0_wp) &
                         worst_en = max(worst_en, &
-                                abs(real(cp_d,wp)*dt_phys(i,j,k) - real(L_v,wp)*dqc) &
-                                    /(real(L_v,wp)*dqc))
+                                abs(real(cp_d,wp)*dt_phys(i,j,k) - aeros_latent(t_g(i,j,k))*dqc) &
+                                    /(aeros_latent(t_g(i,j,k))*dqc))
 
                     ! saturation: where it condensed, q sits at rh_crit*q_sat(T + heating)
                     if (dqc > 0.0_wp) then
@@ -259,7 +259,7 @@ contains
         implicit none
         integer, intent(inout) :: nfail
         real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev)
-        real(wp) :: qs, dqsdt, w0, w1, precip_m, en_heat, dry0, dry1
+        real(wp) :: qs, dqsdt, w0, w1, precip_m, en_heat, en_lat, dry0, dry1
         real(wp) :: precip_off, precip_on
         integer  :: k
 
@@ -296,11 +296,14 @@ contains
         dry1 = qv(1,1,nlev)
 
         ! column water and energy budgets (reevaporation on)
-        w0 = 0.0_wp; w1 = 0.0_wp; en_heat = 0.0_wp
+        ! (mixed phase: the latent heat of the water that left each layer, at that
+        ! layer's L; equals L_v * precip only in an all-warm column)
+        w0 = 0.0_wp; w1 = 0.0_wp; en_heat = 0.0_wp; en_lat = 0.0_wp
         do k = 1, nlev
             w0 = w0 + qv0(1,1,k)*dpc(k)/real(grav,wp)
             w1 = w1 + qv(1,1,k)*dpc(k)/real(grav,wp)
             en_heat = en_heat + real(cp_d,wp)*dt_phys(1,1,k)*dpc(k)/real(grav,wp)
+            en_lat  = en_lat + aeros_latent(t_g(1,1,k))*(qv0(1,1,k) - qv(1,1,k))*dpc(k)/real(grav,wp)
         end do
         precip_m = precip_on*1800.0_wp    ! kg m-2 over the step
 
@@ -308,15 +311,15 @@ contains
         write(*,"(a40,es12.3,a)") "   precip, reevap on              ", precip_on*86400.0_wp, " mm/day"
         write(*,"(a40,es12.3)")   "   dry lowest layer, dq (moisten) ", dry1 - dry0
         write(*,"(a40,es12.3)")   "   |water in - (vapour+precip)|/in", abs(w0 - (w1 + precip_m))/w0
-        write(*,"(a40,es12.3)")   "   |heating - L*precip|/(L*precip)", &
-                                    abs(en_heat - real(L_v,wp)*precip_m)/abs(real(L_v,wp)*precip_m)
+        write(*,"(a40,es12.3)")   "   |heating - sum L dq|/(sum L dq) ", &
+                                    abs(en_heat - en_lat)/abs(en_lat)
 
         call check(abs(w0 - (w1 + precip_m))/w0 < 1.0e-12_wp, &
                     "column water conserved (vapour + surface precip)", nfail)
         call check(dry1 > dry0, "reevaporation moistens a dry layer below the rain", nfail)
         call check(precip_on < precip_off, "reevaporation reduces the surface precip", nfail)
-        call check(abs(en_heat - real(L_v,wp)*precip_m)/abs(real(L_v,wp)*precip_m) < 1.0e-12_wp, &
-                    "net latent heating equals L * surface precip", nfail)
+        call check(abs(en_heat - en_lat)/abs(en_lat) < 1.0e-12_wp, &
+                    "net latent heating equals the latent heat of the water removed", nfail)
         call check(minval(qv) >= 0.0_wp, "q stays non-negative", nfail)
         return
     end subroutine test_reevaporation

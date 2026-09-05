@@ -62,6 +62,7 @@ module aeros_vdiff
     ! same state. Humidity is a gridpoint field and is diffused in place directly.
 
     use aeros_defs,     only : dp, wp, io_unit_err, R_d, cp_d, grav, L_v, aeros_grid_class
+    use aeros_condensation, only : aeros_latent
     use aeros_surface,  only : aeros_surf_class, aeros_surface_wind
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure, &
                                aeros_hydrostatic
@@ -305,7 +306,7 @@ contains
                 call tridiag(sub, diam, sup, col, out, nlev)
                 if (surf%enabled) then
                     surf%evap(i,j) = cv*(surf%qs_skin(i,j) - out(nlev))
-                    surf%lhf(i,j)  = real(L_v, wp)*surf%evap(i,j)
+                    surf%lhf(i,j)  = aeros_latent(surf%skin(i,j))*surf%evap(i,j)  ! L_s over ice/snow
                 end if
                 qv(i,j,:) = out          ! positivity-preserving for this M-matrix
 
