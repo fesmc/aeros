@@ -73,10 +73,11 @@ program rce_long
     character(len=8)  :: ncycle_variant = "A"
     ! Speed-limit drag (aeros_timestep header): SpeedyWeather's default; drag_coef = 0 off.
     real(wp) :: drag_vmax = 80.0_wp, drag_coef = 4.0e-7_wp
-    real(wp) :: conv_tau = 14400.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp
+    real(wp) :: conv_tau = 14400.0_wp, c_h = -1.0_wp, c_e = -1.0_wp   ! <= 0: bulk-Richardson log-law
+    real(wp) :: z0_ocean = 1.0e-4_wp, z0_land = 0.5_wp                ! roughness lengths [m]
     real(wp) :: gust_speed = 5.0_wp, wind_slowdown = 0.95_wp   ! surface wind for the fluxes (SW)
     character(len=32) :: conv_scheme = "sbm_frierson" ! "sbm" | "sbm_frierson" | "manabe"
-    real(wp) :: c_d = 1.5e-3_wp       ! surface momentum drag (0 = off; brakes the low-level jet)
+    real(wp) :: c_d = -1.0_wp         ! surface momentum drag (0 = off; <= 0 log-law; brakes the low-level jet)
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
     logical  :: l_rad = .TRUE., l_sponge = .FALSE., l_vdiff = .FALSE.
     logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
@@ -319,6 +320,7 @@ program rce_long
     end select
     ts%surf%enabled = l_surf
     ts%surf%c_h = c_h; ts%surf%c_e = c_e
+    ts%surf%z0_ocean = z0_ocean; ts%surf%z0_land = z0_land
     ts%surf%gust_speed = gust_speed; ts%surf%wind_slowdown = wind_slowdown
     ts%surf%c_d = c_d
     ts%rad%enabled  = l_rad
@@ -1112,9 +1114,16 @@ contains
         call nml_read(nmlfile, "rce", "raw_alpha", raw_alpha, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "conv_tau", conv_tau)
-        call nml_read(nmlfile, "rce", "c_h", c_h)
-        call nml_read(nmlfile, "rce", "c_e", c_e)
-        call nml_read(nmlfile, "rce", "c_d", c_d)
+        call nml_read(nmlfile, "rce", "c_h", c_h, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "c_e", c_e, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "c_d", c_d, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "z0_ocean", z0_ocean, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "z0_land", z0_land, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "gust_speed", gust_speed, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "wind_slowdown", wind_slowdown, &

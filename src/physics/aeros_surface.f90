@@ -45,6 +45,7 @@ module aeros_surface
     private
 
     real(wp), parameter :: RV_OVER_RD_M1 = R_v/R_d - 1.0_wp   ! ~0.608, virtual T
+    real(wp), parameter :: VON_KARMAN    = 0.4_wp
 
     type, public :: aeros_surf_class
         logical :: enabled = .FALSE.
@@ -52,8 +53,18 @@ module aeros_surface
         integer :: nlon = 0, nlat = 0
 
         ! Bulk-flux parameters.
-        real(wp) :: c_h   = 1.5e-3_wp      ! sensible-heat exchange coefficient
-        real(wp) :: c_e   = 1.5e-3_wp      ! moisture exchange coefficient
+        ! Exchange coefficients. <= 0 (the default) = the bulk-Richardson
+        ! log-law coefficient diagnosed per point (below, SpeedyWeather's
+        ! BulkRichardsonDrag / Frierson 2006): C = kappa^2 / ln^2(z_1/z_0) *
+        ! (1 - Ri/Ri_c)^2, one coefficient for heat, moisture and momentum. A
+        ! positive value pins a fixed coefficient instead (intercomparison,
+        ! tests). z_1 is the lowest-level height, z_0 the roughness length.
+        real(wp) :: c_h   = -1.0_wp        ! sensible-heat exchange coefficient
+        real(wp) :: c_e   = -1.0_wp        ! moisture exchange coefficient
+        real(wp) :: z0_ocean = 1.0e-4_wp   ! roughness length over sea [m]
+        real(wp) :: z0_land  = 0.5_wp      ! roughness length over land [m]
+        real(wp) :: ri_crit  = 10.0_wp     ! critical bulk Richardson number
+        real(wp) :: cd_min   = 1.0e-5_wp   ! floor of the diagnosed coefficient
         ! Surface wind the fluxes see (SpeedyWeather's SurfaceCondition):
         !   |V_0| = sqrt( (wind_slowdown |V_1|)^2 + gust_speed^2 )
         ! the lowest-level wind slowed toward the surface plus sub-grid gusts in
@@ -68,7 +79,10 @@ module aeros_surface
         ! splitting momentum on the leapfrog is unstable), so the coefficient is
         ! carried here but the stress is imposed in aeros_vdiff. Zero = no drag
         ! (bit-unchanged default); ~1.5e-3 to enable, like c_h/c_e.
-        real(wp) :: c_d   = 0.0_wp         ! momentum drag coefficient
+        real(wp) :: c_d   = -1.0_wp        ! momentum drag coefficient (0 = no drag)
+        ! The diagnosed (or fixed) momentum coefficient per point, refreshed by
+        ! aeros_surface_apply; aeros_vdiff imposes the stress with it.
+        real(wp), allocatable :: cdrag(:,:)
 
         ! The sea surface temperature the fluxes are evaluated against is owned by
         ! aeros_ocean and passed to aeros_surface_apply -- prescribed or a slab.
@@ -102,6 +116,8 @@ contains
         surf%nlon    = grd%nlon
         surf%nlat    = grd%nlat
 
+
+        allocate(surf%cdrag(grd%nlon, grd%nlat)); surf%cdrag = 0.0_wp
         allocate(surf%shf(grd%nlon, grd%nlat))
         allocate(surf%lhf(grd%nlon, grd%nlat))
         allocate(surf%evap(grd%nlon, grd%nlat))
@@ -121,11 +137,11 @@ contains
         type(aeros_grid_class), intent(in)    :: grd
 
         logical  :: enabled
-        real(wp) :: c_h, c_e, gust, slow, c_d
+        real(wp) :: c_h, c_e, gust, slow, c_d, z0o, z0l, ric
 
         enabled = surf%enabled
         c_h = surf%c_h; c_e = surf%c_e; gust = surf%gust_speed; slow = surf%wind_slowdown
-        c_d = surf%c_d
+        c_d = surf%c_d; z0o = surf%z0_ocean; z0l = surf%z0_land; ric = surf%ri_crit
 
         call nml_read(filename, "surface", "enabled", enabled, defaults_file=defaults_file)
         call nml_read(filename, "surface", "c_h",     c_h, defaults_file=defaults_file)
@@ -133,9 +149,12 @@ contains
         call nml_read(filename, "surface", "gust_speed",    gust, defaults_file=defaults_file)
         call nml_read(filename, "surface", "wind_slowdown", slow, defaults_file=defaults_file)
         call nml_read(filename, "surface", "c_d",     c_d, defaults_file=defaults_file)
+        call nml_read(filename, "surface", "z0_ocean", z0o, defaults_file=defaults_file)
+        call nml_read(filename, "surface", "z0_land",  z0l, defaults_file=defaults_file)
+        call nml_read(filename, "surface", "ri_crit",  ric, defaults_file=defaults_file)
 
         surf%c_h = c_h; surf%c_e = c_e; surf%gust_speed = gust; surf%wind_slowdown = slow
-        surf%c_d = c_d
+        surf%c_d = c_d; surf%z0_ocean = z0o; surf%z0_land = z0l; surf%ri_crit = ric
 
         call aeros_surface_init(surf, grd, enabled)
 
@@ -146,6 +165,7 @@ contains
         implicit none
         type(aeros_surf_class), intent(inout) :: surf
         if (allocated(surf%shf))  deallocate(surf%shf)
+        if (allocated(surf%cdrag)) deallocate(surf%cdrag)
         if (allocated(surf%lhf))  deallocate(surf%lhf)
         if (allocated(surf%evap)) deallocate(surf%evap)
         surf%enabled = .FALSE.
@@ -154,7 +174,7 @@ contains
     end subroutine aeros_surface_end
 
     subroutine aeros_surface_apply(surf, vg, sst, t_g, qv_g, lnps_g, u, v, dt_phys, dt, &
-                                   evap_eff)
+                                   evap_eff, is_land)
         ! Sensible and latent surface fluxes into the lowest model layer.
         !
         ! sst is the skin temperature the fluxes are driven against -- the ocean
@@ -183,20 +203,24 @@ contains
         real(wp), intent(inout) :: dt_phys(:,:,:) ! (nlon,nlat,nlev) [K] increment
         real(wp), intent(in)    :: dt             ! [s]
         real(wp), intent(in), optional :: evap_eff(:,:) ! (nlon,nlat) beta [-]
+        logical,  intent(in), optional :: is_land(:,:)  ! (nlon,nlat) roughness selector
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: ps, t1, q1, wind, rho1, qs_s, dqs, sh, ev, dq, beta
-        logical  :: have_beta
+        real(wp) :: z1, z0, cbulk, ri, ch, ce
+        logical  :: have_beta, have_land
         integer  :: i, j, ks
 
         if (.not. surf%enabled) return
 
         have_beta = present(evap_eff)
+        have_land = present(is_land)
 
         ks = vg%nlev                              ! lowest (surface) layer
 
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,sh,ev,dq,beta)
+        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,sh,ev,dq,beta, &
+        !$omp           z1,z0,cbulk,ri,ch,ce)
         do j = 1, surf%nlat
             do i = 1, surf%nlon
                 ps = exp(lnps_g(i,j))
@@ -208,9 +232,29 @@ contains
                 ! lowest-layer air density (virtual temperature) and wind speed
                 rho1 = pfull(ks)/(R_d*t1*(1.0_wp + RV_OVER_RD_M1*q1))
                 wind = aeros_surface_wind(surf, u(i,j,ks), v(i,j,ks))
-
+                ! Bulk transfer coefficient (class header): the neutral log-law
+                ! value for the lowest-level height z_1 (hypsometric, from the
+                ! layer's own T) over the roughness z_0, reduced by the bulk
+                ! Richardson number of that layer -- SpeedyWeather's form of
+                ! Frierson (2006) eqs 12-15, where the surface air is the level-1
+                ! air brought down dry-adiabatically, so the static-energy jump
+                ! over the layer is g z_1 and Ri = (g z_1)^2 / (cp T_v |V_0|^2).
+                z1 = real(R_d,wp)*t1/real(grav,wp)*log(ps/pfull(ks))
+                z0 = surf%z0_ocean
+                if (have_land) then
+                    if (is_land(i,j)) z0 = surf%z0_land
+                end if
+                z1 = max(z1, z0)
+                cbulk = (VON_KARMAN/log(z1/z0))**2
+                ri = (real(grav,wp)*z1)**2/(real(cp_d,wp)*t1*(1.0_wp + RV_OVER_RD_M1*q1)*wind*wind)
+                ri = min(max(ri, 0.0_wp), surf%ri_crit)
+                cbulk = max(surf%cd_min, cbulk*(1.0_wp - ri/surf%ri_crit)**2)
+                ch = surf%c_h; if (ch <= 0.0_wp) ch = cbulk
+                ce = surf%c_e; if (ce <= 0.0_wp) ce = cbulk
+                surf%cdrag(i,j) = surf%c_d
+                if (surf%c_d < 0.0_wp) surf%cdrag(i,j) = cbulk
                 ! sensible heat flux [W m-2], positive up (into the atmosphere)
-                sh = rho1*cp_d*surf%c_h*wind*(sst(i,j) - t1)
+                sh = rho1*cp_d*ch*wind*(sst(i,j) - t1)
 
                 ! evaporation [kg m-2 s-1] from the saturation deficit at the skin
                 ! temperature, throttled by the evaporation efficiency beta (1 for
@@ -218,7 +262,7 @@ contains
                 beta = 1.0_wp
                 if (have_beta) beta = evap_eff(i,j)
                 call aeros_qsat(sst(i,j), ps, qs_s, dqs)
-                ev = beta*rho1*surf%c_e*wind*(qs_s - q1)
+                ev = beta*rho1*ce*wind*(qs_s - q1)
 
                 ! sensible heating of the lowest layer, forward-split increment
                 ! [K]: it is confined to one layer, so like convection and
@@ -263,7 +307,10 @@ contains
         write(io_unit, '(a)')      "  surface:"
         write(io_unit, '(a,l1)')   "    enabled = ", surf%enabled
         if (.not. surf%enabled) return
-        write(io_unit, '(a,es10.2,a,es10.2)') "    C_H/C_E = ", surf%c_h, " / ", surf%c_e
+        write(io_unit, '(a,es10.2,a,es10.2,a)') "    C_H/C_E = ", surf%c_h, " / ", surf%c_e, &
+            "  (<= 0: bulk-Richardson log-law)"
+        write(io_unit, '(a,es10.2,a,es10.2,a,f5.1)') "    z0 ocean/land = ", surf%z0_ocean, " / ", &
+            surf%z0_land, "  Ri_c = ", surf%ri_crit
         write(io_unit, '(a,f6.2,a,f5.2)') "    gust_speed / wind_slowdown = ", surf%gust_speed, " / ", surf%wind_slowdown
         return
     end subroutine aeros_surface_report

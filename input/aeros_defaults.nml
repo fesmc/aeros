@@ -241,13 +241,19 @@
     ! SurfaceCondition); the SST is the APE control profile, sst_eq K above
     ! freezing at the equator tapering to freezing poleward of sst_lat degrees.
     enabled = .FALSE.
-    c_h     = 1.5e-3
-    c_e     = 1.5e-3
+    ! <= 0 = SpeedyWeather's bulk-Richardson log-law coefficient diagnosed per
+    ! point from the lowest-level height and z0 (one for heat/moisture/momentum,
+    ! c_d = 0 = no drag); > 0 pins a fixed coefficient.
+    c_h     = -1.0
+    c_e     = -1.0
+    z0_ocean = 1.0e-4
+    z0_land  = 0.5
+    ri_crit  = 10.0
     gust_speed    = 5.0
     wind_slowdown = 0.95
     ! Momentum drag coefficient. Bulk stress tau = rho c_d |u| u, imposed
     ! implicitly as the momentum bottom BC in vdiff. 0 = no surface drag.
-    c_d     = 0.0
+    c_d     = -1.0
 /
 
 &ocean

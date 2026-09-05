@@ -154,7 +154,7 @@ contains
         return
     end subroutine aeros_vdiff_end
 
-    subroutine aeros_vdiff_apply(vd, vg, t, qv, u, v, lnps_g, dt, cd_surf, gust, slow)
+    subroutine aeros_vdiff_apply(vd, vg, t, qv, u, v, lnps_g, dt, cdrag, gust, slow)
         ! One implicit vertical-diffusion sweep over every column, diffusing
         ! temperature, humidity and both wind components IN PLACE.
         !
@@ -177,7 +177,7 @@ contains
         real(wp), intent(inout) :: v(:,:,:)
         real(wp), intent(in)    :: lnps_g(:,:)    ! (nlon,nlat) ln[Pa]
         real(wp), intent(in)    :: dt             ! [s]
-        real(wp), intent(in)    :: cd_surf        ! surface drag coeff (0 = off)
+        real(wp), intent(in)    :: cdrag(:,:)     ! (nlon,nlat) surface drag coeff (0 = off)
         real(wp), intent(in)    :: gust, slow     ! surface-wind gust [m/s] and slowdown [-] (aeros_surface)
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
@@ -284,10 +284,10 @@ contains
                 ! isotropic so u and v share it). Unconditionally stable, and it is
                 ! the momentum boundary flux the heat/moisture fluxes already have.
                 diam = dia
-                if (cd_surf > 0.0_wp) then
+                if (cdrag(i,j) > 0.0_wp) then
                     wind  = sqrt(slow*slow*(u(i,j,nlev)**2 + v(i,j,nlev)**2) + gust*gust)
                     rho_s = phalf(nlev)/(R_d*t(i,j,nlev))
-                    drag  = (dt*grav/dpc(nlev))*rho_s*cd_surf*wind
+                    drag  = (dt*grav/dpc(nlev))*rho_s*cdrag(i,j)*wind
                     diam(nlev) = dia(nlev) + drag
                 end if
                 col = u(i,j,:);  call tridiag(sub, diam, sup, col, out, nlev)

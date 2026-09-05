@@ -1001,7 +1001,8 @@ contains
             if (ts%land%enabled) then
                 call aeros_surface_apply(ts%surf, vg, ts%land%skin, ts%wrk%t_g, now%qv_g, &
                                             ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
-                                            ts%wrk%dt_phys, ts%dt, evap_eff=ts%land%beta)
+                                            ts%wrk%dt_phys, ts%dt, evap_eff=ts%land%beta, &
+                                            is_land=ts%land%mask)
             else
                 call aeros_surface_apply(ts%surf, vg, ts%ocn%sst, ts%wrk%t_g, now%qv_g, &
                                             ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
@@ -1519,7 +1520,7 @@ contains
         if (ts%wrk%diag) ts%wrk%dt_vdiff = t3
 
         call aeros_vdiff_apply(ts%vd, vg, t3, now%qv_g, u3, v3, lnps2, ts%dt, &
-                                ts%surf%c_d, ts%surf%gust_speed, ts%surf%wind_slowdown)
+                                ts%surf%cdrag, ts%surf%gust_speed, ts%surf%wind_slowdown)
 
         if (ts%wrk%diag) ts%wrk%dt_vdiff = t3 - ts%wrk%dt_vdiff
 
