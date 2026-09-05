@@ -235,6 +235,12 @@ program rce_long
     ! report and the mean precipitation / evaporation since [mm/day].
     real(wp) :: wb_w_last = -1.0_wp, wb_p_acc = 0.0_wp, wb_e_acc = 0.0_wp
     integer  :: wb_n_acc = 0
+    ! Global energy budget (report): TOA / clear-sky / cover / surface-flux means
+    ! accumulated every step since the last report (a snapshot at the report
+    ! date is not an annual mean: insolation alone swings +-3.4% over the orbit).
+    real(wp) :: tb_swin = 0.0_wp, tb_swup = 0.0_wp, tb_olr = 0.0_wp, tb_swupc = 0.0_wp, &
+                tb_olrc = 0.0_wp, tb_cov = 0.0_wp, tb_shf = 0.0_wp, tb_lhf = 0.0_wp
+    integer  :: tb_n = 0
     integer,  allocatable :: mon_cnt(:)
     integer            :: nacc_mon = 1        ! accumulate every nacc_mon steps (~1 day)
     ! Time-mean per-term diabatic heating accumulators [K/step], same 2nd-half
@@ -695,6 +701,7 @@ program rce_long
             wb_e_acc = wb_e_acc + gmean2(ts%surf%evap*86400.0_wp)
             wb_n_acc = wb_n_acc + 1
         end if
+        call energy_accumulate()
         if (mod(n, print_every) == 0) call report(n)
         ! Time-mean omega over the run's second half (equilibrium) for a robust
         ! zonal-mean subsidence diagnostic -- a single snapshot is too noisy.
@@ -1621,34 +1628,48 @@ contains
         return
     end subroutine locate_umax
 
-    subroutine energy_balance()
-        ! Global-mean TOA and surface energy budget. A secular drift of the
-        ! column temperature is a TOA imbalance (absorbed SW - OLR /= 0); this
-        ! separates an energy-balance problem from a mixing/numerics one.
-        real(wp) :: olr, swup, swin, shf, lhf, wsum, olrc, swupc, cov
+    subroutine energy_accumulate()
+        ! Per-step global means of the energy-budget terms, for energy_balance.
+        real(wp) :: swin, wsum
         integer  :: j
         if (.not. (l_rad .or. l_surf)) return
-        olr = 0.0_wp; swup = 0.0_wp; swin = 0.0_wp; shf = 0.0_wp; lhf = 0.0_wp
-        olrc = 0.0_wp; swupc = 0.0_wp; cov = 0.0_wp
         if (l_rad) then
-            olr  = gmean2(ts%rad%olr)
-            swup = gmean2(ts%rad%sw_up_toa)
-            olrc = gmean2(ts%rad%olr_cs)
-            swupc = gmean2(ts%rad%sw_up_toa_cs)
-            cov  = gmean2(ts%rad%cover)
-            wsum = 0.0_wp
+            tb_olr   = tb_olr   + gmean2(ts%rad%olr)
+            tb_swup  = tb_swup  + gmean2(ts%rad%sw_up_toa)
+            tb_olrc  = tb_olrc  + gmean2(ts%rad%olr_cs)
+            tb_swupc = tb_swupc + gmean2(ts%rad%sw_up_toa_cs)
+            tb_cov   = tb_cov   + gmean2(ts%rad%cover)
+            swin = 0.0_wp; wsum = 0.0_wp
             do j = 1, grd%nlat
                 swin = swin + ts%rad%sw_toa(j)*sum(grd%area(:,j))
                 wsum = wsum + sum(grd%area(:,j))
             end do
-            swin = swin/wsum
+            tb_swin = tb_swin + swin/wsum
         end if
         if (l_surf) then
-            shf = gmean2(ts%surf%shf); lhf = gmean2(ts%surf%lhf)
+            tb_shf = tb_shf + gmean2(ts%surf%shf); tb_lhf = tb_lhf + gmean2(ts%surf%lhf)
         end if
+        tb_n = tb_n + 1
+        return
+    end subroutine energy_accumulate
+
+    subroutine energy_balance()
+        ! Global-mean TOA and surface energy budget, time-mean since the last
+        ! report. A secular drift of the column temperature is a TOA imbalance
+        ! (absorbed SW - OLR /= 0); this separates an energy-balance problem from
+        ! a mixing/numerics one.
+        real(wp) :: olr, swup, swin, shf, lhf, olrc, swupc, cov, rn
+        if (.not. (l_rad .or. l_surf)) return
+        if (tb_n == 0) return
+        rn   = 1.0_wp/real(tb_n, wp)
+        olr  = tb_olr*rn;  swup  = tb_swup*rn;  swin = tb_swin*rn
+        olrc = tb_olrc*rn; swupc = tb_swupc*rn; cov  = tb_cov*rn
+        shf  = tb_shf*rn;  lhf   = tb_lhf*rn
+        tb_olr = 0.0_wp; tb_swup = 0.0_wp; tb_swin = 0.0_wp; tb_olrc = 0.0_wp
+        tb_swupc = 0.0_wp; tb_cov = 0.0_wp; tb_shf = 0.0_wp; tb_lhf = 0.0_wp; tb_n = 0
         write(*,"(a,f7.1,a,f7.1,a,f7.2,a,f7.1,a,f7.1,a)") &
             "   TOA: SWin ", swin, "  OLR ", olr, "  net ", swin-swup-olr, &
-            " W/m2 | sfc SH ", shf, "  LH ", lhf, " W/m2"
+            " W/m2 | sfc SH ", shf, "  LH ", lhf, " W/m2  (mean since last report)"
         ! Cloud radiative effect = all-sky minus clear-sky (ERA5 1991-2020: absorbed SW
         ! 243, OLR 242, clear 289 / 264, CRE SW -46 LW +22, total cover 0.63).
         if (l_rad .and. l_rad_clouds) write(*,"(a,f7.1,a,f7.1,a,f6.1,a,f6.1,a,f5.2)") &
