@@ -121,6 +121,7 @@ contains
         par%semi_implicit = semi_implicit
         par%held_suarez   = .FALSE.
         par%eps_filter    = 0.06_wp
+        par%time_scheme   = "leapfrog"    ! this test measures the leapfrog
         par%raw_alpha     = 0.53_wp
         par%ndiff         = 6
         par%tau_diff      = 6.0_wp

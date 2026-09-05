@@ -139,7 +139,7 @@ module aeros_convection
         ! Simplified Betts-Miller knobs (unused by Manabe). tau is the
         ! convective relaxation timescale; rh_ref the reference relative
         ! humidity the moist adiabat is dried toward. Frierson (2007) values.
-        real(wp) :: tau    = 7200.0_wp   ! [s] ~ 2 h
+        real(wp) :: tau    = 14400.0_wp  ! [s] 4 h (SpeedyWeather BettsMiller time_scale)
         real(wp) :: rh_ref = 0.7_wp      ! [-]
 
         ! Dry convective adjustment, run BEFORE the moist scheme. A moist scheme
@@ -184,7 +184,7 @@ contains
 
         cnv%enabled = enabled
         cnv%scheme  = SCHEME_SBM_FRIERSON
-        cnv%tau     = 7200.0_wp
+        cnv%tau     = 14400.0_wp
         cnv%rh_ref  = 0.7_wp
         cnv%nlon    = grd%nlon
         cnv%nlat    = grd%nlat
@@ -216,7 +216,7 @@ contains
 
         convect     = .FALSE.
         conv_scheme = "sbm_frierson"
-        conv_tau    = 7200.0_wp
+        conv_tau    = 14400.0_wp
         conv_rhref  = 0.7_wp
         call nml_read(filename, "aeros_moisture", "convect",     convect, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "conv_scheme", conv_scheme, defaults_file=defaults_file)

@@ -61,6 +61,14 @@
     ! semi-implicit solve is measured rather than asserted. With it, dt must
     ! fall below the explicit limit above or the run diverges within ~20 steps.
     semi_implicit = .TRUE.
+    ! Time scheme (src/dynamics/aeros_timestep.f90, "The Lorenz N-cycle"):
+    ! "ncycle" (two-time-level semi-implicit Lorenz N-cycle, the production
+    ! default; no time filter) or "leapfrog" (RAW-filtered semi-implicit
+    ! leapfrog; eps_filter/raw_alpha apply). ncycle = N, ncycle_variant =
+    ! A | B | AB | ABBA (ABBA is 4th order for N = 4).
+    time_scheme    = "ncycle"
+    ncycle         = 4
+    ncycle_variant = "A"
 
     ! Time filter. Williams (2009) RAW: nu is the classical Robert-Asselin
     ! coefficient and alpha splits the displacement between the two time
@@ -201,6 +209,13 @@
     ! Critical relative humidity for condensation. 1.0 is true saturation
     ! adjustment; a lower value stands in for sub-grid humidity variability.
     rh_crit = 1.0
+    ! reevap: reevaporation efficiency [1/(kg/kg)] of falling precipitation into
+    ! sub-saturated layers (SpeedyWeather ImplicitCondensation; 0 = off).
+    ! cond_time_scale: 1/cond_time_scale of the saturation adjustment (and of
+    ! the reevaporation) is applied per step [steps]; SpeedyWeather uses 3, and
+    ! 1 is the exact one-step adjustment (see aeros_condensation, "The time scale").
+    reevap          = 30.0
+    cond_time_scale = 3.0
 
     ! Moist convective adjustment (src/physics/aeros_convection.f90). OFF by
     ! default and in the dry Held-Suarez benchmark. `conv_scheme` selects the
@@ -209,7 +224,7 @@
     ! conv_rhref its reference relative humidity.
     convect     = .FALSE.
     conv_scheme = "sbm"
-    conv_tau    = 7200.0
+    conv_tau    = 14400.0
     conv_rhref  = 0.7
 /
 

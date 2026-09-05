@@ -6,12 +6,16 @@ A fast global atmospheric model for coupled climate–ice-sheet simulation on
 Spectral primitive-equation core (T31–T42, L16–20) built as the static library
 `libaeros.a`, OpenMP-only, intended to couple to CLIMBER-X's ocean and to Yelmo.
 
-Status: **dry dynamical core validated (M1)**. Hybrid σ–p coordinate,
-(ζ,D)↔(u,v), primitive-equation tendencies by the transform method, a
-semi-implicit leapfrog with a RAW time filter and ∇⁶ diffusion, and the
-Held–Suarez (1994) benchmark, which reproduces the published circulation.
-Moisture, radiation and surface tiles are M2, so `par/aeros.nml` on its own
-still runs an unforced core that correctly does nothing.
+Status: **M2 physics built, time integration reworked (2026-09)**. Hybrid
+σ–p coordinate, (ζ,D)↔(u,v), primitive-equation tendencies by the transform
+method, a **two-time-level semi-implicit Lorenz N-cycle** (Hotta et al. 2016;
+the filtered leapfrog is kept as `time_scheme = "leapfrog"`), ∇⁸ diffusion
+with a divergence-only top taper, and the Held–Suarez (1994) benchmark.
+Moisture (FV transport, condensation, Betts–Miller convection), ecCKD/SESAM
+radiation, clouds, a slab ocean with sea ice, a bucket land surface with ERA5
+orography, and seasonal/orbital insolation are in; all column physics couples
+in-solve as rates. The real-Earth T21L12 configuration runs at dt = 3600 s,
+~1850 model-yr/day on 10 cores. `docs/m2_handoff.md` is the current state.
 
 ```bash
 make held-suarez && libaeros/bin/held_suarez.x par/held_suarez.nml

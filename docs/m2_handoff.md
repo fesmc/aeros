@@ -1,5 +1,71 @@
 # M2 handoff — where to pick up
 
+## ►► 2026-09-05: the time integration was the speed AND stability problem — fixed
+
+**Two structural defects in the physics coupling, both gone (branch `fix/physics-coupling`).**
+
+1. **Forward-split physics landed at HALF its rate.** `apply_phys_heating` added the increment
+   Δt·P (diagnosed from X^n) to X^(n+1) only; each leapfrog chain advances 2Δt per step, so
+   every diabatic term (surface, convection, condensation, radiation) heated at half the
+   diagnosed rate while the single-level gridpoint humidity dried at the full rate (latent
+   heat leak ~L·P/2, sensible heat into the air half what the soil/ocean lost). Verified with a
+   radiation-only run: level-1 cooling 2.4 K/day against a diagnosed ~5; the in-solve rate
+   coupling gives 4.7. **Every M2 physics number / tuning before this date sits on top of
+   this** (rh_crit, albedo, cloud calibration, the +15 W/m² TOA residual, the ERA5 and
+   SpeedyWeather comparisons). Held–Suarez is unaffected (in-solve `dtdt`).
+2. **The "dt=900 CFL limit" was a 2Δt computational mode of that split**, not CFL: at dt=1800
+   the lowest-layer global-mean T alternates by 7–18 K between consecutive time levels and the
+   physics heating flips sign every step (an eastward-moving tropical hot spot). Reproduced in
+   4 s on the production land+topo+seasonal config (NaN day 22.5); killed by removing
+   reevaporation / convection / dry adjustment, by eps_filter ≥ 0.15, or dt ≤ 1350. Root:
+   stiff operators (exact saturation adjustment, reevap-to-threshold) diagnosed on one
+   leapfrog chain and applied to the other. The earlier "model-top / spectral-pole / CFL"
+   framings in this file and in the memory notes were this mode.
+
+**What landed (26/26 tests):**
+- **Physics coupling is in-solve only**: `wrk%dt_phys/dt` is added to `dtdt` before the
+  semi-implicit solve (SPEEDY/SpeedyWeather coupling); the forward-split path and
+  `couple_diabatic` are removed. Operators softened to SpeedyWeather's values:
+  condensation + reevaporation relax over `cond_time_scale = 3` steps (new knob, module +
+  `&rce` + defaults), convection/dry-adjust `conv_tau = 4 h` (was 2 h).
+- **Two-time-level dynamics: the semi-implicit Lorenz N-cycle** (Hotta et al. 2016),
+  `time_scheme = "ncycle"` (N=4, variant A default; ABBA is ~4th order), now the **default**
+  in the library and the driver; `"leapfrog"` kept for comparison (the four leapfrog-specific
+  tests pin it). One time chain for T, q and the physics → no cross-chain physics, no
+  computational mode, no Robert filter (`eps_filter`/`raw_alpha` are leapfrog-only). The
+  accumulator G is in the restart (`gacc_*`, `ncycle_present`); `test_ncycle` (26th test):
+  rest state exact, stability triple, convergence (A 2nd order, ABBA ~4th), restart bit-exact
+  mid-cycle. Module header of `aeros_timestep.f90` has the derivation.
+- **SW-faithful core is the driver default** (`input/rce_defaults.nml`): ∇⁸/4 h,
+  `tau_diff_div = 1 h`, taper to ∇⁴ above σ=0.2, `si_alpha = 1`, no sponge; those keys plus
+  the sponge strengths are now optional in `&rce`. A namelist with only the physical keys
+  reproduces the explicit production config bit-for-bit.
+
+**Result.** The production config (land + ERA5 topography + seasonal SST, T21L12) runs
+NaN-free for a year at **dt = 3600 s** (dt=1800/2700/3600 all stable; 5400 dies at day 3,
+untested whether CFL or physics). Throughput on 10 cores (Apple M5): **~1850 SYPD** vs 834
+before, and vs SpeedyWeather 0.21.1 default T21L8 (slab ocean, sea ice, land, orography):
+1357 SYPD at dt=3600. aeros is ~2.5× faster per step than SW; per model-year now 1.4× faster.
+
+**►► NEXT (in order):**
+1. **Re-validate the climate at full-rate physics.** The 1-yr aquaplanet at dt=3600 has OLR
+   ~117 W/m² (was ~155), a 188 K level-1 mean (172 K min) and an 81 m/s lid jet — the
+   stratosphere now cools at the true radiative rate with no ozone heating. Expect the
+   `cond_rh_crit`, albedo and cloud calibration to move. Rebuild the ERA5 comparisons
+   (`scripts/rce_validate_era5.jl`, `land_validate_era5.jl`) from scratch.
+2. **1-1 SpeedyWeather comparison at real-Earth BCs** (T21, orography + land-sea mask +
+   seasonal SST, SW default physics as the yardstick; `mwm/B_multires` has the SW
+   PrimitiveWetModel setup, `mwm/C_omega` the diagnostics pattern). Same-hardware SYPD.
+3. Characterize the N-cycle dt-sensitivity (30-d OLR 159 at dt=900 vs 144 at 3600: the
+   physics time scales are in steps, as in SW) and the dt=5400 failure; try ABBA as default.
+4. Slab + sea-ice validation, then T31/T42.
+
+The scratch configs/logs for all of the above are in this session's scratchpad only; the
+repro is trivial: `output/land_cal/land_topo_snow.nml` with `time_scheme="leapfrog"`,
+`dt=1800`, 30 days.
+
+---
+
 ## ►► NEXT SESSION: the descent-concentration residual is ~closed — pick the next M-item
 
 **RESOLVED (`docs/refs/sw_faithful_dynamics.md`).** The residual moist bias traced to aeros's Hadley

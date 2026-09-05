@@ -20,28 +20,18 @@ module aeros_condensation
     !   DRYING is applied straight to the gridpoint humidity (qv_g): the vapour
     !   that condenses is removed from the cell it condensed in. No transform.
     !
-    !   HEATING is added to the forward-split increment on the grid (wrk%dt_phys,
-    !   [K]), the same path convection, radiation and the surface fluxes use: it
-    !   is applied to the n+1 state after the dynamics step, forward in time,
-    !   decoupled from the centered leapfrog. It is an increment L_v/cp_d * dq_c
-    !   -- one step's warming from the latent heat of exactly the water that left.
-    !
-    !   This was originally on the centered dtdt path, on the argument that
-    !   condensation's heating is small and smooth. In the coupled RCE that
-    !   assumption breaks: at the hot subtropical latitude the heating reaches
-    !   ~100 K/day in the lowest layer and, on the centered leapfrog, excites the
-    !   computational mode -- the same failure convection had before it was moved
-    !   forward-split (M2.3e/section 12.1). So the heating now rides the same
-    !   forward path, symmetric with the forward drying of qv_g. See
-    !   docs/m2_results.md and m2_handoff.md (RCE level-12 instability).
+    !   HEATING is added to the grid increment wrk%dt_phys [K], the same path
+    !   convection, radiation and the surface fluxes use; aeros_timestep turns
+    !   it into a rate and couples it into the thermodynamic tendency ahead of
+    !   the semi-implicit solve (aeros_timestep header, "Physics coupling"). It
+    !   is an increment L_v/cp_d * dq_c -- the latent heat of exactly the water
+    !   that left.
     !
     ! Because both come from the SAME condensed amount dq_c, the column moist
     ! static energy is conserved by construction: the dry static energy gains
     ! L_v dq_c and the latent energy loses it. The water budget closes the same
     ! way: the vapour lost equals the precipitation produced. tests/
-    ! test_condensation checks both as equalities, not tolerances. Drying and
-    ! heating now share the SAME forward discretization, so they track exactly
-    ! rather than to the filter's accuracy as when the heating was centered.
+    ! test_condensation checks both as equalities, not tolerances.
     !
     ! === The saturation adjustment ==========================================
     !
@@ -54,6 +44,19 @@ module aeros_condensation
     ! and a second iteration removes essentially all of the linearization error.
     ! Only supersaturated cells condense (dq_c >= 0); nothing evaporates, because
     ! there is no condensate to evaporate yet.
+    !
+    ! === The time scale =====================================================
+    !
+    ! Only 1/time_scale of the adjustment (condensation AND reevaporation) is
+    ! applied per step -- SpeedyWeather's ImplicitCondensation `time_scale`,
+    ! default 3 steps. The heating is coupled into the leapfrog from time level
+    ! n and lands on n+1: an operator that removes ALL of the supersaturation
+    ! in one step is a stiff restoring term diagnosed on one leapfrog chain and
+    ! applied to the other, and it drives the 2 dt computational mode
+    ! (aeros_timestep header). Relaxing over a few steps keeps the per-step
+    ! kick small enough for the Robert filter to hold; the equilibrium state is
+    ! the same. time_scale = 1 recovers the exact one-step adjustment (what
+    ! tests/test_condensation checks the budgets on).
 
     use aeros_defs,     only : dp, wp, io_unit_err, R_d, R_v, cp_d, grav, L_v, &
                                 aeros_grid_class
@@ -95,6 +98,12 @@ module aeros_condensation
         ! straight to the surface).
         real(wp) :: reevap = 30.0_wp
 
+        ! Fraction 1/time_scale of the saturation adjustment (and of the
+        ! reevaporation) applied per step, in steps (SpeedyWeather's
+        ! ImplicitCondensation time_scale, default 3). 1 = exact one-step
+        ! adjustment. See the module header, "The time scale".
+        real(wp) :: time_scale = 3.0_wp
+
         integer :: nlon = 0, nlat = 0
 
         ! Precipitation rate from the last apply, [kg m-2 s-1] = mm s-1 of
@@ -126,6 +135,7 @@ contains
         cnd%enabled = enabled
         cnd%rh_crit = 0.95_wp
         cnd%reevap  = 30.0_wp
+        cnd%time_scale = 3.0_wp
         cnd%nlon    = grd%nlon
         cnd%nlat    = grd%nlat
 
@@ -147,16 +157,26 @@ contains
         type(aeros_grid_class), intent(in)    :: grd
 
         logical  :: moist
-        real(wp) :: rh_crit, reevap
+        real(wp) :: rh_crit, reevap, time_scale
 
-        moist   = .FALSE.
-        rh_crit = 0.95_wp
-        reevap  = 30.0_wp
+        moist      = .FALSE.
+        rh_crit    = 0.95_wp
+        reevap     = 30.0_wp
+        time_scale = 3.0_wp
         call nml_read(filename, "aeros_moisture", "moist",   moist, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "rh_crit", rh_crit, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "reevap",  reevap, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "cond_time_scale", time_scale, &
+                      defaults_file=defaults_file)
 
         call aeros_condensation_init(cnd, grd, moist)
+
+        if (time_scale < 1.0_wp) then
+            write(io_unit_err,*) "aeros_condensation_load:: error: cond_time_scale must be >= 1 "// &
+                                    "step, got ", time_scale
+            error stop 1
+        end if
+        cnd%time_scale = time_scale
 
         if (rh_crit <= 0.0_wp .or. rh_crit > 1.0_wp) then
             write(io_unit_err,*) "aeros_condensation_load:: error: rh_crit must be in (0,1], got ", &
@@ -243,6 +263,7 @@ contains
                         frac = min(cnd%reevap*(qs - qv_g(i,j,k)), 1.0_wp)
                         dqe  = frac*pfall/dpc(k)                 ! [kg kg-1]
                         dqe  = min(dqe, qthr - qv_g(i,j,k))
+                        dqe  = dqe/cnd%time_scale                ! relaxed, "The time scale"
                         if (dqe > 0.0_wp) then
                             qv_g(i,j,k)    = qv_g(i,j,k) + dqe
                             dt_phys(i,j,k) = dt_phys(i,j,k) - hcp*dqe  ! latent cooling
@@ -264,8 +285,9 @@ contains
                         dqc = dqc + (qv_g(i,j,k) - dqc - cnd%rh_crit*qs)/(1.0_wp + gam)
                     end do
 
-                    ! Only condensation, and never more vapour than is present.
-                    dqc = max(0.0_wp, min(dqc, qv_g(i,j,k)))
+                    ! Only condensation, and never more vapour than is present;
+                    ! 1/time_scale of the adjustment per step ("The time scale").
+                    dqc = max(0.0_wp, min(dqc, qv_g(i,j,k)))/cnd%time_scale
 
                     if (dqc > 0.0_wp) then
                         qv_g(i,j,k)    = qv_g(i,j,k) - dqc
@@ -340,6 +362,7 @@ contains
             write(iou,"(a)")        "   large-scale condensation    ON"
             write(iou,"(a,f9.3)")   "   critical relative humidity ", cnd%rh_crit
             write(iou,"(a,f9.3)")   "   reevaporation efficiency   ", cnd%reevap
+            write(iou,"(a,f9.3)")   "   adjustment time scale [steps]", cnd%time_scale
         else
             write(iou,"(a)")        "   large-scale condensation    off (dry)"
         end if

@@ -59,6 +59,7 @@ program test_condensation
     call aeros_grid_init(grd, pool%sht(1))
     call aeros_vgrid_init(vg, nlev)
     call aeros_condensation_init(cnd, grd, .TRUE.)     ! enabled, rh_crit = 1
+    cnd%time_scale = 1.0_wp    ! exact one-step adjustment: the budget checks below are equalities
 
     nlon = grd%nlon; nlat = grd%nlat
 

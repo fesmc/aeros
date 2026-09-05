@@ -59,22 +59,23 @@ program rce_long
     ! only once the elapsed model day exceeds this, so a single continuous run
     ! can spin the slab up and then sample a clean climatology over its tail.
     real(wp) :: mon_spinup_days = 0.0_wp
-    integer  :: trunc = 21, nlev = 12, nstep = 4800, ndiff = 6
+    integer  :: trunc = 21, nlev = 12, nstep = 4800, ndiff = 8
     integer  :: print_every = 96          ! ~2 model days at dt=1800
-    real(wp) :: dt = 1800.0_wp, tau_diff = 6.0_wp
+    real(wp) :: dt = 3600.0_wp, tau_diff = 4.0_wp
     real(wp) :: tau_diff_div = 0.0_wp     ! divergence-only diffusion timescale [h]; 0 => = tau_diff
     real(wp) :: t_ref = 300.0_wp          ! isothermal semi-implicit reference [K]
     logical  :: vert_vanleer = .FALSE.    ! van Leer (not donor-cell) vertical q transport
-    ! Couple diabatic heating in-solve (step 1b) vs the default forward-split.
-    ! Needs eps_filter ~0.15 to hold the convective computational mode.
-    logical  :: couple_diabatic = .FALSE.
-    real(wp) :: eps_filter = 0.06_wp, raw_alpha = 0.53_wp
-    real(wp) :: si_alpha = 0.5_wp         ! semi-implicit decentering: 0.5 centered, 1.0 backward (SW)
-    real(wp) :: conv_tau = 7200.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp, u_min = 1.0_wp
+    real(wp) :: eps_filter = 0.1_wp, raw_alpha = 0.53_wp   ! leapfrog only (SpeedyWeather values)
+    real(wp) :: si_alpha = 1.0_wp         ! semi-implicit decentering: 0.5 centered, 1.0 backward (SW)
+    ! Time scheme (aeros_timestep header, "The Lorenz N-cycle"): "leapfrog" or "ncycle".
+    character(len=16) :: time_scheme = "ncycle"
+    integer           :: ncycle = 4
+    character(len=8)  :: ncycle_variant = "A"
+    real(wp) :: conv_tau = 14400.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp, u_min = 1.0_wp
     character(len=32) :: conv_scheme = "sbm_frierson" ! "sbm" | "sbm_frierson" | "manabe"
     real(wp) :: c_d = 1.5e-3_wp       ! surface momentum drag (0 = off; brakes the low-level jet)
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
-    logical  :: l_rad = .TRUE., l_sponge = .TRUE., l_vdiff = .FALSE.
+    logical  :: l_rad = .TRUE., l_sponge = .FALSE., l_vdiff = .FALSE.
     logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
     logical  :: l_dry_adjust = .TRUE. ! dry convective adjustment before the moist scheme
     logical  :: l_rad_clouds = .FALSE. ! diagnostic all-sky clouds in the radiation
@@ -129,6 +130,7 @@ program rce_long
     ! that otherwise leaves the free troposphere pinned at RH~100% (m2_results §23).
     real(wp) :: cond_rh_crit = 0.95_wp
     real(wp) :: cond_reevap  = 30.0_wp   ! reevaporation efficiency of falling precip
+    real(wp) :: cond_time_scale = 3.0_wp ! condensation adjustment time scale [steps] (SW: 3)
     integer  :: ocean_mode = 0       ! 0 prescribed SST, 1 slab
     real(wp) :: ocean_depth = 10.0_wp
     ! Prescribed-SST meridional profile knobs (default = APE Control). sst_shape=1.0
@@ -272,18 +274,21 @@ program rce_long
     par%eps_filter = eps_filter
     par%raw_alpha  = raw_alpha
     par%si_alpha   = si_alpha
+    par%time_scheme    = time_scheme
+    par%ncycle         = ncycle
+    par%ncycle_variant = ncycle_variant
     par%ndiff = ndiff; par%tau_diff = tau_diff
     par%mass_fixer = .FALSE.
 
     call aeros_state_alloc(now, grd, pool%sht(1)%nlm, nlev)
     call aeros_timestep_init(ts, par, pool, grd, vg)
 
-    ts%couple_diabatic = couple_diabatic
     ts%mst%vert_vanleer = vert_vanleer
 
     ts%cnd%enabled = l_cnd
     ts%cnd%rh_crit = cond_rh_crit
     ts%cnd%reevap  = cond_reevap
+    ts%cnd%time_scale = cond_time_scale
     ts%cnv%enabled = l_cnv
     ts%cnv%tau = conv_tau
     ts%cnv%dry_adjust = l_dry_adjust
@@ -1010,14 +1015,16 @@ contains
         call nml_read(nmlfile, "rce", "dt", dt)
         call nml_read(nmlfile, "rce", "t_ref", t_ref, &
                       defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "couple_diabatic", couple_diabatic, &
-                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "vert_vanleer", vert_vanleer, &
                       defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "tau_diff", tau_diff)
-        call nml_read(nmlfile, "rce", "ndiff", ndiff)
-        call nml_read(nmlfile, "rce", "eps_filter", eps_filter)
-        call nml_read(nmlfile, "rce", "raw_alpha", raw_alpha)
+        call nml_read(nmlfile, "rce", "tau_diff", tau_diff, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "ndiff", ndiff, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "eps_filter", eps_filter, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "raw_alpha", raw_alpha, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "conv_tau", conv_tau)
         call nml_read(nmlfile, "rce", "c_h", c_h)
         call nml_read(nmlfile, "rce", "c_e", c_e)
@@ -1033,13 +1040,17 @@ contains
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "qforce_amp", qforce_amp, &
                       defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "sponge_kr", sponge_kr)
-        call nml_read(nmlfile, "rce", "sponge_kt", sponge_kt)
-        call nml_read(nmlfile, "rce", "sponge_sigma", sponge_sigma)
+        call nml_read(nmlfile, "rce", "sponge_kr", sponge_kr, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "sponge_kt", sponge_kt, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "sponge_sigma", sponge_sigma, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_cnd", l_cnd)
         call nml_read(nmlfile, "rce", "l_rad", l_rad)
         call nml_read(nmlfile, "rce", "l_rad_clouds", l_rad_clouds)
-        call nml_read(nmlfile, "rce", "l_sponge", l_sponge)
+        call nml_read(nmlfile, "rce", "l_sponge", l_sponge, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_vdiff", l_vdiff)
         call nml_read(nmlfile, "rce", "l_diag", l_diag)
         call nml_read(nmlfile, "rce", "vdiff_k0", vdiff_k0)
@@ -1054,6 +1065,8 @@ contains
         call nml_read(nmlfile, "rce", "co2_ppm", co2_ppm)
         call nml_read(nmlfile, "rce", "cond_rh_crit", cond_rh_crit)
         call nml_read(nmlfile, "rce", "cond_reevap", cond_reevap, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cond_time_scale", cond_time_scale, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "ocean_mode", ocean_mode)
         call nml_read(nmlfile, "rce", "ocean_depth", ocean_depth)
@@ -1149,6 +1162,12 @@ contains
         call nml_read(nmlfile, "rce", "tau_diff_div", tau_diff_div, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "si_alpha", si_alpha, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "time_scheme", time_scheme, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "ncycle", ncycle, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "ncycle_variant", ncycle_variant, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "sst_eq", sst_eq, &
                       defaults_file="input/rce_defaults.nml")

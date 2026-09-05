@@ -7,9 +7,22 @@
     ! Isothermal semi-implicit reference temperature [K] (aeros_semiimp requires
     ! isothermal). Optional; omitted -> this default.
     t_ref            = 300.0
-    ! Couple diabatic heating in-solve (step 1b) instead of the default forward
-    ! split. Needs eps_filter ~0.15 for stability. Off by default (bit-for-bit).
-    couple_diabatic  = .false.
+    ! The SpeedyWeather-faithful dynamical core (docs/refs/sw_faithful_dynamics.md)
+    ! is the default: del^8 hyperdiffusion on 4 h, divergence on 1 h with the
+    ! order tapered to del^4 above sigma = 0.2 (tau_diff_div/diff_taper below),
+    ! backward-implicit gravity waves (si_alpha = 1), no Rayleigh sponge.
+    ! eps_filter/raw_alpha are the RAW time-filter coefficients and only act
+    ! under time_scheme = "leapfrog" (SpeedyWeather's 0.1 / 0.53).
+    tau_diff         = 4.0
+    ndiff            = 8
+    eps_filter       = 0.1
+    raw_alpha        = 0.53
+    l_sponge         = .false.
+    ! Sponge strengths, used only when l_sponge = .true.: max Rayleigh and
+    ! Newtonian rates [1/s] and the ramp top [sigma].
+    sponge_kr        = 2.3148e-5
+    sponge_kt        = 1.1574e-5
+    sponge_sigma     = 0.12
     ! Van Leer (2nd-order monotone) vertical humidity transport instead of the
     ! default first-order upwind donor cell. Off by default (bit-for-bit).
     vert_vanleer     = .false.
@@ -36,6 +49,9 @@
     ! Reevaporation efficiency of falling large-scale precip into sub-saturated
     ! layers (SpeedyWeather's ImplicitCondensation reevaporation; 0 disables it).
     cond_reevap      = 30.0
+    ! Fraction 1/cond_time_scale of the saturation adjustment (and reevaporation)
+    ! applied per step (SpeedyWeather ImplicitCondensation time_scale = 3).
+    cond_time_scale  = 3.0
     ! Land surface + land-sea mask (feat/land). l_land off = all-ocean
     ! aquaplanet, the bit-for-bit default. Files are ERA5 climatologies.
     l_land           = .false.
@@ -84,17 +100,25 @@
     diff_zeta_ref    = 1.0e-4
     diff_adapt_gain  = 1.0
     diff_adapt_max   = 10.0
-    diff_taper       = .false.
+    diff_taper       = .true.
     diff_ndiff_top   = 4
-    diff_taper_sigma = 0.15
+    diff_taper_sigma = 0.2
     ! Divergence-only diffusion e-folding time [h] (SpeedyWeather runs the
     ! divergent modes on a shorter timescale than vorticity/temperature to absorb
     ! upward-propagating gravity waves at the lid). 0 = use tau_diff -> bit-for-bit.
-    tau_diff_div     = 0.0
+    tau_diff_div     = 1.0
     ! Semi-implicit decentering weight on X^(n+1): 0.5 = centered (neutral gravity
     ! waves, bit-for-bit default), 1.0 = backward-implicit (SpeedyWeather; damps
     ! the fast gravity + computational modes in the solve).
-    si_alpha         = 0.5
+    si_alpha         = 1.0
+    ! Time scheme (src/dynamics/aeros_timestep.f90, "The Lorenz N-cycle"):
+    ! "leapfrog" (RAW-filtered semi-implicit leapfrog; eps_filter/raw_alpha
+    ! apply) or "ncycle" (two-time-level semi-implicit Lorenz N-cycle, Hotta et
+    ! al. 2016; no time filter, physics on the one time chain). ncycle = N,
+    ! ncycle_variant = A | B | AB | ABBA (ABBA is 4th order for N = 4).
+    time_scheme      = "ncycle"
+    ncycle           = 4
+    ncycle_variant   = "A"
     ! Prescribed-SST meridional profile: T_s = T0 + sst_eq*(1 - sin^2(sst_shape*phi))
     ! for |phi| < sst_lat. Defaults are the APE Control profile (gradient steepest at
     ! 30 deg). sst_shape=1.0 + sst_lat=90 gives SpeedyWeather's cos^2(phi).

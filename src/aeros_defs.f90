@@ -153,6 +153,17 @@ module aeros_defs
         ! the fast gravity/computational modes in the solve). Defaulted so drivers
         ! and tests that never set it get the bit-for-bit centered scheme.
         real(wp) :: si_alpha = 0.5_wp
+        ! -- Time scheme (src/dynamics/aeros_timestep.f90, "The Lorenz N-cycle").
+        ! "leapfrog": the RAW-filtered semi-implicit leapfrog (three time levels,
+        ! eps_filter/raw_alpha apply). "ncycle": the two-time-level semi-implicit
+        ! Lorenz N-cycle (Hotta et al. 2016), no time filter, physics and the
+        ! gridpoint tracers on the one time chain. `ncycle` is N (4 recommended)
+        ! and `ncycle_variant` the weight sequence: "A", "B", "AB" or "ABBA"
+        ! (4th order for N = 4). The N-cycle is the production default; the
+        ! leapfrog-specific tests set "leapfrog" explicitly.
+        character(len=16) :: time_scheme    = "ncycle"
+        integer           :: ncycle         = 4
+        character(len=8)  :: ncycle_variant = "A"
         real(wp) :: tau_diff      ! diffusion e-folding time at l = lmax [h]
         integer  :: ndiff         ! diffusion order: 2, 4 or 6
 
@@ -331,6 +342,9 @@ contains
         call nml_read(filename, nml_group, "tau_diff",      par%tau_diff, defaults_file=defaults_file)
         call nml_read(filename, nml_group, "ndiff",         par%ndiff, defaults_file=defaults_file)
         call nml_read(filename, nml_group, "semi_implicit", par%semi_implicit, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "time_scheme",    par%time_scheme, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "ncycle",         par%ncycle, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "ncycle_variant", par%ncycle_variant, defaults_file=defaults_file)
         call nml_read(filename, nml_group, "held_suarez",   par%held_suarez, defaults_file=defaults_file)
         call nml_read(filename, nml_group, "mass_fixer",    par%mass_fixer, defaults_file=defaults_file)
 

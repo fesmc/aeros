@@ -169,6 +169,11 @@ timestep : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_timestep.x is ready."
 
+ncycle : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_ncycle.x $(testdir)/test_ncycle.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_ncycle.x is ready."
+
 correction : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_correction.x $(testdir)/test_correction.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
@@ -255,7 +260,7 @@ adaptive-diff : aeros-static
 		@echo "    test_adaptive_diff.x is ready."
 
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency semiimp timestep correction transport condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography land cloud-prog seaice adaptive-diff
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction transport condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography land cloud-prog seaice adaptive-diff ncycle
 
 # Driver executables
 drivers : run bench held-suarez

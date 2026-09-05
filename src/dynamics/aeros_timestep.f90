@@ -9,12 +9,17 @@ module aeros_timestep
     ! === One step ============================================================
     !
     !   1. R      = aeros_tendency_calc(X^n)            the full nonlinear RHS
+    !      + the column physics (surface fluxes, convection, condensation,
+    !        radiation) evaluated on the grid at X^n and coupled into the
+    !        thermodynamic RHS as a RATE (step 1b) -- see "Physics coupling"
     !   2. zeta^(n+1) = zeta^(n-1) + h R_zeta           plain leapfrog
     !      (D, T, lnps)^(n+1) from aeros_semiimp_step   implicit gravity waves
     !   3. horizontal diffusion, implicitly, on zeta, D, T
+    !      boundary-layer vertical diffusion, implicitly, on the n+1 state
     !   4. RAW time filter on X^n, using X^(n-1), X^n, X^(n+1)
     !   5. shift: (old, now) <- (now, new), by swapping descriptors
     !   6. global mass fixer, optional
+    !   7. gridpoint tracer transport (humidity, cloud fraction), forward dt
     !
     ! h = 2 dt, except on the very first step of a run, where there is no
     ! X^(n-1) and the scheme starts as X^(n-1) = X^n with h = dt -- forward in
@@ -23,7 +28,54 @@ module aeros_timestep
     ! the transition and never again; the filter is skipped on that step,
     ! there being no third time level for it to act on.
     !
-    ! === The time filter =====================================================
+    ! === Physics coupling ====================================================
+    !
+    ! Every column-physics term adds its temperature INCREMENT over one dt to
+    ! wrk%dt_phys on the grid; step 1b divides by dt and adds the RATE to the
+    ! dynamical heating dtdt, so it is integrated over h with the dynamics
+    ! (SPEEDY / SpeedyWeather coupling) and the divergent circulation responds
+    ! to the heating within the step. Humidity is a gridpoint field with a
+    ! single time level advanced forward by dt each step, so the drying and the
+    ! heating deposit at the same mean rate.
+    !
+    ! The increment must NOT be added forward onto X^(n+1) after the step
+    ! (the scheme used up to 2026-09): each leapfrog chain advances 2 dt per
+    ! step but would receive only dt of physics, so every heating landed at
+    ! HALF its rate while humidity dried at the full rate. That split was also
+    ! a 2 dt computational mode -- increments diagnosed on one chain applied to
+    ! the other -- which is what limited dt to 900 s at T21.
+    !
+    ! Coupling across chains is only stable when each operator is soft over a
+    ! step: relaxations use a = (dt/tau)/(1 + dt/tau), and the saturation
+    ! adjustment removes 1/time_scale of the supersaturation per step
+    ! (SpeedyWeather's values throughout). Anything stiffer is a diffusion and
+    ! belongs implicit on the n+1 state, as vdiff is.
+    !
+    ! === The Lorenz N-cycle (time_scheme = "ncycle") =========================
+    !
+    ! A two-time-level alternative to the leapfrog: the semi-implicit Lorenz
+    ! N-cycle of Hotta, Yoshimura & Lorenz (2016, MWR). One RHS evaluation per
+    ! substep, N substeps per cycle, a running weighted accumulator G of the
+    ! EXPLICIT part of the RHS, and the same gravity-wave solve as the leapfrog:
+    !
+    !   w_k   = 1 (k = 0);  N/(N-k) (variant A) or N/k (variant B), k = 1..N-1
+    !   G     <- w_k [ R(X) - L(X) ] + (1 - w_k) G
+    !   X_new  = X + dt (G + L X) + dt alpha L (X_new - X)
+    !
+    ! which is aeros_semiimp_step called with X^(n-1) = X^n = X, h = dt and the
+    ! RHS G + L X. Variant AB alternates A and B per cycle; ABBA cycles A,B,B,A
+    ! and is 4th order for N = 4. Every substep advances the clock by dt, so
+    ! the cost per model-day equals the leapfrog's. What it buys: ONE time
+    ! chain. The gridpoint humidity is forward-in-time on that same chain and
+    ! the physics rates are evaluated and applied on it, so there is no
+    ! cross-chain physics (see "Physics coupling"), no computational mode and
+    ! no time filter -- eps_filter/raw_alpha are ignored. The advective
+    ! stability limit is ~0.7 of the leapfrog's per evaluation (Hotta 2016,
+    ! Fig. 2), which for aeros is a smaller price than the dt the physics
+    ! coupling forced on the leapfrog. Restart carries G (`gacc_*`) and the
+    ! substep index rides on nstep.
+    !
+    ! === The time filter (leapfrog only) =====================================
     !
     ! Leapfrog admits a computational mode that must be damped or it grows. The
     ! classical Robert-Asselin filter does that but is only FIRST-order
@@ -74,7 +126,7 @@ module aeros_timestep
     ! === Adaptive hyperdiffusion (SpeedyWeather-style) =======================
     !
     ! Two OPT-IN refinements of the operator above, both default OFF and both
-    ! bit-for-bit reducing to the fixed del^ndiff scheme when off. They are the
+    ! reducing to the fixed del^ndiff scheme when off. They are the
     ! two ideas SpeedyWeather uses to stay stable at the model top with no
     ! Rayleigh sponge (docs/refs/speedy_comparison.md 4a); aeros keeps its
     ! sponge, so these are a complementary, independently-useful numerical
@@ -191,7 +243,8 @@ module aeros_timestep
                                 aeros_tendency_grid, aeros_tendency_spectral
     use aeros_semiimp,  only : aeros_semiimp_class, aeros_semiimp_init, &
                                 aeros_semiimp_end, aeros_semiimp_set_step, &
-                                aeros_semiimp_step, aeros_semiimp_print
+                                aeros_semiimp_step, aeros_semiimp_print, &
+                                aeros_semiimp_linear
     use aeros_correction, only : aeros_correction_class, aeros_correction_init, &
                                 aeros_correction_load, aeros_correction_end, &
                                 aeros_correction_apply, aeros_correction_report
@@ -235,6 +288,9 @@ module aeros_timestep
 
     private
 
+    integer, parameter :: SCHEME_LEAPFROG = 1, SCHEME_NCYCLE = 2
+    integer, parameter :: NCYCLE_A = 1, NCYCLE_B = 2, NCYCLE_AB = 3, NCYCLE_ABBA = 4
+
     type aeros_timestep_class
         ! Everything the integrator owns, allocated once and reused.
 
@@ -251,14 +307,12 @@ module aeros_timestep
         integer  :: ndiff      = 6        ! diffusion order (6 = del^6)
         logical  :: semi_implicit = .TRUE.
 
-        ! Couple the diabatic heating (surface, convection, condensation,
-        ! radiation) into the thermodynamic tendency BEFORE the semi-implicit
-        ! solve (step 1b), the standard coupling, so the divergent circulation
-        ! responds to the heating within the step. Default OFF = the validated
-        ! forward-split increment on n+1 (step 6), bit-for-bit. The in-solve path
-        ! needs a stronger time filter (eps_filter ~0.15) to hold the convective
-        ! computational mode the centered heating excites; see m2_results 12.1.
-        logical  :: couple_diabatic = .FALSE.
+        ! Time scheme (module header, "The Lorenz N-cycle").
+        integer  :: scheme   = SCHEME_LEAPFROG
+        integer  :: ncycle   = 4                  ! N, ncycle only
+        integer  :: nvariant = NCYCLE_A           ! weight sequence, ncycle only
+        type(aeros_tend_class) :: gacc            ! the accumulator G, ncycle only
+        type(aeros_tend_class) :: lx              ! scratch: L X, ncycle only
 
         ! Steps taken since init. Zero means the next one is the start-up step.
         integer  :: nstep = 0
@@ -470,6 +524,7 @@ contains
         character(len=*), intent(in), optional    :: defaults_file
 
         integer  :: nlm, lmax, l, k
+        integer :: ischeme, ivariant
         real(wp) :: lref, ramp
         complex(wp_sh), allocatable :: c_one(:)
         real(dp), allocatable :: scr(:,:)
@@ -502,8 +557,34 @@ contains
             error stop 1
         end if
 
+        select case (trim(par%time_scheme))
+        case ("leapfrog");  ischeme = SCHEME_LEAPFROG
+        case ("ncycle");    ischeme = SCHEME_NCYCLE
+        case default
+            write(io_unit_err,*) "aeros_timestep_init:: error: time_scheme must be "// &
+                                    "'leapfrog' or 'ncycle', got '"//trim(par%time_scheme)//"'"
+            error stop 1
+        end select
+        select case (trim(par%ncycle_variant))
+        case ("A");    ivariant = NCYCLE_A
+        case ("B");    ivariant = NCYCLE_B
+        case ("AB");   ivariant = NCYCLE_AB
+        case ("ABBA"); ivariant = NCYCLE_ABBA
+        case default
+            write(io_unit_err,*) "aeros_timestep_init:: error: ncycle_variant must be "// &
+                                    "A, B, AB or ABBA, got '"//trim(par%ncycle_variant)//"'"
+            error stop 1
+        end select
+        if (ischeme == SCHEME_NCYCLE .and. par%ncycle < 2) then
+            write(io_unit_err,*) "aeros_timestep_init:: error: ncycle must be >= 2, got ", par%ncycle
+            error stop 1
+        end if
+
         call aeros_timestep_end(ts)
 
+        ts%scheme        = ischeme
+        ts%ncycle        = par%ncycle
+        ts%nvariant      = ivariant
         ts%dt            = par%dt
         ts%eps_filter    = par%eps_filter
         ts%raw_alpha     = par%raw_alpha
@@ -520,6 +601,10 @@ contains
         call aeros_spec_alloc(ts%old, nlm, vg%nlev)
         call aeros_spec_alloc(ts%new, nlm, vg%nlev)
         call aeros_tend_alloc(ts%tnd, nlm, vg%nlev)
+        if (ts%scheme == SCHEME_NCYCLE) then
+            call aeros_tend_alloc(ts%gacc, nlm, vg%nlev)
+            call aeros_tend_alloc(ts%lx,   nlm, vg%nlev)
+        end if
         call aeros_work_alloc(ts%wrk, grd%nlon, grd%nlat, vg%nlev)
 
         ! Factorized for the start-up step; switched to 2 dt after it.
@@ -728,6 +813,8 @@ contains
         call aeros_spec_end(ts%old)
         call aeros_spec_end(ts%new)
         call aeros_tend_end(ts%tnd)
+        call aeros_tend_end(ts%gacc)
+        call aeros_tend_end(ts%lx)
         call aeros_work_end(ts%wrk)
         call aeros_semiimp_end(ts%si)
         call aeros_hs_end(ts%hs)
@@ -822,19 +909,22 @@ contains
         end if
 
         ! === 0. Step length, and the start-up ================================
-        if (ts%nstep == 0) then
+        if (ts%scheme == SCHEME_NCYCLE) then
+            ! Two time levels: every substep is dt, no start-up special case.
+            h = ts%dt
+        else if (ts%nstep == 0) then
             ! No X^(n-1) yet: start from rest against the current state.
             h = ts%dt
             call aeros_spec_copy(ts%old, now%spec)
-
-            ! Capture the fixer's target BEFORE any dynamics have run. Taking
-            ! it after the first step instead would bake that step's error into
-            ! the target and make it permanent.
-            if (ts%mass_fixer .and. ts%mass_target < 0.0_dp) then
-                ts%mass_target = mass_of(ts, s, now%spec)
-            end if
         else
             h = 2.0_wp*ts%dt
+        end if
+
+        ! Capture the fixer's target BEFORE any dynamics have run. Taking it
+        ! after the first step instead would bake that step's error into the
+        ! target and make it permanent.
+        if (ts%nstep == 0 .and. ts%mass_fixer .and. ts%mass_target < 0.0_dp) then
+            ts%mass_target = mass_of(ts, s, now%spec)
         end if
 
         if (ts%si%dt_step /= h) call aeros_semiimp_set_step(ts%si, h)
@@ -851,11 +941,9 @@ contains
 
         ! Diabatic heating accumulator. Surface fluxes, convection, condensation
         ! and radiation each add a temperature increment [K] here over one dt.
-        ! Default: applied forward onto n+1 at step 6. With couple_diabatic on:
-        ! step 1b converts the sum to a rate and couples it into the thermodynamic
-        ! tendency ahead of the semi-implicit solve, so the divergent circulation
-        ! is generated in response to the heating within the step. Zero it once if
-        ! any term is on.
+        ! Step 1b converts the sum to a rate and couples it into the thermodynamic
+        ! tendency ahead of the semi-implicit solve (module header, "Physics
+        ! coupling"). Zero it once if any term is on.
         if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled &
             .or. ts%cnd%enabled) &
             ts%wrk%dt_phys = 0.0_wp
@@ -907,11 +995,10 @@ contains
 
         ! Large-scale condensation, at the same grid seam: it dries the
         ! gridpoint humidity in place and adds its latent heating to wrk%dt_phys.
-        ! Default (forward-split) keeps the heating and the forward drying on one
-        ! discretization; with couple_diabatic the heating moves to the centered
-        ! step-1b tendency while the drying stays forward on the off-spectral
-        ! humidity, so column MSE is then conserved only in the mean (a watched
-        ! budget diagnostic, not a per-step equality). Returns at once when dry.
+        ! The heating goes through the centered step-1b tendency while the
+        ! drying is forward on the single-level gridpoint humidity, so column
+        ! MSE is conserved in the mean, not as a per-step equality (a watched
+        ! budget diagnostic). Returns at once when dry.
         call aeros_condensation_apply(ts%cnd, vg, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
         if (ts%wrk%diag) ts%wrk%dt_cnd = ts%wrk%dt_phys
@@ -933,9 +1020,8 @@ contains
         end if
 
         ! Radiation, at the same grid seam: clear-sky LW+SW heating, recomputed
-        ! on a multi-hour cadence and cached, accumulated into wrk%dt_phys as a
-        ! forward increment (NOT the centered path -- its top-of-atmosphere
-        ! cooling is sharp and stiff). Uses the ocean's SST as the skin
+        ! on a multi-hour cadence and cached, accumulated into wrk%dt_phys like
+        ! every other term. Uses the ocean's SST as the skin
         ! temperature (always allocated, even when the surface fluxes are off).
         ! When the prognostic cloud scheme is on it consumes now%cf_g; otherwise
         ! it diagnoses the cloud fraction from RH (bit-for-bit unchanged).
@@ -1000,7 +1086,6 @@ contains
                                     ts%cnv%precip + ts%cnd%precip, ts%dt)
 
         ! === 1b. Couple the diabatic heating into the thermodynamic tendency ==
-        ! (couple_diabatic only; default OFF uses the step-6 forward-split.)
         ! Surface, convection, condensation and radiation accumulated a heating
         ! INCREMENT [K] over one dt in wrk%dt_phys. Convert it back to a RATE
         ! [K/s] -- dt_phys/dt -- and add it to the dynamical heating rate dtdt,
@@ -1011,16 +1096,15 @@ contains
         ! Newtonian heating already gets here (aeros_held_suarez adds to dtdt).
         !
         ! The rate is the true physical rate, no leapfrog factor: the semi-
-        ! implicit advances temperature over h = 2 dt but each step moves the
-        ! clock forward only dt, so a rate Q deposits Q*dt per clock-step in the
-        ! mean -- exactly what the forward-split (dt_phys = Q*dt onto n+1)
-        ! deposits. Any future attenuation of a term stays an explicit factor on
-        ! the rate, out here, never folded into the rate itself.
+        ! implicit advances each leapfrog chain over h = 2 dt, and a chain is
+        ! stepped every other clock-step, so a rate Q deposits Q*dt per clock-
+        ! step in the mean. (An increment Q*dt added to X^(n+1) alone would
+        ! deposit half that -- the module-header "Physics coupling" note.)
         !
         ! Guarded on the same physics-enabled condition that zeroed dt_phys, so
         ! the pure-dynamics / Held-Suarez path leaves dtdt untouched, bit-exact.
-        if (ts%couple_diabatic .and. (ts%surf%enabled .or. ts%cnv%enabled &
-            .or. ts%rad%enabled .or. ts%cnd%enabled)) &
+        if (ts%surf%enabled .or. ts%cnv%enabled .or. ts%rad%enabled &
+            .or. ts%cnd%enabled) &
             ts%wrk%dtdt = ts%wrk%dtdt + ts%wrk%dt_phys/ts%dt
 
         ! Diagnostic prescribed heating, on the same in-solve seam. A controlled
@@ -1037,31 +1121,10 @@ contains
         call aeros_correction_apply(ts%cor, ts%tnd)
 
         ! === 2. Advance ======================================================
-        !
-        ! Vorticity has no linearized gravity-wave part, so it leapfrogs
-        ! plainly whichever scheme the other three use.
-        do k = 1, vg%nlev
-            do lm = 1, s%nlm
-                ts%new%vor(lm,k) = ts%old%vor(lm,k) + h*ts%tnd%vor(lm,k)
-            end do
-        end do
-
-        if (ts%semi_implicit) then
-            call aeros_semiimp_step(ts%si, s, ts%old, now%spec, ts%tnd, ts%new)
+        if (ts%scheme == SCHEME_NCYCLE) then
+            call advance_ncycle(ts, s, vg, now, h)
         else
-            ! Fully explicit leapfrog. Not a production configuration -- it is
-            ! limited by the ~300 m s-1 external gravity wave rather than by
-            ! the wind -- but it is what makes the semi-implicit solve's value
-            ! measurable rather than asserted (tests/test_timestep.f90).
-            do k = 1, vg%nlev
-                do lm = 1, s%nlm
-                    ts%new%div(lm,k)  = ts%old%div(lm,k)  + h*ts%tnd%div(lm,k)
-                    ts%new%temp(lm,k) = ts%old%temp(lm,k) + h*ts%tnd%temp(lm,k)
-                end do
-            end do
-            do lm = 1, s%nlm
-                ts%new%lnps(lm) = ts%old%lnps(lm) + h*ts%tnd%lnps(lm)
-            end do
+            call advance_leapfrog(ts, s, vg, now, h)
         end if
 
         ! === 3. Horizontal diffusion, implicit ===============================
@@ -1078,38 +1141,24 @@ contains
         ! grid, diffuses T/q/u/v there, and transforms back.
         if (ts%vd%enabled) call apply_vdiff(ts, s, vg, now)
 
-        ! === 4. Time filter ==================================================
-        if (ts%nstep > 0) call raw_filter(ts, s, now%spec, vg%nlev)
+        ! === 4. Time filter (leapfrog) =======================================
+        if (ts%scheme == SCHEME_LEAPFROG .and. ts%nstep > 0) &
+            call raw_filter(ts, s, now%spec, vg%nlev)
 
         ! === 5. Shift the time levels ========================================
-        ! old <- now <- new, by exchanging descriptors: the retired X^(n-1)
-        ! becomes the scratch that the next step writes X^(n+1) into.
-        call aeros_spec_swap(ts%old, now%spec)
+        ! Leapfrog: old <- now <- new, by exchanging descriptors: the retired
+        ! X^(n-1) becomes the scratch that the next step writes X^(n+1) into.
+        ! N-cycle: now <-> new, the retired X becoming the scratch.
+        if (ts%scheme == SCHEME_LEAPFROG) call aeros_spec_swap(ts%old, now%spec)
         call aeros_spec_swap(now%spec, ts%new)
 
-        ! === 6. Forward-split physics heating (default; not couple_diabatic) ==
-        ! Surface, convective, condensational AND radiative heating were
-        ! accumulated on the grid in wrk%dt_phys as an increment [K]. Apply it
-        ! FORWARD onto the n+1 state now -- transform per level and add to
-        ! now%temp -- decoupled from the centered leapfrog, which would otherwise
-        ! turn their large, vertically sharp heating into a computational-mode
-        ! instability (m2_results 12.1). This mirrors the forward treatment of
-        ! gridpoint humidity in step 8, so for condensation the drying and heating
-        ! share one discretization. (Boundary-layer vertical diffusion is
-        ! separate: a diffusion operator, applied implicitly in step 3c.) When
-        ! couple_diabatic is on, step 1b coupled the heating in-solve instead and
-        ! this is skipped.
-        if (.not. ts%couple_diabatic .and. (ts%surf%enabled .or. ts%cnv%enabled &
-            .or. ts%rad%enabled .or. ts%cnd%enabled)) &
-            call apply_phys_heating(s, now%spec, ts%wrk%dt_phys, vg%nlev)
-
-        ! === 7. Mass fixer ===================================================
+        ! === 6. Mass fixer ===================================================
         ! After the swap, so it acts on X^(n+1) -- the state the caller is
         ! about to receive -- and after the filter, so nothing follows it that
         ! could reintroduce what it just removed.
         if (ts%mass_fixer) call mass_fix(ts, s, now%spec)
 
-        ! === 8. Grid tracer transport ========================================
+        ! === 7. Grid tracer transport ========================================
         ! On the grid, forward in time, using the winds and surface pressure at
         ! the time level just stepped from -- which are still in ts%wrk, filled
         ! by aeros_tendency_grid and untouched since. The transported fields
@@ -1136,34 +1185,153 @@ contains
 
     end subroutine aeros_timestep_step
 
-    subroutine apply_phys_heating(s, spec, dt_phys, nlev)
-        ! Add the forward-split physics temperature increment -- accumulated on
-        ! the grid in [K] -- to the spectral temperature of the n+1 state, one
-        ! analysis per level. The grid field is consumed (analysis overwrites
-        ! its input). See step 6 of aeros_timestep_step for why the convective
-        ! heating is applied here, forward, rather than through the centered RHS.
-        ! Used only in the default (not couple_diabatic) configuration.
+    subroutine advance_leapfrog(ts, s, vg, now, h)
+        ! X^(n+1) into ts%new from X^(n-1) = ts%old, X^n = now%spec and the RHS
+        ! in ts%tnd, over h (= 2 dt; dt on the start-up step).
 
         implicit none
 
-        type(aeros_sht_class),  intent(in)    :: s
-        type(aeros_spec_class), intent(inout) :: spec
-        real(wp),               intent(inout) :: dt_phys(:,:,:)
-        integer,                intent(in)    :: nlev
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_sht_class),      intent(in)    :: s
+        type(aeros_vgrid_class),    intent(in)    :: vg
+        type(aeros_state_class),    intent(in)    :: now
+        real(wp),                   intent(in)    :: h
 
-        complex(wp_sh) :: tlm(s%nlm)
         integer :: k, lm
 
-        do k = 1, nlev
-            call aeros_sht_analysis(s, dt_phys(:,:,k), tlm)
+        ! Vorticity has no linearized gravity-wave part, so it leapfrogs
+        ! plainly whichever scheme the other three use.
+        do k = 1, vg%nlev
             do lm = 1, s%nlm
-                spec%temp(lm,k) = spec%temp(lm,k) + tlm(lm)
+                ts%new%vor(lm,k) = ts%old%vor(lm,k) + h*ts%tnd%vor(lm,k)
             end do
         end do
 
+        if (ts%semi_implicit) then
+            call aeros_semiimp_step(ts%si, s, ts%old, now%spec, ts%tnd, ts%new)
+        else
+            ! Fully explicit leapfrog. Not a production configuration -- it is
+            ! limited by the ~300 m s-1 external gravity wave rather than by
+            ! the wind -- but it is what makes the semi-implicit solve's value
+            ! measurable rather than asserted (tests/test_timestep.f90).
+            do k = 1, vg%nlev
+                do lm = 1, s%nlm
+                    ts%new%div(lm,k)  = ts%old%div(lm,k)  + h*ts%tnd%div(lm,k)
+                    ts%new%temp(lm,k) = ts%old%temp(lm,k) + h*ts%tnd%temp(lm,k)
+                end do
+            end do
+            do lm = 1, s%nlm
+                ts%new%lnps(lm) = ts%old%lnps(lm) + h*ts%tnd%lnps(lm)
+            end do
+        end if
+
         return
 
-    end subroutine apply_phys_heating
+    end subroutine advance_leapfrog
+
+    subroutine advance_ncycle(ts, s, vg, now, h)
+        ! One substep of the semi-implicit Lorenz N-cycle (Hotta et al. 2016,
+        ! eqs 19-21): X_new into ts%new from X = now%spec, the RHS R(X) in
+        ! ts%tnd and the accumulator G in ts%gacc. Module header, "The Lorenz
+        ! N-cycle". The substep index and the cycle count ride on nstep, so a
+        ! restart resumes the cycle where it left it.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(inout) :: ts
+        type(aeros_sht_class),      intent(in)    :: s
+        type(aeros_vgrid_class),    intent(in)    :: vg
+        type(aeros_state_class),    intent(in)    :: now
+        real(wp),                   intent(in)    :: h
+
+        real(wp) :: w, w1
+        integer  :: k, lm
+
+        w  = ncycle_weight(ts%nvariant, mod(ts%nstep, ts%ncycle), ts%ncycle, &
+                            ts%nstep/ts%ncycle)
+        w1 = 1.0_wp - w
+
+        ! L(X): the part of the RHS the solve treats implicitly. Explicit
+        ! integration has no such part and accumulates the full RHS.
+        if (ts%semi_implicit) then
+            call aeros_semiimp_linear(ts%si, s, now%spec, ts%lx%div, ts%lx%temp, ts%lx%lnps)
+        else
+            ts%lx%div  = (0.0_wp_sh, 0.0_wp_sh)
+            ts%lx%temp = (0.0_wp_sh, 0.0_wp_sh)
+            ts%lx%lnps = (0.0_wp_sh, 0.0_wp_sh)
+        end if
+
+        ! G <- w [R - L X] + (1 - w) G; the effective RHS G + L X replaces R in
+        ! tnd (vorticity has no linear part). Vorticity advances explicitly.
+        do k = 1, vg%nlev
+            do lm = 1, s%nlm
+                ts%gacc%vor(lm,k)  = w*ts%tnd%vor(lm,k) + w1*ts%gacc%vor(lm,k)
+                ts%gacc%div(lm,k)  = w*(ts%tnd%div(lm,k)  - ts%lx%div(lm,k))  + w1*ts%gacc%div(lm,k)
+                ts%gacc%temp(lm,k) = w*(ts%tnd%temp(lm,k) - ts%lx%temp(lm,k)) + w1*ts%gacc%temp(lm,k)
+                ts%tnd%vor(lm,k)  = ts%gacc%vor(lm,k)
+                ts%tnd%div(lm,k)  = ts%gacc%div(lm,k)  + ts%lx%div(lm,k)
+                ts%tnd%temp(lm,k) = ts%gacc%temp(lm,k) + ts%lx%temp(lm,k)
+                ts%new%vor(lm,k)  = now%spec%vor(lm,k) + h*ts%tnd%vor(lm,k)
+            end do
+        end do
+        do lm = 1, s%nlm
+            ts%gacc%lnps(lm) = w*(ts%tnd%lnps(lm) - ts%lx%lnps(lm)) + w1*ts%gacc%lnps(lm)
+            ts%tnd%lnps(lm)  = ts%gacc%lnps(lm) + ts%lx%lnps(lm)
+        end do
+
+        if (ts%semi_implicit) then
+            ! X_new = X + h (G + L X) + h alpha L (X_new - X): the leapfrog-form
+            ! correction solve with X^(n-1) = X^n = X and step h is exactly this.
+            call aeros_semiimp_step(ts%si, s, now%spec, now%spec, ts%tnd, ts%new)
+        else
+            do k = 1, vg%nlev
+                do lm = 1, s%nlm
+                    ts%new%div(lm,k)  = now%spec%div(lm,k)  + h*ts%tnd%div(lm,k)
+                    ts%new%temp(lm,k) = now%spec%temp(lm,k) + h*ts%tnd%temp(lm,k)
+                end do
+            end do
+            do lm = 1, s%nlm
+                ts%new%lnps(lm) = now%spec%lnps(lm) + h*ts%tnd%lnps(lm)
+            end do
+        end if
+
+        return
+
+    end subroutine advance_ncycle
+
+    real(wp) function ncycle_weight(variant, ksub, n, icyc) result(w)
+        ! Lorenz N-cycle weight for substep ksub (0..n-1) of cycle icyc (Hotta
+        ! et al. 2016, eqs 2-3, 7-8): w_0 = 1; variant A n/(n-k), B n/k; AB
+        ! alternates A,B by cycle; ABBA cycles A,B,B,A.
+
+        implicit none
+
+        integer, intent(in) :: variant, ksub, n, icyc
+
+        logical :: use_a
+
+        if (ksub == 0) then
+            w = 1.0_wp
+            return
+        end if
+
+        select case (variant)
+        case (NCYCLE_A);    use_a = .TRUE.
+        case (NCYCLE_B);    use_a = .FALSE.
+        case (NCYCLE_AB);   use_a = mod(icyc, 2) == 0
+        case default        ! NCYCLE_ABBA
+            use_a = mod(icyc, 4) == 0 .or. mod(icyc, 4) == 3
+        end select
+
+        if (use_a) then
+            w = real(n, wp)/real(n - ksub, wp)
+        else
+            w = real(n, wp)/real(ksub, wp)
+        end if
+
+        return
+
+    end function ncycle_weight
 
     subroutine apply_vdiff(ts, s, vg, now)
         ! Boundary-layer vertical diffusion, implicit on the n+1 state. The
@@ -1377,6 +1545,7 @@ contains
         call nc_write_attr(filename,"rad_heat_present", rad_present)
         call nc_write_attr(filename,"land_present",     land_present)    ! feat/land
         call nc_write_attr(filename,"seaice_present",   seaice_present)  ! feat/seaice
+        call nc_write_attr(filename,"ncycle_present",   merge(1, 0, ts%scheme == SCHEME_NCYCLE))
         call nc_write_attr(filename,"time",             real(time,dp))
         call nc_write_attr(filename,"mass_target",      ts%mass_target)
         call nc_write_attr(filename,"lnr_cum",          ts%lnr_cum)
@@ -1384,7 +1553,9 @@ contains
 
         ! The two persistent spectral time levels.
         call write_spec("now", now%spec)   ! X^n
-        call write_spec("old", ts%old)     ! X^(n-1)
+        call write_spec("old", ts%old)     ! X^(n-1) (leapfrog; scratch otherwise)
+        ! N-cycle accumulator G, so a restart resumes mid-cycle exactly.
+        if (ts%scheme == SCHEME_NCYCLE) call write_tend("gacc", ts%gacc)
 
         ! Gridpoint humidity prognostic.
         call nc_write(filename,"qv_g", now%qv_g, dim1="lon",dim2="lat",dim3="lev", &
@@ -1460,6 +1631,30 @@ contains
 
     contains
 
+        subroutine write_tend(prefix, tnd)
+            ! Write one spectral tendency set (same layout as a state).
+            character(len=*),       intent(in) :: prefix
+            type(aeros_tend_class), intent(in) :: tnd
+
+            call nc_write(filename, prefix//"_vor_re",  real(tnd%vor,dp), &
+                          dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_vor_im",  aimag(tnd%vor), &
+                          dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_div_re",  real(tnd%div,dp), &
+                          dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_div_im",  aimag(tnd%div), &
+                          dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_temp_re", real(tnd%temp,dp), &
+                          dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_temp_im", aimag(tnd%temp), &
+                          dim1="nlm",dim2="lev")
+            call nc_write(filename, prefix//"_lnps_re", real(tnd%lnps,dp), &
+                          dim1="nlm")
+            call nc_write(filename, prefix//"_lnps_im", aimag(tnd%lnps), &
+                          dim1="nlm")
+            return
+        end subroutine write_tend
+
         subroutine write_spec(prefix, spec)
             ! Write one spectral level set as real/imag component variables.
             character(len=*),       intent(in) :: prefix
@@ -1503,6 +1698,7 @@ contains
         character(len=*),           intent(in)    :: filename
 
         integer  :: nlm, nlev, nlon, nlat, rad_present, land_present, cf_present, seaice_present
+        integer :: ncycle_present
         integer  :: nlm_f, nlev_f, nlon_f, nlat_f
         real(dp) :: time_f
 
@@ -1539,6 +1735,13 @@ contains
 
         call read_spec("now", now%spec)   ! X^n
         call read_spec("old", ts%old)     ! X^(n-1)
+        call nc_read_attr(filename,"ncycle_present", ncycle_present)
+        if ((ncycle_present == 1) .neqv. (ts%scheme == SCHEME_NCYCLE)) then
+            write(io_unit_err,*) "aeros_timestep_read_restart:: error: restart file "// &
+                                    "time scheme does not match the current model."
+            error stop 1
+        end if
+        if (ts%scheme == SCHEME_NCYCLE) call read_tend("gacc", ts%gacc)
 
         call nc_read(filename,"qv_g",     now%qv_g)
         call nc_read(filename,"ocn_sst",  ts%ocn%sst)
@@ -1606,6 +1809,29 @@ contains
         return
 
     contains
+
+        subroutine read_tend(prefix, tnd)
+            ! Read one spectral tendency set from its real/imag component variables.
+            character(len=*),       intent(in)    :: prefix
+            type(aeros_tend_class), intent(inout) :: tnd
+
+            real(dp) :: re2(tnd%nlm, tnd%nlev), im2(tnd%nlm, tnd%nlev)
+            real(dp) :: re1(tnd%nlm), im1(tnd%nlm)
+
+            call nc_read(filename, prefix//"_vor_re",  re2)
+            call nc_read(filename, prefix//"_vor_im",  im2)
+            tnd%vor  = cmplx(re2, im2, wp_sh)
+            call nc_read(filename, prefix//"_div_re",  re2)
+            call nc_read(filename, prefix//"_div_im",  im2)
+            tnd%div  = cmplx(re2, im2, wp_sh)
+            call nc_read(filename, prefix//"_temp_re", re2)
+            call nc_read(filename, prefix//"_temp_im", im2)
+            tnd%temp = cmplx(re2, im2, wp_sh)
+            call nc_read(filename, prefix//"_lnps_re", re1)
+            call nc_read(filename, prefix//"_lnps_im", im1)
+            tnd%lnps = cmplx(re1, im1, wp_sh)
+            return
+        end subroutine read_tend
 
         subroutine read_spec(prefix, spec)
             ! Read one spectral level set from its real/imag component variables.
