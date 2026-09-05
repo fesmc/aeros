@@ -75,6 +75,14 @@
     ! several-hour timescales let cf transport de-patchify the field, which keeps
     ! the coupled land+cloud run stable (a 1 h timescale leaves it patchy enough
     ! to spin up a runaway near-equatorial jet).
+    ! Diagnostic RH-based cloud scheme (l_rad_clouds, l_cloud_prog = .false.):
+    ! critical-RH endpoints at the surface / model top (Sundqvist fraction) and
+    ! in-cloud liquid / ice water contents [kg m-3]. Defaults = the ERA5-column
+    ! calibration (docs/m2_results.md section 19); an endpoint of 1.0 = no cloud.
+    cld_rhc_sfc      = 0.52
+    cld_rhc_top      = 0.35
+    cld_lwc          = 0.017e-3
+    cld_iwc          = 0.018e-3
     l_cloud_prog     = .false.
     cloud_rhc_sfc    = 0.40
     cloud_rhc_top    = 0.60

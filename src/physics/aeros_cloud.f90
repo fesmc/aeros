@@ -47,13 +47,15 @@ module aeros_cloud
     private
 
     ! critical relative humidity profile endpoints (sigma=1 surface, sigma=0
-    ! top); equal => constant with height, the default.
-    real(wp), parameter :: CLD_RHC_SFC = 0.52_wp
-    real(wp), parameter :: CLD_RHC_TOP = 0.35_wp
-
-    ! in-cloud water content [kg m-3]; ice much thinner than liquid (cirrus)
-    real(wp), parameter :: CLD_LWC = 0.017e-3_wp        ! liquid water content
-    real(wp), parameter :: CLD_IWC = 0.018e-3_wp       ! ice water content
+    ! top) and the in-cloud water contents [kg m-3] (ice much thinner than
+    ! liquid: cirrus). The defaults are the ERA5-column calibration; they are
+    ! module state, not parameters, so a driver can retune them
+    ! (aeros_cloud_configure) -- the scheme is RH-driven and the coupled model's
+    ! own RH profile is not ERA5's.
+    real(wp), protected :: CLD_RHC_SFC = 0.52_wp
+    real(wp), protected :: CLD_RHC_TOP = 0.35_wp
+    real(wp), protected :: CLD_LWC = 0.017e-3_wp        ! liquid water content
+    real(wp), protected :: CLD_IWC = 0.018e-3_wp       ! ice water content
 
     ! liquid/ice partition temperature ramp [K]
     real(wp), parameter :: CLD_T_LIQ   = 273.15_wp     ! all liquid above
@@ -63,8 +65,21 @@ module aeros_cloud
 
     public :: aeros_cloud_diagnose
     public :: aeros_cloud_water
+    public :: aeros_cloud_configure
 
 contains
+
+    subroutine aeros_cloud_configure(rhc_sfc, rhc_top, lwc, iwc)
+        ! Override the calibrated constants (any subset). rhc in (0,1]; 1 at an
+        ! endpoint means no cloud there.
+        implicit none
+        real(wp), intent(in), optional :: rhc_sfc, rhc_top, lwc, iwc
+        if (present(rhc_sfc)) CLD_RHC_SFC = rhc_sfc
+        if (present(rhc_top)) CLD_RHC_TOP = rhc_top
+        if (present(lwc))     CLD_LWC = lwc
+        if (present(iwc))     CLD_IWC = iwc
+        return
+    end subroutine aeros_cloud_configure
 
     subroutine aeros_cloud_diagnose(nlev, t, q, pfull, psfc, cf, clwc, ciwc)
         ! Diagnose grid-mean cloud fraction and cloud liquid/ice water for one

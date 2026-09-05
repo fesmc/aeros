@@ -29,7 +29,7 @@ program rce_long
     use aeros_state
     use aeros_vertical
     use aeros_condensation, only : aeros_qsat
-    use aeros_cloud,    only : aeros_cloud_diagnose
+    use aeros_cloud,    only : aeros_cloud_diagnose, aeros_cloud_configure
     use aeros_convection, only : SCHEME_SBM, SCHEME_SBM_FRIERSON, SCHEME_MANABE
     use aeros_timestep
     use aeros_radiation, only : SCHEME_ECCKD
@@ -183,6 +183,10 @@ program rce_long
     ! Default off = the diagnostic RH->cover scheme, bit-for-bit unchanged. When
     ! on, radiation consumes the Sundqvist prognostic cf (aeros_cloud_prog).
     logical  :: l_cloud_prog   = .FALSE.
+    ! Diagnostic (RH-based) cloud scheme, aeros_cloud: critical-RH endpoints and
+    ! in-cloud water contents [kg m-3]; defaults = the ERA5-column calibration.
+    real(wp) :: cld_rhc_sfc = 0.52_wp, cld_rhc_top = 0.35_wp
+    real(wp) :: cld_lwc = 0.017e-3_wp, cld_iwc = 0.018e-3_wp
     real(wp) :: cloud_rhc_sfc  = 0.40_wp    ! critical RH at the surface (calibrated)
     real(wp) :: cloud_rhc_top  = 0.60_wp    ! critical RH at the model top (higher aloft)
     real(wp) :: cloud_tau_form = 10800.0_wp ! formation timescale [s] (~3 h; de-patchifies)
@@ -326,6 +330,7 @@ program rce_long
     ts%surf%c_d = c_d
     ts%rad%enabled  = l_rad
     ts%rad%clouds   = l_rad_clouds
+    call aeros_cloud_configure(rhc_sfc=cld_rhc_sfc, rhc_top=cld_rhc_top, lwc=cld_lwc, iwc=cld_iwc)
     ts%rad%l_o3     = l_o3
     ! Seasonal insolation (feat/seasonal): read into ts%rad before init/apply.
     ts%rad%seasonal = l_seasonal
@@ -1150,6 +1155,10 @@ contains
         call nml_read(nmlfile, "rce", "l_rad", l_rad)
         call nml_read(nmlfile, "rce", "l_rad_clouds", l_rad_clouds)
         call nml_read(nmlfile, "rce", "l_o3", l_o3, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cld_rhc_sfc", cld_rhc_sfc, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cld_rhc_top", cld_rhc_top, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cld_lwc", cld_lwc, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cld_iwc", cld_iwc, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_sponge", l_sponge, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_vdiff", l_vdiff)
