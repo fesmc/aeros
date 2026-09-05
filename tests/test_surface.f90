@@ -1,26 +1,20 @@
 program test_surface
-    ! Acceptance test for the prescribed-SST surface fluxes.
+    ! Acceptance test for the surface exchange (aeros_surface diagnoses the
+    ! conductances; aeros_vdiff applies the fluxes as the implicit lower
+    ! boundary of its column solve). The vertical diffusion itself is OFF here,
+    ! so the solve is diagonal above the lowest layer and only the surface
+    ! boundary acts: what is measured is the surface flux alone.
     !
-    ! The surface module is the source that closes the atmosphere's budget once
-    ! Held-Suarez is removed, so the tests are the sign and the bookkeeping of
-    ! that source, not a tolerance. The SST it runs against comes from aeros_ocean
-    ! (the profile itself is checked in test_ocean):
+    ! 1. A WARM, WET SURFACE UNDER COOLER, DRIER AIR FLUXES UPWARD everywhere,
+    !    and the reported fluxes ARE what the column received: the lowest
+    !    layer's dry-static-energy gain equals SHF*dt*g/dp and its moisture gain
+    !    equals E*dt*g/dp, to round-off; nothing above the lowest layer moves.
     !
-    ! 1. WARM OCEAN, COLD DRY AIR -> FLUXES UP. Over a surface warmer and moister
-    !    than the air above it, sensible heat and evaporation are both positive
-    !    (into the atmosphere); the lowest layer warms and moistens.
+    ! 2. AN AIR COLUMN IN EQUILIBRIUM WITH ITS SURFACE (equal dry static energy,
+    !    saturated at the skin) exchanges nothing.
     !
-    ! 2. BULK-FLUX BOOKKEEPING. The heating added to the lowest layer is exactly
-    !    the sensible flux over the layer heat capacity, and the moistening is
-    !    exactly the evaporation over the layer mass -- the reported SHF and
-    !    evap ARE the tendencies applied.
-    !
-    ! 3. EQUILIBRIUM -> NO FLUX. When the lowest-layer air is at the SST and
-    !    saturated, both fluxes vanish: the surface does nothing where there is
-    !    no disequilibrium.
-    !
-    ! 4. q STAYS >= 0. A downward moisture flux (dew) cannot remove more vapour
-    !    than the layer holds.
+    ! 3. A DOWNWARD MOISTURE FLUX (cold skin under moist air) never drives q
+    !    negative -- the implicit boundary cannot -- while the flux is finite.
     !
     ! Exits non-zero on failure.
 
@@ -31,20 +25,23 @@ program test_surface
     use aeros_vertical
     use aeros_condensation, only : aeros_qsat
     use aeros_surface
+    use aeros_vdiff
     use aeros_ocean
 
     implicit none
 
     integer, parameter :: trunc = 21
-    integer, parameter :: nlev  = 12
+    integer, parameter :: nlev  = 8
+    real(wp), parameter :: DT = 1800.0_wp
 
     type(aeros_sht_pool_class), target :: pool
     type(aeros_grid_class)  :: grd
     type(aeros_vgrid_class) :: vg
     type(aeros_surf_class)  :: surf
+    type(aeros_vdiff_class) :: vd
     type(aeros_ocean_class) :: ocn
 
-    real(wp), allocatable :: t_g(:,:,:), qv(:,:,:), u(:,:,:), v(:,:,:), dt_phys(:,:,:), lnps(:,:)
+    real(wp), allocatable :: t_g(:,:,:), qv(:,:,:), u(:,:,:), v(:,:,:), lnps(:,:)
     integer :: nlon, nlat, nfail, ks
 
     nfail = 0
@@ -53,6 +50,7 @@ program test_surface
     call aeros_grid_init(grd, pool%sht(1))
     call aeros_vgrid_init(vg, nlev)
     call aeros_surface_init(surf, grd, .TRUE.)
+    call aeros_vdiff_init(vd, grd, .FALSE.)       ! interior diffusion off: surface boundary only
     call aeros_ocean_init(ocn, grd)               ! SST source (prescribed APE)
 
     nlon = grd%nlon; nlat = grd%nlat
@@ -62,7 +60,7 @@ program test_surface
                                        "  grid ", nlon, "x", nlat
 
     allocate(t_g(nlon,nlat,nlev), qv(nlon,nlat,nlev), u(nlon,nlat,nlev), &
-             v(nlon,nlat,nlev), dt_phys(nlon,nlat,nlev), lnps(nlon,nlat))
+             v(nlon,nlat,nlev), lnps(nlon,nlat))
     lnps = log(real(p0,wp))
 
     call test_fluxes_up(nfail)
@@ -70,6 +68,7 @@ program test_surface
     call test_no_negative_q(nfail)
 
     call aeros_ocean_end(ocn)
+    call aeros_vdiff_end(vd)
     call aeros_surface_end(surf)
     call aeros_vgrid_end(vg)
     call aeros_grid_end(grd)
@@ -85,138 +84,137 @@ program test_surface
 
 contains
 
-    ! === 1-2. Fluxes up, and the bookkeeping ==================================
+    subroutine column_state(tsfc_offset, rh)
+        ! Isothermal-ish column: T = SST - tsfc_offset at every level, wind 5 m/s,
+        ! humidity at relative humidity rh of the level-1 temperature.
+        real(wp), intent(in) :: tsfc_offset, rh
+        real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev), qs, dqs
+        integer  :: i, j, k
+        do j = 1, nlat
+            do i = 1, nlon
+                call aeros_vgrid_pressure(vg, exp(lnps(i,j)), phalf, pfull, dpc)
+                do k = 1, nlev
+                    t_g(i,j,k) = ocn%sst(i,j) - tsfc_offset
+                    call aeros_qsat(t_g(i,j,k), pfull(k), qs, dqs)
+                    qv(i,j,k)  = rh*qs
+                end do
+            end do
+        end do
+        u = 5.0_wp; v = 0.0_wp
+    end subroutine column_state
 
+    subroutine apply()
+        call aeros_surface_apply(surf, vg, ocn%sst, t_g, qv, lnps, u, v)
+        call aeros_vdiff_apply(vd, vg, t_g, qv, u, v, lnps, DT, surf)
+    end subroutine apply
+
+    ! === 1. Fluxes upward, and consistent with the column change ===========
     subroutine test_fluxes_up(nfail)
         integer, intent(inout) :: nfail
-        real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev)
-        real(wp) :: qv0, dsh, dqm, worst_h, worst_q
+        real(wp), allocatable :: t0(:,:,:), q0(:,:,:)
+        real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev), dsh, dqm, worst_h, worst_q, upper
         integer  :: i, j
 
         write(*,*) ""
-        write(*,*) " -- warm ocean under cold dry air: fluxes go up, books balance"
+        write(*,*) " -- a warm, wet surface under cooler, drier air (5 K, 70% RH)"
 
-        ! air 10 K colder than the SST and half-saturated, calm-ish wind
-        do j = 1, nlat
-            t_g(:,j,:) = spread(ocn%sst(:,j) - 10.0_wp, 2, nlev)
-        end do
-        qv0 = 1.0e-3_wp
-        qv  = qv0
-        u   = 3.0_wp; v = 0.0_wp
-        dt_phys = 0.0_wp
-
-        call aeros_surface_apply(surf, vg, ocn%sst, t_g, qv, lnps, u, v, dt_phys, 1800.0_wp)
+        call column_state(5.0_wp, 0.7_wp)
+        allocate(t0(nlon,nlat,nlev), q0(nlon,nlat,nlev)); t0 = t_g; q0 = qv
+        call apply()
 
         write(*,"(a,es12.3,a)") "   min SHF over grid              ", minval(surf%shf), " W/m2"
         write(*,"(a,es12.3,a)") "   min evap over grid             ", minval(surf%evap), " kg/m2/s"
-
         call check(minval(surf%shf) > 0.0_wp, "sensible heat flux is upward everywhere", nfail)
         call check(minval(surf%evap) > 0.0_wp, "evaporation is upward everywhere", nfail)
         call check(minval(surf%lhf) > 0.0_wp, "latent heat flux is upward everywhere", nfail)
 
-        ! bookkeeping: the applied tendencies equal flux / layer-capacity, exactly
+        ! The column received exactly the reported flux (no geopotential change
+        ! across the solve: the DSE gain is cp dT).
         worst_h = 0.0_wp; worst_q = 0.0_wp
         do j = 1, nlat
             do i = 1, nlon
-                call aeros_vgrid_pressure(vg, real(p0,wp), phalf, pfull, dpc)
-                ! forward temperature increment [K] applied to the lowest layer:
-                ! the sensible flux over the layer heat capacity, times the step
-                dsh = surf%shf(i,j)*real(grav,wp)/(real(cp_d,wp)*dpc(ks))*1800.0_wp
-                worst_h = max(worst_h, abs(dt_phys(i,j,ks) - dsh))
-                ! moistening [kg/kg] applied over the step
-                dqm = surf%evap(i,j)*real(grav,wp)/dpc(ks)*1800.0_wp
-                worst_q = max(worst_q, abs((qv(i,j,ks) - qv0) - dqm))
+                call aeros_vgrid_pressure(vg, exp(lnps(i,j)), phalf, pfull, dpc)
+                dsh = surf%shf(i,j)*real(grav,wp)/(real(cp_d,wp)*dpc(ks))*DT
+                dqm = surf%evap(i,j)*real(grav,wp)/dpc(ks)*DT
+                worst_h = max(worst_h, abs((t_g(i,j,ks) - t0(i,j,ks)) - dsh)/max(abs(dsh), 1.0e-30_wp))
+                worst_q = max(worst_q, abs((qv(i,j,ks)  - q0(i,j,ks)) - dqm)/max(abs(dqm), 1.0e-30_wp))
             end do
         end do
-        write(*,"(a,es12.3)") "   worst |dt_phys - SHF/cap|         ", worst_h
-        write(*,"(a,es12.3)") "   worst |dq - evap/mass|         ", worst_q
-
-        call check(worst_h < 1.0e-15_wp, "lowest-layer heating equals SHF over heat capacity", nfail)
-        call check(worst_q < 1.0e-15_wp, "lowest-layer moistening equals evap over layer mass", nfail)
-
-        ! only the lowest layer is touched
-        call check(maxval(abs(dt_phys(:,:,1:nlev-1))) == 0.0_wp, &
-                   "only the lowest layer is forced", nfail)
-        return
+        upper = max(maxval(abs(t_g(:,:,1:nlev-1) - t0(:,:,1:nlev-1))), &
+                    maxval(abs(qv(:,:,1:nlev-1)  - q0(:,:,1:nlev-1))))
+        write(*,"(a,es12.3)") "   worst |dT - SHF/(cp m)| / |.|   ", worst_h
+        write(*,"(a,es12.3)") "   worst |dq - E/m| / |.|          ", worst_q
+        call check(worst_h < 1.0e-10_wp, "lowest-layer heating equals SHF over heat capacity", nfail)
+        call check(worst_q < 1.0e-10_wp, "lowest-layer moistening equals evap over layer mass", nfail)
+        call check(upper < 1.0e-9_wp, "layers above the lowest are untouched (diffusion off)", nfail)
+        deallocate(t0, q0)
     end subroutine test_fluxes_up
 
-    ! === 4. Equilibrium: no disequilibrium, no flux ===========================
-
+    ! === 2. Equilibrium ======================================================
     subroutine test_equilibrium(nfail)
         integer, intent(inout) :: nfail
-        real(wp) :: qs, dqs, ps
-        integer  :: i, j
+        real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev), phi_full(nlev), phi_half(0:nlev), qs, dqs
+        integer  :: i, j, k, it
 
         write(*,*) ""
-        write(*,*) " -- lowest-layer air at the SST and saturated: no flux"
+        write(*,*) " -- an air column in equilibrium with its surface exchanges nothing"
 
-        ps = real(p0,wp)
+        ! Equal dry static energy: T_1 = SST - (Phi_1 - Phi_s)/cp; saturated at the skin.
+        u = 5.0_wp; v = 0.0_wp
         do j = 1, nlat
             do i = 1, nlon
+                call aeros_vgrid_pressure(vg, exp(lnps(i,j)), phalf, pfull, dpc)
                 t_g(i,j,:) = ocn%sst(i,j)
-                call aeros_qsat(ocn%sst(i,j), ps, qs, dqs)
+                call aeros_hydrostatic(vg, 0.0_wp, t_g(i,j,:), phalf, phi_full, phi_half)
+                do k = 1, nlev
+                    t_g(i,j,k) = ocn%sst(i,j) - (phi_full(k) - phi_half(nlev))/real(cp_d,wp)
+                end do
+                ! iterate so Phi matches the corrected T (fixed point)
+                do it = 1, 6
+                    call aeros_hydrostatic(vg, 0.0_wp, t_g(i,j,:), phalf, phi_full, phi_half)
+                    do k = 1, nlev
+                        t_g(i,j,k) = ocn%sst(i,j) - (phi_full(k) - phi_half(nlev))/real(cp_d,wp)
+                    end do
+                end do
+                call aeros_qsat(ocn%sst(i,j), exp(lnps(i,j)), qs, dqs)
                 qv(i,j,:) = qs
             end do
         end do
-        u = 5.0_wp; v = 5.0_wp
-        dt_phys = 0.0_wp
-
-        call aeros_surface_apply(surf, vg, ocn%sst, t_g, qv, lnps, u, v, dt_phys, 1800.0_wp)
-
+        call apply()
         write(*,"(a,es12.3,a)") "   max |SHF|                      ", maxval(abs(surf%shf)), " W/m2"
         write(*,"(a,es12.3,a)") "   max |evap|                     ", maxval(abs(surf%evap)), " kg/m2/s"
-
-        call check(maxval(abs(surf%shf)) < 1.0e-10_wp .and. maxval(abs(surf%evap)) < 1.0e-10_wp, &
-                   "no flux when air is at the SST and saturated", nfail)
-        return
+        call check(maxval(abs(surf%shf)) < 1.0e-3_wp .and. maxval(abs(surf%evap)) < 1.0e-12_wp, &
+                    "no flux at equilibrium (DSE-balanced, saturated column)", nfail)
     end subroutine test_equilibrium
 
-    ! === 5. q stays non-negative under dew ====================================
-
+    ! === 3. Downward moisture flux never makes q negative ===================
     subroutine test_no_negative_q(nfail)
         integer, intent(inout) :: nfail
+        real(wp) :: qmin0
 
         write(*,*) ""
-        write(*,*) " -- a strong downward moisture flux cannot drive q < 0"
+        write(*,*) " -- a cold skin under moist air: dew, and q stays >= 0"
 
-        ! Surface far colder than the air, so q_sat(SST) < q and the moisture
-        ! flux is downward (deposition), with a large exchange coefficient and
-        ! step so it would remove more vapour than the layer holds. The guard
-        ! must clip the removal exactly at q = 0.
-        call chill_surface()
-        t_g = real(T0,wp) + 5.0_wp        ! mild air, above the cold surface ...
-        qv  = 1.0e-3_wp                    ! ... and moist relative to q_sat(SST)
-        u = 30.0_wp; v = 0.0_wp
-        dt_phys = 0.0_wp
-
-        call aeros_surface_apply(surf, vg, ocn%sst, t_g, qv, lnps, u, v, dt_phys, 1.0e4_wp)
-
-        write(*,"(a,es12.3)") "   min q after                    ", minval(qv)
+        call column_state(-30.0_wp, 0.9_wp)      ! air 30 K WARMER than the skin
+        qmin0 = minval(qv)
+        call apply()
+        write(*,"(a,es12.3,a)") "   min evap (negative = dew)      ", minval(surf%evap), " kg/m2/s"
+        write(*,"(a,es12.3)")   "   min q after the step           ", minval(qv)
+        call check(minval(surf%evap) < 0.0_wp, "the flux is downward (dew)", nfail)
         call check(minval(qv) >= 0.0_wp, "q never goes negative under a downward flux", nfail)
-        ! non-vacuous: the deposition was strong enough to reach the floor
-        call check(minval(qv) == 0.0_wp, "and the guard actually engaged (q hit 0)", nfail)
-        return
+        call check(all(qv == qv) .and. minval(qv) < qmin0, "q decreased and stayed finite", nfail)
     end subroutine test_no_negative_q
-
-    subroutine chill_surface()
-        ! Force the SST far below the air (so q_sat(SST) < q, deposition) and a
-        ! large moisture exchange (so the removal would overshoot q = 0).
-        ocn%sst = real(T0,wp) - 30.0_wp
-        surf%c_e = 0.1_wp
-        return
-    end subroutine chill_surface
 
     subroutine check(ok, label, nfail)
         logical, intent(in) :: ok
         character(len=*), intent(in) :: label
         integer, intent(inout) :: nfail
         if (ok) then
-            write(*,"(a,a)") "   ok   : ", label
+            write(*,*) "  ok   : ", trim(label)
         else
-            write(*,"(a,a)") "   FAIL : ", label
+            write(*,*) "  FAIL : ", trim(label)
             nfail = nfail + 1
         end if
-        return
     end subroutine check
 
 end program test_surface

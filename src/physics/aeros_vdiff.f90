@@ -61,7 +61,8 @@ module aeros_vdiff
     ! next to the horizontal diffusion and the sponge, all three implicit on the
     ! same state. Humidity is a gridpoint field and is diffused in place directly.
 
-    use aeros_defs,     only : dp, wp, io_unit_err, R_d, cp_d, grav, aeros_grid_class
+    use aeros_defs,     only : dp, wp, io_unit_err, R_d, cp_d, grav, L_v, aeros_grid_class
+    use aeros_surface,  only : aeros_surf_class, aeros_surface_wind
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure, &
                                aeros_hydrostatic
     use nml,            only : nml_read
@@ -154,7 +155,7 @@ contains
         return
     end subroutine aeros_vdiff_end
 
-    subroutine aeros_vdiff_apply(vd, vg, t, qv, u, v, lnps_g, dt, cdrag, gust, slow)
+    subroutine aeros_vdiff_apply(vd, vg, t, qv, u, v, lnps_g, dt, surf)
         ! One implicit vertical-diffusion sweep over every column, diffusing
         ! temperature, humidity and both wind components IN PLACE.
         !
@@ -177,8 +178,9 @@ contains
         real(wp), intent(inout) :: v(:,:,:)
         real(wp), intent(in)    :: lnps_g(:,:)    ! (nlon,nlat) ln[Pa]
         real(wp), intent(in)    :: dt             ! [s]
-        real(wp), intent(in)    :: cdrag(:,:)     ! (nlon,nlat) surface drag coeff (0 = off)
-        real(wp), intent(in)    :: gust, slow     ! surface-wind gust [m/s] and slowdown [-] (aeros_surface)
+        ! The surface exchange (aeros_surface): conductances, skin state and
+        ! drag coefficient in; the sensible / latent fluxes it received out.
+        type(aeros_surf_class),  intent(inout) :: surf
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: phi_full(vg%nlev), phi_half(0:vg%nlev), zf(vg%nlev)
@@ -187,10 +189,13 @@ contains
         real(wp) :: sub(vg%nlev), dia(vg%nlev), sup(vg%nlev)
         real(wp) :: diam(vg%nlev), col(vg%nlev), out(vg%nlev)
         real(wp) :: ps, rmk, rhof, thalf, dz, ramp, kface, sig
-        real(wp) :: rho_s, wind, drag, cp
+                real(wp) :: rho_s, wind, drag, cp, rmks, s_surf, cv
         integer  :: i, j, k, nlev, kh
+        ! The solve runs for the interior diffusion (vd) or for the surface
+        ! fluxes (surf) -- with vd off the matrix is diagonal above the lowest
+        ! layer and only the surface boundary acts.
+        if (.not. (vd%enabled .or. surf%enabled)) return
 
-        if (.not. vd%enabled) return
 
         nlev = vg%nlev
         cp   = real(cp_d, wp)
@@ -198,7 +203,7 @@ contains
         !$omp parallel do collapse(2) schedule(static) &
         !$omp   private(i,j,k,phalf,pfull,dpc,phi_full,phi_half,zf,cface,kfull,kh, &
         !$omp           sub,dia,sup,diam,col,out,ps,rmk,rhof,thalf,dz,ramp,kface,sig, &
-        !$omp           rho_s,wind,drag)
+        !$omp           rho_s,wind,drag,rmks,s_surf,cv)
         do j = 1, vd%nlat
             do i = 1, vd%nlon
                 ps = exp(lnps_g(i,j))
@@ -214,7 +219,9 @@ contains
                 ! Full-level diffusivity K(k) [m2 s-1]. Richardson: the Frierson
                 ! (2006) K-profile over the bulk-Ri-diagnosed mixed layer. Fixed:
                 ! K0 tapered linearly in sigma to zero at vd%sigma.
-                if (vd%richardson) then
+                if (.not. vd%enabled) then
+                    kfull = 0.0_wp
+                else if (vd%richardson) then
                     call richardson_kprofile(nlev, t(i,j,:), qv(i,j,:), &
                             u(i,j,:), v(i,j,:), phi_full, zf, vd%ri_crit, &
                             vd%z0, vd%von_karman, vd%surf_frac, cp, kfull, kh)
@@ -265,17 +272,43 @@ contains
                 ! warm, convection-choking lower troposphere. Phi is held fixed
                 ! across the solve, so conserving int s dp conserves the enthalpy
                 ! int cp T dp exactly. Convert back with the same Phi.
+                                ! The surface fluxes enter as the implicit lower boundary (the
+                ! aeros_surface header): a conductance cv [kg m-2 s-1] against
+                ! the skin value adds rmks*cv to the lowest diagonal and rmks*cv*
+                ! (skin value) to its right-hand side; the flux the column
+                ! received is cv*(skin value - new lowest value).
+                rmks = dt*grav/dpc(nlev)
                 do k = 1, nlev
                     col(k) = cp*t(i,j,k) + phi_full(k)
                 end do
-                call tridiag(sub, dia, sup, col, out, nlev)
+                diam = dia
+                if (surf%enabled) then
+                    cv     = surf%ch_v(i,j)
+                    s_surf = cp*surf%skin(i,j) + phi_half(nlev)
+                    diam(nlev) = dia(nlev) + rmks*cv
+                    col(nlev)  = col(nlev) + rmks*cv*s_surf
+                end if
+                call tridiag(sub, diam, sup, col, out, nlev)
+                if (surf%enabled) surf%shf(i,j) = cv*(s_surf - out(nlev))
                 do k = 1, nlev
                     t(i,j,k) = (out(k) - phi_full(k))/cp
                 end do
-
-                ! Moisture: zero-flux surface, the shared matrix.
-                col = qv(i,j,:); call tridiag(sub, dia, sup, col, out, nlev)
+                ! Moisture: evaporation as the implicit surface boundary. The
+                ! implicit form cannot drive q negative under a downward flux.
+                col = qv(i,j,:)
+                diam = dia
+                if (surf%enabled) then
+                    cv = surf%ce_v(i,j)
+                    diam(nlev) = dia(nlev) + rmks*cv
+                    col(nlev)  = col(nlev) + rmks*cv*surf%qs_skin(i,j)
+                end if
+                call tridiag(sub, diam, sup, col, out, nlev)
+                if (surf%enabled) then
+                    surf%evap(i,j) = cv*(surf%qs_skin(i,j) - out(nlev))
+                    surf%lhf(i,j)  = real(L_v, wp)*surf%evap(i,j)
+                end if
                 qv(i,j,:) = out          ! positivity-preserving for this M-matrix
+
 
                 ! Momentum: same matrix, but the surface is NOT zero-flux -- a
                 ! bulk stress tau = rho c_d |u| u drains the lowest layer. As an
@@ -283,13 +316,16 @@ contains
                 ! adds rmk_surf rho_s c_d |u^n| to the k=nlev diagonal (|u| lagged,
                 ! isotropic so u and v share it). Unconditionally stable, and it is
                 ! the momentum boundary flux the heat/moisture fluxes already have.
-                diam = dia
-                if (cdrag(i,j) > 0.0_wp) then
-                    wind  = sqrt(slow*slow*(u(i,j,nlev)**2 + v(i,j,nlev)**2) + gust*gust)
-                    rho_s = phalf(nlev)/(R_d*t(i,j,nlev))
-                    drag  = (dt*grav/dpc(nlev))*rho_s*cdrag(i,j)*wind
-                    diam(nlev) = dia(nlev) + drag
+                                diam = dia
+                if (surf%enabled) then
+                    if (surf%cdrag(i,j) > 0.0_wp) then
+                        wind  = aeros_surface_wind(surf, u(i,j,nlev), v(i,j,nlev))
+                        rho_s = phalf(nlev)/(R_d*t(i,j,nlev))
+                        drag  = rmks*rho_s*surf%cdrag(i,j)*wind
+                        diam(nlev) = dia(nlev) + drag
+                    end if
                 end if
+
                 col = u(i,j,:);  call tridiag(sub, diam, sup, col, out, nlev)
                 u(i,j,:)  = out
                 col = v(i,j,:);  call tridiag(sub, diam, sup, col, out, nlev)

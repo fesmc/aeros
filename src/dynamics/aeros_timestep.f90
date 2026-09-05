@@ -999,14 +999,14 @@ contains
         if (ts%wrk%diag) wb0 = global_water(grd, vg, now%qv_g, ts%wrk%lnps_g)
         if (ts%surf%enabled) then
             if (ts%land%enabled) then
-                call aeros_surface_apply(ts%surf, vg, ts%land%skin, ts%wrk%t_g, now%qv_g, &
+                                call aeros_surface_apply(ts%surf, vg, ts%land%skin, ts%wrk%t_g, now%qv_g, &
                                             ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
-                                            ts%wrk%dt_phys, ts%dt, evap_eff=ts%land%beta, &
-                                            is_land=ts%land%mask)
+                                            evap_eff=ts%land%beta, is_land=ts%land%mask)
+
             else
-                call aeros_surface_apply(ts%surf, vg, ts%ocn%sst, ts%wrk%t_g, now%qv_g, &
-                                            ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v, &
-                                            ts%wrk%dt_phys, ts%dt)
+                                call aeros_surface_apply(ts%surf, vg, ts%ocn%sst, ts%wrk%t_g, now%qv_g, &
+                                            ts%wrk%lnps_g, ts%wrk%u, ts%wrk%v)
+
             end if
         end if
         ! Diagnostic split: snapshot the CUMULATIVE dt_phys after each term (each
@@ -1101,24 +1101,6 @@ contains
             ts%wrk%dt_cnv = ts%wrk%dt_cnv - ts%wrk%dt_surf
         end if
 
-        ! Slab ocean: step the SST from the net surface energy flux just computed
-        ! (surface turbulent fluxes + surface radiative fluxes against this SST).
-        ! A no-op in prescribed mode, so the aquaplanet control is unchanged. This
-        ! is what makes the surface flux self-limiting -- the fix for the local
-        ! subtropical runaway a fixed SST cannot bound (aeros_ocean header).
-        ! A no-op in prescribed mode (guarded inside).
-        call aeros_ocean_step(ts%ocn, ts%rad%sw_net_sur, ts%rad%lw_dw_sur, &
-                                ts%surf%shf, ts%surf%lhf, ts%dt)
-
-        ! Land (feat/land): step the soil temperature and the bucket soil
-        ! moisture from the fluxes just computed, over land points -- the soil
-        ! analogue of the slab-ocean update above. Precipitation reaching the
-        ! ground is the convective plus large-scale condensate. Guarded so the
-        ! ocean run neither steps the soil nor forms the precip-sum temporary.
-        if (ts%land%enabled) &
-            call aeros_land_step(ts%land, ts%rad%sw_net_sur, ts%rad%lw_dw_sur, &
-                                    ts%surf%shf, ts%surf%lhf, ts%surf%evap, &
-                                    ts%cnv%precip + ts%cnd%precip, ts%dt)
 
         ! === 1b. Couple the diabatic heating into the thermodynamic tendency ==
         ! Surface, convection, condensation and radiation accumulated a heating
@@ -1172,15 +1154,40 @@ contains
         ! === 3b. Upper-level sponge, implicit ================================
         if (ts%sponge_on) call sponge(ts, s, h)
 
-        ! === 3c. Boundary-layer vertical diffusion, implicit =================
-        ! Mixes the surface source (aeros_surface) up the column. Implicit on the
+        ! === 3c. Boundary-layer vertical diffusion + surface fluxes, implicit ==
+        ! Applies the surface fluxes as the lower boundary and mixes them up the column. Implicit on the
         ! n+1 state like the two diffusive operators above -- NOT forward-split,
         ! which for a diffusion term is unconditionally unstable on the leapfrog
         ! (aeros_vdiff header). Transforms the stepped T, winds and lnps to the
         ! grid, diffuses T/q/u/v there, and transforms back.
         if (ts%wrk%diag) wb0 = global_water(grd, vg, now%qv_g, ts%wrk%lnps_g)
-        if (ts%vd%enabled) call apply_vdiff(ts, s, vg, now)
+                ! Also the seam where the surface sensible/latent fluxes act (the
+        ! implicit lower boundary of the solve, aeros_surface header), so it
+        ! runs whenever either the interior diffusion or the surface is on.
+        if (ts%vd%enabled .or. ts%surf%enabled) call apply_vdiff(ts, s, vg, now)
         if (ts%wrk%diag) call water_tally(5)
+
+        ! The surface reservoirs step on the turbulent fluxes the solve just
+        ! applied and this step's cached radiative fluxes.
+        ! Slab ocean: step the SST from the net surface energy flux just computed
+        ! (surface turbulent fluxes + surface radiative fluxes against this SST).
+        ! A no-op in prescribed mode, so the aquaplanet control is unchanged. This
+        ! is what makes the surface flux self-limiting -- the fix for the local
+        ! subtropical runaway a fixed SST cannot bound (aeros_ocean header).
+        ! A no-op in prescribed mode (guarded inside).
+        call aeros_ocean_step(ts%ocn, ts%rad%sw_net_sur, ts%rad%lw_dw_sur, &
+                                ts%surf%shf, ts%surf%lhf, ts%dt)
+
+        ! Land (feat/land): step the soil temperature and the bucket soil
+        ! moisture from the fluxes just computed, over land points -- the soil
+        ! analogue of the slab-ocean update above. Precipitation reaching the
+        ! ground is the convective plus large-scale condensate. Guarded so the
+        ! ocean run neither steps the soil nor forms the precip-sum temporary.
+        if (ts%land%enabled) &
+            call aeros_land_step(ts%land, ts%rad%sw_net_sur, ts%rad%lw_dw_sur, &
+                                    ts%surf%shf, ts%surf%lhf, ts%surf%evap, &
+                                    ts%cnv%precip + ts%cnd%precip, ts%dt)
+
 
         ! === 4. Time filter (leapfrog) =======================================
         if (ts%scheme == SCHEME_LEAPFROG .and. ts%nstep > 0) &
@@ -1519,8 +1526,8 @@ contains
         ! heating diagnostics (dt_surf/dt_cnv/dt_cnd/dt_rad).
         if (ts%wrk%diag) ts%wrk%dt_vdiff = t3
 
-        call aeros_vdiff_apply(ts%vd, vg, t3, now%qv_g, u3, v3, lnps2, ts%dt, &
-                                ts%surf%cdrag, ts%surf%gust_speed, ts%surf%wind_slowdown)
+                call aeros_vdiff_apply(ts%vd, vg, t3, now%qv_g, u3, v3, lnps2, ts%dt, ts%surf)
+
 
         if (ts%wrk%diag) ts%wrk%dt_vdiff = t3 - ts%wrk%dt_vdiff
 

@@ -21,13 +21,14 @@ module aeros_surface
     ! floor (gustiness), evaluated against the lowest model layer:
     !   SH = rho1 cp C_H |U| (SST - T_1)                    [W m-2]
     !   E  = rho1    C_E |U| (q_sat(SST,p_s) - q_1)         [kg m-2 s-1]
-    ! Sensible heat warms the lowest layer through wrk%dt_phys, the FORWARD-split
-    ! path convection and radiation use: the flux goes into one layer only, so
-    ! its sharp vertical structure would excite the computational mode on the
-    ! centered leapfrog (the Held-Suarez forcing it replaces was distributed over
-    ! the column, and was safe centered; a single-layer flux is not).
-    ! Evaporation moistens the lowest layer as a forward increment to qv_g, the
-    ! same treatment convection and transport give the gridpoint humidity.
+    ! Both are applied by aeros_vdiff as the IMPLICIT lower boundary of its
+    ! column solve (sensible heat in dry static energy, so the flux is driven
+    ! by the potential-temperature difference; evaporation in q), exactly like
+    ! the momentum stress: this module only diagnoses the conductances. The
+    ! implicit form is what makes the lowest layer's response independent of
+    ! its thickness and of the time step -- the surface-layer treatment that
+    ! keeps the fluxes resolution-insensitive -- and the fluxes reported (shf,
+    ! lhf, evap) are exactly what the column received.
     !
     ! The surface fluxes go into the lowest layer; aeros_vdiff (M2.5b) then mixes
     ! them up the column. Radiation reads the same SST as the skin temperature,
@@ -83,6 +84,11 @@ module aeros_surface
         ! The diagnosed (or fixed) momentum coefficient per point, refreshed by
         ! aeros_surface_apply; aeros_vdiff imposes the stress with it.
         real(wp), allocatable :: cdrag(:,:)
+        ! The exchange conductances the implicit boundary-layer solve applies
+        ! (aeros_vdiff): ch_v = rho C_H |V_0| and ce_v = beta rho C_E |V_0|
+        ! [kg m-2 s-1], with the skin temperature and its saturation humidity
+        ! the fluxes are driven against. Refreshed by aeros_surface_apply.
+        real(wp), allocatable :: ch_v(:,:), ce_v(:,:), skin(:,:), qs_skin(:,:)
 
         ! The sea surface temperature the fluxes are evaluated against is owned by
         ! aeros_ocean and passed to aeros_surface_apply -- prescribed or a slab.
@@ -118,6 +124,18 @@ contains
 
 
         allocate(surf%cdrag(grd%nlon, grd%nlat)); surf%cdrag = 0.0_wp
+
+
+
+        allocate(surf%ch_v(grd%nlon, grd%nlat), surf%ce_v(grd%nlon, grd%nlat), &
+
+
+
+                 surf%skin(grd%nlon, grd%nlat), surf%qs_skin(grd%nlon, grd%nlat))
+
+
+
+        surf%ch_v = 0.0_wp; surf%ce_v = 0.0_wp; surf%skin = 0.0_wp; surf%qs_skin = 0.0_wp
         allocate(surf%shf(grd%nlon, grd%nlat))
         allocate(surf%lhf(grd%nlon, grd%nlat))
         allocate(surf%evap(grd%nlon, grd%nlat))
@@ -166,6 +184,14 @@ contains
         type(aeros_surf_class), intent(inout) :: surf
         if (allocated(surf%shf))  deallocate(surf%shf)
         if (allocated(surf%cdrag)) deallocate(surf%cdrag)
+
+        if (allocated(surf%ch_v))  deallocate(surf%ch_v)
+
+        if (allocated(surf%ce_v))  deallocate(surf%ce_v)
+
+        if (allocated(surf%skin))  deallocate(surf%skin)
+
+        if (allocated(surf%qs_skin)) deallocate(surf%qs_skin)
         if (allocated(surf%lhf))  deallocate(surf%lhf)
         if (allocated(surf%evap)) deallocate(surf%evap)
         surf%enabled = .FALSE.
@@ -173,63 +199,55 @@ contains
         return
     end subroutine aeros_surface_end
 
-    subroutine aeros_surface_apply(surf, vg, sst, t_g, qv_g, lnps_g, u, v, dt_phys, dt, &
-                                   evap_eff, is_land)
-        ! Sensible and latent surface fluxes into the lowest model layer.
+    subroutine aeros_surface_apply(surf, vg, sst, t_g, qv_g, lnps_g, u, v, evap_eff, is_land)
+        ! Diagnose the surface exchange for this step: the bulk transfer
+        ! coefficient per point (class header), the surface wind, the air
+        ! density, and from them the conductances ch_v / ce_v [kg m-2 s-1] plus
+        ! the skin temperature and its saturation humidity. Nothing is applied
+        ! here: aeros_vdiff imposes the sensible and latent fluxes as the
+        ! IMPLICIT lower boundary of its column solve (the momentum stress was
+        ! always there), so the lowest layer's response does not depend on that
+        ! layer's thickness or on the time step, and the fluxes it reports are
+        ! exactly what the column received.
         !
         ! sst is the skin temperature the fluxes are driven against -- the ocean
         ! SST over sea (aeros_ocean), the prognostic soil temperature over land
         ! (aeros_land composes the combined field). t_g, lnps_g, u, v are the
-        ! current gridpoint fields (aeros_tendency's wrk); qv_g is the gridpoint
-        ! humidity, moistened in place by evaporation; dt_phys is the
-        ! forward-split temperature increment [K] the sensible heating is added
-        ! to. The lowest layer is k = vg%nlev.
+        ! current gridpoint fields; qv_g the gridpoint humidity. The lowest layer
+        ! is k = vg%nlev.
         !
         ! evap_eff is an OPTIONAL per-point evaporation efficiency (beta):
-        ! potential evaporation is multiplied by it. Absent, or 1 everywhere, is
-        ! the open-water default (bit-for-bit); aeros_land passes the
-        ! moisture-limited beta over land so a dry soil evaporates below
-        ! potential. It scales only the moisture flux, never the sensible flux.
-
+        ! potential evaporation is multiplied by it (a drying soil evaporates
+        ! below potential). is_land selects the land roughness length.
         implicit none
         type(aeros_surf_class),  intent(inout) :: surf
         type(aeros_vgrid_class), intent(in)    :: vg
         real(wp), intent(in)    :: sst(:,:)       ! (nlon,nlat) skin T [K]
         real(wp), intent(in)    :: t_g(:,:,:)     ! (nlon,nlat,nlev) [K]
-        real(wp), intent(inout) :: qv_g(:,:,:)    ! (nlon,nlat,nlev) [kg kg-1]
+        real(wp), intent(in)    :: qv_g(:,:,:)    ! (nlon,nlat,nlev) [kg kg-1]
         real(wp), intent(in)    :: lnps_g(:,:)    ! (nlon,nlat) ln[Pa]
         real(wp), intent(in)    :: u(:,:,:)       ! (nlon,nlat,nlev) [m s-1]
         real(wp), intent(in)    :: v(:,:,:)       ! (nlon,nlat,nlev) [m s-1]
-        real(wp), intent(inout) :: dt_phys(:,:,:) ! (nlon,nlat,nlev) [K] increment
-        real(wp), intent(in)    :: dt             ! [s]
         real(wp), intent(in), optional :: evap_eff(:,:) ! (nlon,nlat) beta [-]
         logical,  intent(in), optional :: is_land(:,:)  ! (nlon,nlat) roughness selector
-
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
-        real(wp) :: ps, t1, q1, wind, rho1, qs_s, dqs, sh, ev, dq, beta
+        real(wp) :: ps, t1, q1, wind, rho1, qs_s, dqs, beta
         real(wp) :: z1, z0, cbulk, ri, ch, ce
         logical  :: have_beta, have_land
         integer  :: i, j, ks
-
         if (.not. surf%enabled) return
-
         have_beta = present(evap_eff)
         have_land = present(is_land)
-
         ks = vg%nlev                              ! lowest (surface) layer
-
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,sh,ev,dq,beta, &
-        !$omp           z1,z0,cbulk,ri,ch,ce)
+        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,beta,z1,z0,cbulk,ri,ch,ce)
         do j = 1, surf%nlat
             do i = 1, surf%nlon
                 ps = exp(lnps_g(i,j))
                 call aeros_vgrid_pressure(vg, ps, phalf, pfull, dpc)
-
                 t1 = t_g(i,j,ks)
                 q1 = qv_g(i,j,ks)
-
-                ! lowest-layer air density (virtual temperature) and wind speed
+                ! lowest-layer air density (virtual temperature) and the surface wind
                 rho1 = pfull(ks)/(R_d*t1*(1.0_wp + RV_OVER_RD_M1*q1))
                 wind = aeros_surface_wind(surf, u(i,j,ks), v(i,j,ks))
                 ! Bulk transfer coefficient (class header): the neutral log-law
@@ -253,39 +271,16 @@ contains
                 ce = surf%c_e; if (ce <= 0.0_wp) ce = cbulk
                 surf%cdrag(i,j) = surf%c_d
                 if (surf%c_d < 0.0_wp) surf%cdrag(i,j) = cbulk
-                ! sensible heat flux [W m-2], positive up (into the atmosphere)
-                sh = rho1*cp_d*ch*wind*(sst(i,j) - t1)
-
-                ! evaporation [kg m-2 s-1] from the saturation deficit at the skin
-                ! temperature, throttled by the evaporation efficiency beta (1 for
-                ! open water; below 1 for a drying soil).
                 beta = 1.0_wp
                 if (have_beta) beta = evap_eff(i,j)
                 call aeros_qsat(sst(i,j), ps, qs_s, dqs)
-                ev = beta*rho1*ce*wind*(qs_s - q1)
-
-                ! sensible heating of the lowest layer, forward-split increment
-                ! [K]: it is confined to one layer, so like convection and
-                ! radiation its sharp vertical structure would go
-                ! computational-mode unstable on the centered leapfrog.
-                dt_phys(i,j,ks) = dt_phys(i,j,ks) + sh*grav/(cp_d*dpc(ks))*dt
-
-                ! evaporative moistening, forward increment; never drive q < 0
-                ! when the flux is downward (dew onto a colder surface).
-                dq = ev*grav/dpc(ks)*dt
-                if (qv_g(i,j,ks) + dq < 0.0_wp) then
-                    dq = -qv_g(i,j,ks)
-                    ev = dq*dpc(ks)/(grav*dt)
-                end if
-                qv_g(i,j,ks) = qv_g(i,j,ks) + dq
-
-                surf%shf(i,j)  = sh
-                surf%lhf(i,j)  = L_v*ev
-                surf%evap(i,j) = ev
+                surf%ch_v(i,j)    = rho1*ch*wind
+                surf%ce_v(i,j)    = beta*rho1*ce*wind
+                surf%skin(i,j)    = sst(i,j)
+                surf%qs_skin(i,j) = qs_s
             end do
         end do
         !$omp end parallel do
-
         return
     end subroutine aeros_surface_apply
 
