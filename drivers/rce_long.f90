@@ -10,7 +10,7 @@ program rce_long
     ! Namelist group "rce" (file = arg 1, default rce.nml; all optional):
     !   trunc, nlev, nstep, dt, tau_diff, ndiff, eps_filter, raw_alpha
     !   l_surf, l_cnv, l_cnd, l_rad, l_sponge      physics toggles
-    !   conv_tau, c_h, c_e, u_min                  scheme knobs
+    !   conv_tau, c_h, c_e, gust_speed             scheme knobs
     !   print_every                                trajectory cadence [steps]
     !
     ! Each report prints, per level: global-mean T, the global max T with its
@@ -73,7 +73,8 @@ program rce_long
     character(len=8)  :: ncycle_variant = "A"
     ! Speed-limit drag (aeros_timestep header): SpeedyWeather's default; drag_coef = 0 off.
     real(wp) :: drag_vmax = 80.0_wp, drag_coef = 4.0e-7_wp
-    real(wp) :: conv_tau = 14400.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp, u_min = 1.0_wp
+    real(wp) :: conv_tau = 14400.0_wp, c_h = 1.5e-3_wp, c_e = 1.5e-3_wp
+    real(wp) :: gust_speed = 5.0_wp, wind_slowdown = 0.95_wp   ! surface wind for the fluxes (SW)
     character(len=32) :: conv_scheme = "sbm_frierson" ! "sbm" | "sbm_frierson" | "manabe"
     real(wp) :: c_d = 1.5e-3_wp       ! surface momentum drag (0 = off; brakes the low-level jet)
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
@@ -221,6 +222,13 @@ program rce_long
     ! column, log-p interpolated), for the real-Earth comparison (stationary
     ! waves, precipitation pattern) against SpeedyWeather / ERA5.
     real(wp), allocatable :: mon_pr2d(:,:,:), mon_z500(:,:,:)
+    ! Surface-flux ingredients: lowest-level wind speed [m/s], evaporation
+    ! [mm/day] and sensible heat flux [W/m2] (2D monthly).
+    real(wp), allocatable :: mon_vlow(:,:,:), mon_evap(:,:,:), mon_shf(:,:,:)
+    ! Global water budget (report): precipitable water W [kg/m2] at the last
+    ! report and the mean precipitation / evaporation since [mm/day].
+    real(wp) :: wb_w_last = -1.0_wp, wb_p_acc = 0.0_wp, wb_e_acc = 0.0_wp
+    integer  :: wb_n_acc = 0
     integer,  allocatable :: mon_cnt(:)
     integer            :: nacc_mon = 1        ! accumulate every nacc_mon steps (~1 day)
     ! Time-mean per-term diabatic heating accumulators [K/step], same 2nd-half
@@ -310,7 +318,8 @@ program rce_long
         error stop 1
     end select
     ts%surf%enabled = l_surf
-    ts%surf%c_h = c_h; ts%surf%c_e = c_e; ts%surf%u_min = u_min
+    ts%surf%c_h = c_h; ts%surf%c_e = c_e
+    ts%surf%gust_speed = gust_speed; ts%surf%wind_slowdown = wind_slowdown
     ts%surf%c_d = c_d
     ts%rad%enabled  = l_rad
     ts%rad%clouds   = l_rad_clouds
@@ -621,6 +630,9 @@ program rce_long
         mon_t = 0.0_wp; mon_u = 0.0_wp; mon_rh = 0.0_wp; mon_v = 0.0_wp
         mon_sst = 0.0_wp; mon_pr = 0.0_wp; mon_cnt = 0; mon_t2m = 0.0_wp
         mon_pr2d = 0.0_wp; mon_z500 = 0.0_wp
+        allocate(mon_vlow(grd%nlon,grd%nlat,NMON), mon_evap(grd%nlon,grd%nlat,NMON), &
+                 mon_shf(grd%nlon,grd%nlat,NMON))
+        mon_vlow = 0.0_wp; mon_evap = 0.0_wp; mon_shf = 0.0_wp
         nacc_mon = max(1, nint(86400.0_wp/dt))   ! ~1 sample/day
         if (.not. ts%rad%seasonal) write(*,"(a)") &
             " rce_long:: WARNING monthly_out set but radiation%seasonal=.FALSE. -- "// &
@@ -668,6 +680,11 @@ program rce_long
             call locate_nan()
             blew_up = .TRUE.
             exit
+        end if
+        if (l_surf .and. allocated(ts%cnv%precip) .and. allocated(ts%cnd%precip)) then
+            wb_p_acc = wb_p_acc + gmean2((ts%cnv%precip + ts%cnd%precip)*86400.0_wp)
+            wb_e_acc = wb_e_acc + gmean2(ts%surf%evap*86400.0_wp)
+            wb_n_acc = wb_n_acc + 1
         end if
         if (mod(n, print_every) == 0) call report(n)
         ! Time-mean omega over the run's second half (equilibrium) for a robust
@@ -985,6 +1002,11 @@ contains
         mon_sst(:,imon)  = mon_sst(:,imon)  + sstz/rnlon
         mon_pr(:,imon)   = mon_pr(:,imon)   + prz/rnlon
         mon_t2m(:,:,imon) = mon_t2m(:,:,imon) + now%temp_g(:,:,nlev)  ! full 2D near-surface T
+        mon_vlow(:,:,imon) = mon_vlow(:,:,imon) + sqrt(now%u(:,:,nlev)**2 + now%v(:,:,nlev)**2)
+        if (allocated(ts%surf%evap)) then
+            mon_evap(:,:,imon) = mon_evap(:,:,imon) + ts%surf%evap*86400.0_wp
+            mon_shf(:,:,imon)  = mon_shf(:,:,imon)  + ts%surf%shf
+        end if
         mon_cnt(imon)    = mon_cnt(imon) + 1
     end subroutine accum_monthly
 
@@ -997,14 +1019,15 @@ contains
         real(wp), allocatable :: latout(:), lonout(:), levout(:), monout(:)
         real(wp), allocatable :: t_o(:,:,:), u_o(:,:,:), v_o(:,:,:), rh_o(:,:,:)
         real(wp), allocatable :: sst_o(:,:), pr_o(:,:), t2m_o(:,:,:)
-        real(wp), allocatable :: pr2d_o(:,:,:), z500_o(:,:,:)
+        real(wp), allocatable :: pr2d_o(:,:,:), z500_o(:,:,:), vlow_o(:,:,:), evap_o(:,:,:), shf_o(:,:,:)
         integer :: m
         allocate(latout(grd%nlat), lonout(grd%nlon), levout(nlev), monout(NMON))
         allocate(t_o(grd%nlat,nlev,NMON), u_o(grd%nlat,nlev,NMON), &
                  v_o(grd%nlat,nlev,NMON), rh_o(grd%nlat,nlev,NMON), &
                  sst_o(grd%nlat,NMON), pr_o(grd%nlat,NMON), &
                  t2m_o(grd%nlon,grd%nlat,NMON), pr2d_o(grd%nlon,grd%nlat,NMON), &
-                 z500_o(grd%nlon,grd%nlat,NMON))
+                 z500_o(grd%nlon,grd%nlat,NMON), vlow_o(grd%nlon,grd%nlat,NMON), &
+                 evap_o(grd%nlon,grd%nlat,NMON), shf_o(grd%nlon,grd%nlat,NMON))
         latout = grd%lat(1:grd%nlat)
         lonout = grd%lon(1:grd%nlon)
         levout = vg%sigma_full(1:nlev)
@@ -1020,7 +1043,11 @@ contains
                 t2m_o(:,:,m) = mon_t2m(:,:,m)/real(mon_cnt(m),wp)
                 pr2d_o(:,:,m) = mon_pr2d(:,:,m)/real(mon_cnt(m),wp)
                 z500_o(:,:,m) = mon_z500(:,:,m)/real(mon_cnt(m),wp)
+                vlow_o(:,:,m) = mon_vlow(:,:,m)/real(mon_cnt(m),wp)
+                evap_o(:,:,m) = mon_evap(:,:,m)/real(mon_cnt(m),wp)
+                shf_o(:,:,m)  = mon_shf(:,:,m) /real(mon_cnt(m),wp)
             else
+                vlow_o(:,:,m) = MISS; evap_o(:,:,m) = MISS; shf_o(:,:,m) = MISS
                 t_o(:,:,m) = MISS; u_o(:,:,m) = MISS; v_o(:,:,m) = MISS
                 rh_o(:,:,m) = MISS; sst_o(:,m) = MISS; pr_o(:,m) = MISS
                 t2m_o(:,:,m) = MISS; pr2d_o(:,:,m) = MISS; z500_o(:,:,m) = MISS
@@ -1049,10 +1076,16 @@ contains
             units="mm/day", long_name="monthly precipitation")
         call nc_write(fname, "z500", z500_o, dim1="lon", dim2="lat", dim3="month", &
             units="m", long_name="monthly 500 hPa geopotential height (hydrostatic, log-p interpolated)")
+        call nc_write(fname, "vlow", vlow_o, dim1="lon", dim2="lat", dim3="month", &
+            units="m/s", long_name="monthly lowest-level wind speed")
+        call nc_write(fname, "evap", evap_o, dim1="lon", dim2="lat", dim3="month", &
+            units="mm/day", long_name="monthly surface evaporation")
+        call nc_write(fname, "shf", shf_o, dim1="lon", dim2="lat", dim3="month", &
+            units="W/m2", long_name="monthly surface sensible heat flux (up)")
         write(*,"(a,i0,a,a)") " rce_long:: wrote monthly climatology (", &
             count(mon_cnt>0), " months populated) -> ", trim(fname)
         deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o, &
-                   pr2d_o, z500_o)
+                   pr2d_o, z500_o, vlow_o, evap_o, shf_o)
     end subroutine dump_monthly
 
     subroutine read_config()
@@ -1082,7 +1115,10 @@ contains
         call nml_read(nmlfile, "rce", "c_h", c_h)
         call nml_read(nmlfile, "rce", "c_e", c_e)
         call nml_read(nmlfile, "rce", "c_d", c_d)
-        call nml_read(nmlfile, "rce", "u_min", u_min)
+        call nml_read(nmlfile, "rce", "gust_speed", gust_speed, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "wind_slowdown", wind_slowdown, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "print_every", print_every)
         call nml_read(nmlfile, "rce", "l_surf", l_surf)
         call nml_read(nmlfile, "rce", "l_cnv", l_cnv)
@@ -1588,8 +1624,45 @@ contains
         write(*,"(a,f7.1,a,f7.1,a,f7.2,a,f7.1,a,f7.1,a)") &
             "   TOA: SWin ", swin, "  OLR ", olr, "  net ", swin-swup-olr, &
             " W/m2 | sfc SH ", shf, "  LH ", lhf, " W/m2"
+        call water_balance()
         return
     end subroutine energy_balance
+
+    subroutine water_balance()
+        ! Global water budget since the last report: precipitable water W and
+        ! its change rate against the mean E - P; the residual is water the
+        ! model created or destroyed (should be ~0).
+        real(wp) :: wcol(grd%nlon, grd%nlat), phw(0:nlev), pfw(nlev), dpw(nlev)
+        real(wp) :: w, pm, em, dwdt
+        integer  :: i, j, k
+        if (wb_n_acc == 0) return
+        do j = 1, grd%nlat
+            do i = 1, grd%nlon
+                call aeros_vgrid_pressure(vg, now%ps(i,j), phw, pfw, dpw)
+                wcol(i,j) = 0.0_wp
+                do k = 1, nlev
+                    wcol(i,j) = wcol(i,j) + now%qv_g(i,j,k)*dpw(k)/real(grav,wp)
+                end do
+            end do
+        end do
+        w  = gmean2(wcol)
+        pm = wb_p_acc/real(wb_n_acc,wp); em = wb_e_acc/real(wb_n_acc,wp)
+        if (wb_w_last >= 0.0_wp) then
+            dwdt = (w - wb_w_last)/(real(wb_n_acc,wp)*dt)*86400.0_wp     ! kg/m2/day = mm/day
+            write(*,"(a,f7.2,a,f6.2,a,f6.2,a,f7.3,a,f7.3,a)") &
+                "   WATER: W ", w, " mm | P ", pm, "  E ", em, "  dW/dt ", dwdt, &
+                "  resid (dW/dt - E + P) ", dwdt - em + pm, " mm/day"
+        else
+            write(*,"(a,f7.2,a,f6.2,a,f6.2,a)") "   WATER: W ", w, " mm | P ", pm, "  E ", em, " mm/day"
+        end if
+        if (l_diag) then
+            write(*,"(a,6f8.3,a)") "   WATER by operator (surf cnv cnd cld vdiff transp): ", &
+                ts%wb*86400.0_dp/(real(wb_n_acc,dp)*real(dt,dp)), " mm/day"
+            ts%wb = 0.0_dp
+        end if
+        wb_w_last = w; wb_p_acc = 0.0_wp; wb_e_acc = 0.0_wp; wb_n_acc = 0
+        return
+    end subroutine water_balance
 
     real(wp) function gmean2(f) result(m)
         real(wp), intent(in) :: f(:,:)

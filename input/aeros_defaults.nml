@@ -236,13 +236,15 @@
     ! Prescribed-SST surface energy/moisture budget (src/physics/aeros_surface.f90):
     ! bulk turbulent sensible + latent fluxes into the lowest layer, the source
     ! that closes the atmosphere's budget once Held-Suarez is removed. OFF by
-    ! default. c_h/c_e are the exchange coefficients, u_min the gustiness floor
-    ! [m/s]; the SST is the APE control profile, sst_eq K above freezing at the
-    ! equator tapering to freezing poleward of sst_lat degrees.
+    ! default. c_h/c_e are the exchange coefficients; the surface wind the fluxes
+    ! see is sqrt((wind_slowdown*|V_low|)^2 + gust_speed^2) (SpeedyWeather's
+    ! SurfaceCondition); the SST is the APE control profile, sst_eq K above
+    ! freezing at the equator tapering to freezing poleward of sst_lat degrees.
     enabled = .FALSE.
     c_h     = 1.5e-3
     c_e     = 1.5e-3
-    u_min   = 1.0
+    gust_speed    = 5.0
+    wind_slowdown = 0.95
     ! Momentum drag coefficient. Bulk stress tau = rho c_d |u| u, imposed
     ! implicitly as the momentum bottom BC in vdiff. 0 = no surface drag.
     c_d     = 0.0

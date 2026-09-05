@@ -46,30 +46,38 @@ module aeros_transport
     !   (cloud fraction) transport safely with no clipping -- a clamp would break
     !   the conservative form and is not needed.
     !
-    ! === Mass consistency: the design decision (option ii) ===================
+    ! === Mass consistency ====================================================
     !
-    ! Constancy above requires that the air mass the tracer is divided by is
-    ! advanced by the tracer's OWN fluxes -- not the air mass the spectral
-    ! dynamics produces. So this module runs its own finite-volume air-mass
-    ! budget: from the surface pressure it diagnoses the layer masses, forms the
-    ! horizontal mass-flux divergence on the grid, and from that the vertical
-    ! mass flux -- the same construction the dynamics uses (aeros_tendency's
-    ! `mflux`), but built from grid fluxes so it closes the grid tracer budget
-    ! exactly.
+    ! The module runs its own finite-volume air-mass budget: from the surface
+    ! pressure it diagnoses the layer masses, forms the horizontal mass-flux
+    ! divergence on the grid, and from that the vertical mass flux -- the same
+    ! construction the dynamics uses (aeros_tendency's `mflux`), but built from
+    ! grid fluxes so the tracer mass q*dp is advanced by single-valued fluxes
+    ! and its global sum telescopes exactly.
     !
     ! That FV air mass differs from the spectral air mass by O(truncation),
     ! because one divergence is a grid finite difference and the other a
-    ! spectral derivative. This is not a leak and does not accumulate: the layer
-    ! masses are re-diagnosed from the true (spectral) surface pressure every
-    ! step, so the difference is a per-step consistency error bounded by the
-    ! truncation, and the max-principle division keeps q bounded regardless. It
-    ! is the price of positivity on a spectral core, and it is diagnosable --
-    ! mass_consistency records the gap.
+    ! spectral derivative, and the layer masses are re-diagnosed from the true
+    ! (spectral) surface pressure every step. What is divided by what at the end
+    ! of the step decides which invariant survives that gap:
     !
-    ! This is the LGMR "option (ii)": a two-time-level forward scheme on the
-    ! grid with its own FV air budget, chosen over leapfrogging q with a mass-
-    ! fixer (option i) precisely so there is no fixer and no leapfrog
-    ! computational mode in the transported tracer.
+    !   q = qm / dp_FV     (the scheme up to 2026-09) keeps q = const exactly,
+    !   but the WATER Sum q dp_spectral then jumps by q (dp_spec - dp_FV) every
+    !   step. That gap is systematic where q is large (convergence zones), and
+    !   the real-Earth run created 0.5-0.9 mm/day of water this way -- a third
+    !   of its precipitation (docs/m2_handoff.md 2026-09-05).
+    !
+    !   q = qm / dp_spectral(n+1)   (now, when the caller passes `lnps_new`)
+    !   conserves the tracer mass against the air mass the model actually
+    !   carries, to machine precision. A uniform tracer then changes by the
+    !   ratio dp_FV/dp_spec, an O(truncation) per-step error that does not
+    !   compound systematically (dp_FV restarts from dp_spec every step) but is
+    !   not zero; a bounded tracer can overshoot its bound by that much, which
+    !   is why the integrator clamps cloud fraction at 1. Water conservation is
+    !   the first-order property; that is the trade.
+    !
+    ! mass_consistency records the gap as a diagnostic. Without `lnps_new` the
+    ! legacy division is used (tests of the invariants, and the report).
     !
     ! === Accuracy: van Leer horizontal, upwind vertical =====================
     !
@@ -222,7 +230,7 @@ contains
 
     end subroutine aeros_transport_end
 
-    subroutine aeros_transport_transport(mst, vg, u, v, lnps, q, dt)
+    subroutine aeros_transport_transport(mst, vg, u, v, lnps, q, dt, lnps_new)
         ! Advance q one dynamics step, forward in time, on the grid.
         !
         ! u, v, lnps are the wind and (log) surface pressure at the CURRENT time
@@ -230,6 +238,11 @@ contains
         ! side at -- so the humidity is advected by the flow that is driving it.
         ! lnps rather than ps because that is what the core carries; ps is
         ! recovered per column. q is updated in place. Nothing here is spectral.
+        !
+        ! lnps_new (optional): the spectral ln p_s at the END of the step. When
+        ! given, the transported tracer mass is divided by the spectral layer
+        ! mass at n+1 -- the mass-consistent, water-conserving form (module
+        ! header); absent, by the FV-advanced mass (legacy, exact constancy).
 
         implicit none
 
@@ -239,9 +252,11 @@ contains
         real(wp), intent(in)    :: lnps(:,:)            ! (nlon,nlat)      ln[Pa]
         real(wp), intent(inout) :: q(:,:,:)             ! (nlon,nlat,nlev) [kg kg-1]
         real(wp), intent(in)    :: dt                   ! [s]
+        real(wp), intent(in), optional :: lnps_new(:,:) ! (nlon,nlat)      ln[Pa] at n+1
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: cfl, dts
+        real(dp) :: gap, wsum
         integer  :: i, j, k, nsub, isub
 
         ! Layer masses from the true surface pressure, and the tracer mass.
@@ -269,18 +284,36 @@ contains
             call transport_substep(mst, vg, u, v, dts)
         end do
 
-        ! Back to specific humidity. dp_lev now holds the FV-updated air mass;
-        ! dividing by it (not by the spectral air mass) is what preserves the
-        ! max principle, hence positivity.
-        !$omp parallel do collapse(2) private(i,j,k) schedule(static)
-        do j = 1, mst%nlat
-            do i = 1, mst%nlon
-                do k = 1, mst%nlev
-                    q(i,j,k) = mst%qm(i,j,k)/mst%dp_lev(i,j,k)
+        ! Back to specific humidity: by the spectral layer mass at n+1 when the
+        ! caller supplies it (mass-consistent, conserves Sum q dp_spec exactly),
+        ! else by the FV-advanced mass (module header, "Mass consistency").
+        if (present(lnps_new)) then
+            gap = 0.0_dp; wsum = 0.0_dp
+            !$omp parallel do collapse(2) private(i,j,k,phalf,pfull,dpc) schedule(static) &
+            !$omp   reduction(+:gap,wsum)
+            do j = 1, mst%nlat
+                do i = 1, mst%nlon
+                    call aeros_vgrid_pressure(vg, exp(lnps_new(i,j)), phalf, pfull, dpc)
+                    do k = 1, mst%nlev
+                        gap  = gap  + abs(real(mst%dp_lev(i,j,k) - dpc(k), dp))
+                        wsum = wsum + real(dpc(k), dp)
+                        q(i,j,k) = mst%qm(i,j,k)/dpc(k)
+                    end do
                 end do
             end do
-        end do
-        !$omp end parallel do
+            !$omp end parallel do
+            mst%mass_consistency = gap/wsum
+        else
+            !$omp parallel do collapse(2) private(i,j,k) schedule(static)
+            do j = 1, mst%nlat
+                do i = 1, mst%nlon
+                    do k = 1, mst%nlev
+                        q(i,j,k) = mst%qm(i,j,k)/mst%dp_lev(i,j,k)
+                    end do
+                end do
+            end do
+            !$omp end parallel do
+        end if
 
         return
 

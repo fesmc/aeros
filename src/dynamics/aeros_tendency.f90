@@ -150,6 +150,7 @@ module aeros_tendency
         real(wp), allocatable :: dt_phys(:,:,:)            ! physics dT [K]
 
         real(wp), allocatable :: lnps_g(:,:)               ! ln(p_s)
+        real(wp), allocatable :: lnps_new(:,:)             ! ln(p_s) at n+1 (transport mass)
         real(wp), allocatable :: dlnpsdx(:,:), dlnpsdy(:,:)! grad ln p_s [m-1]
         real(wp), allocatable :: dlnpsdt(:,:)              ! [s-1]
 
@@ -249,6 +250,7 @@ contains
         allocate(wrk%ek(nlon,nlat,nlev), wrk%dtdt(nlon,nlat,nlev))
         allocate(wrk%dt_phys(nlon,nlat,nlev))
         allocate(wrk%lnps_g(nlon,nlat))
+        allocate(wrk%lnps_new(nlon,nlat)); wrk%lnps_new = 0.0_wp
         allocate(wrk%dlnpsdx(nlon,nlat), wrk%dlnpsdy(nlon,nlat))
         allocate(wrk%dlnpsdt(nlon,nlat))
         allocate(wrk%phis(nlon,nlat))
@@ -317,6 +319,7 @@ contains
         if (allocated(wrk%dtdt))    deallocate(wrk%dtdt)
         if (allocated(wrk%dt_phys)) deallocate(wrk%dt_phys)
         if (allocated(wrk%lnps_g))  deallocate(wrk%lnps_g)
+        if (allocated(wrk%lnps_new)) deallocate(wrk%lnps_new)
         if (allocated(wrk%dlnpsdx)) deallocate(wrk%dlnpsdx)
         if (allocated(wrk%dlnpsdy)) deallocate(wrk%dlnpsdy)
         if (allocated(wrk%dlnpsdt)) deallocate(wrk%dlnpsdt)

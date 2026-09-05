@@ -66,9 +66,11 @@ mutable struct MonthlyAccumulator <: SpeedyWeather.AbstractCallback
     cnt::Vector{Int}
     temp::Any; uwnd::Any; vwnd::Any; rh::Any      # [point, k, month]
     tlow::Any; prec::Any; z500::Any               # [point, month]
+    vlow::Any; v0::Any; cdrag::Any; evap::Any; shf::Any   # [point, month] surface-flux ingredients
 end
 MonthlyAccumulator() = MonthlyAccumulator(Float64[], zeros(Int, NMON),
-    nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+    nothing, nothing, nothing, nothing, nothing, nothing, nothing,
+    nothing, nothing, nothing, nothing, nothing)
 
 function SpeedyWeather.initialize!(cb::MonthlyAccumulator, vars, model)
     cb.σf  = Float64.(Array(model.geometry.σ_levels_full))
@@ -82,6 +84,8 @@ function SpeedyWeather.initialize!(cb::MonthlyAccumulator, vars, model)
     cb.tlow = zeros(Float64, np, NMON)
     cb.prec = zeros(Float64, np, NMON)
     cb.z500 = zeros(Float64, np, NMON)
+    cb.vlow = zeros(Float64, np, NMON); cb.v0 = zeros(Float64, np, NMON); cb.cdrag = zeros(Float64, np, NMON)
+    cb.evap = zeros(Float64, np, NMON); cb.shf = zeros(Float64, np, NMON)
     return nothing
 end
 
@@ -120,6 +124,11 @@ function SpeedyWeather.callback!(cb::MonthlyAccumulator, vars, model)
     end
     pr = Array(vars.parameterizations.rain_rate) .+ Array(vars.parameterizations.snow_rate)
     cb.prec[:, m] .+= pr .* (1000.0*86400.0)      # m/s -> mm/day
+    cb.vlow[:, m]  .+= sqrt.(u[:, nk].^2 .+ v[:, nk].^2)
+    cb.v0[:, m]    .+= Array(vars.parameterizations.surface_wind_speed)
+    cb.cdrag[:, m] .+= Array(vars.parameterizations.boundary_layer_drag)
+    cb.evap[:, m]  .+= Array(vars.parameterizations.surface_humidity_flux) .* 86400.0   # kg/m2/s -> mm/day
+    cb.shf[:, m]   .+= Array(vars.parameterizations.sensible_heat_flux)
     return nothing
 end
 SpeedyWeather.finalize!(::MonthlyAccumulator, args...) = nothing
@@ -163,6 +172,7 @@ nk   = NLAYERS
 t_o  = fill(NaN, nlat, nk, NMON); u_o = copy(t_o); v_o = copy(t_o); rh_o = copy(t_o)
 pr_o = fill(NaN, nlat, NMON)
 t2m_o = fill(NaN, nlon, nlat, NMON); pr2d_o = copy(t2m_o); z500_o = copy(t2m_o)
+vlow_o = copy(t2m_o); v0_o = copy(t2m_o); cdrag_o = copy(t2m_o); evap_o = copy(t2m_o); shf_o = copy(t2m_o)
 for m in 1:NMON
     n = acc.cnt[m]; n > 0 || continue
     for k in 1:nk
@@ -176,6 +186,11 @@ for m in 1:NMON
     pr_o[:, m]      = vec(mean(P; dims=1))
     t2m_o[:, :, m]  = regrid_level(acc.tlow[:, m] ./ n, spectral_grid, R)
     z500_o[:, :, m] = regrid_level(acc.z500[:, m] ./ n, spectral_grid, R)
+    vlow_o[:, :, m] = regrid_level(acc.vlow[:, m] ./ n, spectral_grid, R)
+    v0_o[:, :, m]   = regrid_level(acc.v0[:, m]   ./ n, spectral_grid, R)
+    cdrag_o[:, :, m] = regrid_level(acc.cdrag[:, m] ./ n, spectral_grid, R)
+    evap_o[:, :, m] = regrid_level(acc.evap[:, m] ./ n, spectral_grid, R)
+    shf_o[:, :, m]  = regrid_level(acc.shf[:, m]  ./ n, spectral_grid, R)
 end
 
 NCPATH = joinpath(OUTDIR, "sw_realearth_T$(TRUNC)L$(NLAYERS).nc")
@@ -197,6 +212,11 @@ NCDataset(NCPATH, "c") do ds
     put("t2m",      t2m_o,  ("lon","lat","month"), "K",      "monthly lowest-level air temperature")
     put("precip2d", pr2d_o, ("lon","lat","month"), "mm/day", "monthly precipitation")
     put("z500",     z500_o, ("lon","lat","month"), "m",      "monthly 500 hPa geopotential height")
+    put("vlow",     vlow_o, ("lon","lat","month"), "m/s",    "monthly lowest-level wind speed")
+    put("v0",       v0_o,   ("lon","lat","month"), "m/s",    "monthly surface wind speed used by the fluxes (slowdown + gust)")
+    put("cdrag",    cdrag_o,("lon","lat","month"), "1",      "monthly boundary-layer drag coefficient")
+    put("evap",     evap_o, ("lon","lat","month"), "mm/day", "monthly surface evaporation")
+    put("shf",      shf_o,  ("lon","lat","month"), "W/m2",   "monthly surface sensible heat flux (up)")
     ds.attrib["model"] = "SpeedyWeather.jl $(pkgversion(SpeedyWeather)) PrimitiveWetModel, real Earth, prescribed seasonal SST"
     ds.attrib["trunc"] = TRUNC; ds.attrib["nlayers"] = NLAYERS
     ds.attrib["dt_sec"] = Δt; ds.attrib["spinup_days"] = SPINUP; ds.attrib["mean_years"] = MEANYR

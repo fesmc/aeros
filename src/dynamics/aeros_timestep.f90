@@ -250,7 +250,7 @@ module aeros_timestep
                                 aeros_sht_lm
     use aeros_state,    only : aeros_spec_alloc, aeros_spec_end, aeros_spec_copy, &
                                 aeros_spec_swap
-    use aeros_vertical, only : aeros_vgrid_class
+    use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure
     use aeros_vordiv,   only : aeros_uv_from_vordiv, aeros_vordiv_from_uv
     use aeros_tendency, only : aeros_tend_class, aeros_work_class, &
                                 aeros_tend_alloc, aeros_tend_end, &
@@ -333,6 +333,12 @@ module aeros_timestep
         integer  :: nvariant = NCYCLE_A           ! weight sequence, ncycle only
         type(aeros_tend_class) :: gacc            ! the accumulator G, ncycle only
         type(aeros_tend_class) :: lx              ! scratch: L X, ncycle only
+
+        ! Global water tally [kg m-2, area-mean column water change], per
+        ! operator, accumulated while wrk%diag is on; the driver prints and
+        ! resets it. Order: surface, convection, condensation, cloud, vdiff,
+        ! transport. A budget diagnostic for a leak hunt, not physics.
+        real(dp) :: wb(6) = 0.0_dp
 
         ! Steps taken since init. Zero means the next one is the start-up step.
         integer  :: nstep = 0
@@ -896,6 +902,7 @@ contains
         type(aeros_sht_class), pointer :: s
         real(wp) :: h
         integer  :: k, lm
+        real(dp) :: wb0
         logical  :: land_snow, seaice_alb
 
         s => pool%sht(1)
@@ -989,6 +996,7 @@ contains
         ! Off unless enabled. With land on, the fluxes see the composed skin
         ! temperature and the beta evaporation efficiency; the ocean-only path is
         ! the untouched call.
+        if (ts%wrk%diag) wb0 = global_water(grd, vg, now%qv_g, ts%wrk%lnps_g)
         if (ts%surf%enabled) then
             if (ts%land%enabled) then
                 call aeros_surface_apply(ts%surf, vg, ts%land%skin, ts%wrk%t_g, now%qv_g, &
@@ -1005,6 +1013,7 @@ contains
         ! radiation. A disabled term leaves dt_phys unchanged, so its increment is
         ! zero -- no need to guard on the physics toggle.
         if (ts%wrk%diag) ts%wrk%dt_surf = ts%wrk%dt_phys
+        if (ts%wrk%diag) call water_tally(1)
 
         ! Moist convective adjustment, before condensation: it overturns the
         ! column and precipitates, and large-scale condensation then removes
@@ -1015,6 +1024,7 @@ contains
             call aeros_convection_apply(ts%cnv, vg, ts%wrk%t_g, now%qv_g, &
                                             ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
         if (ts%wrk%diag) ts%wrk%dt_cnv = ts%wrk%dt_phys
+        if (ts%wrk%diag) call water_tally(2)
 
         ! Large-scale condensation, at the same grid seam: it dries the
         ! gridpoint humidity in place and adds its latent heating to wrk%dt_phys.
@@ -1025,6 +1035,7 @@ contains
         call aeros_condensation_apply(ts%cnd, vg, ts%wrk%t_g, now%qv_g, &
                                         ts%wrk%lnps_g, ts%wrk%dt_phys, ts%dt)
         if (ts%wrk%diag) ts%wrk%dt_cnd = ts%wrk%dt_phys
+        if (ts%wrk%diag) call water_tally(3)
 
         ! Prognostic cloud fraction (aeros_cloud_prog), at the same grid seam and
         ! AFTER convection and condensation so it sees the grid-box saturation
@@ -1166,7 +1177,9 @@ contains
         ! which for a diffusion term is unconditionally unstable on the leapfrog
         ! (aeros_vdiff header). Transforms the stepped T, winds and lnps to the
         ! grid, diffuses T/q/u/v there, and transforms back.
+        if (ts%wrk%diag) wb0 = global_water(grd, vg, now%qv_g, ts%wrk%lnps_g)
         if (ts%vd%enabled) call apply_vdiff(ts, s, vg, now)
+        if (ts%wrk%diag) call water_tally(5)
 
         ! === 4. Time filter (leapfrog) =======================================
         if (ts%scheme == SCHEME_LEAPFROG .and. ts%nstep > 0) &
@@ -1195,22 +1208,82 @@ contains
         ! Humidity first, as always. The engine reports its Courant/sub-step
         ! diagnostics from this (moisture) call, and both calls see identical
         ! winds so the numbers are the same regardless of order.
+        ! The spectral ln p_s at n+1 (now%spec after the swap) on the grid: the
+        ! air mass the transported tracer mass is divided by, so that Sum q dp
+        ! against the model's own mass is conserved (aeros_transport header,
+        ! "Mass consistency"). One 2-D synthesis per step.
+        call aeros_sht_synthesis(s, now%spec%lnps, ts%wrk%lnps_new)
+        if (ts%wrk%diag) wb0 = global_water(grd, vg, now%qv_g, ts%wrk%lnps_g)
         call aeros_transport_transport(ts%mst, vg, ts%wrk%u, ts%wrk%v, &
-                                        ts%wrk%lnps_g, now%qv_g, ts%dt)
+                                        ts%wrk%lnps_g, now%qv_g, ts%dt, lnps_new=ts%wrk%lnps_new)
+        if (ts%wrk%diag) call water_tally(6, ts%wrk%lnps_new)
 
         ! Cloud fraction, through the SAME engine instance (shared geometry and
-        ! scratch), when the prognostic cloud scheme is on. cf starts in [0,1]
-        ! and the scheme's max-principle keeps it there, so it transports safely
-        ! with no clamp -- a clamp would break the conservative flux form.
-        if (ts%cpr%enabled) &
+        ! scratch), when the prognostic cloud scheme is on. The mass-consistent
+        ! division can overshoot a [0,1] bound by the FV/spectral mass gap, so
+        ! cf is clamped at 1 afterwards (it is not a conserved quantity).
+        if (ts%cpr%enabled) then
             call aeros_transport_transport(ts%mst, vg, ts%wrk%u, ts%wrk%v, &
-                                            ts%wrk%lnps_g, now%cf_g, ts%dt)
+                                            ts%wrk%lnps_g, now%cf_g, ts%dt, lnps_new=ts%wrk%lnps_new)
+            now%cf_g = min(now%cf_g, 1.0_wp)
+        end if
 
         ts%nstep = ts%nstep + 1
 
         return
 
+    contains
+
+        subroutine water_tally(iop, lnps_after)
+            ! Column water now minus the last checkpoint wb0, into ts%wb(iop),
+            ! and move the checkpoint forward. lnps_after: the surface pressure
+            ! the "after" water is measured against (transport ends at n+1).
+            integer, intent(in) :: iop
+            real(wp), intent(in), optional :: lnps_after(:,:)
+            real(dp) :: w1
+            if (present(lnps_after)) then
+                w1 = global_water(grd, vg, now%qv_g, lnps_after)
+            else
+                w1 = global_water(grd, vg, now%qv_g, ts%wrk%lnps_g)
+            end if
+            ts%wb(iop) = ts%wb(iop) + (w1 - wb0)
+            wb0 = w1
+        end subroutine water_tally
+
     end subroutine aeros_timestep_step
+
+    real(dp) function global_water(grd, vg, qv_g, lnps_g) result(w)
+        ! Area-mean column water vapour [kg m-2] of a gridpoint humidity field
+        ! against the given ln p_s.
+
+        implicit none
+
+        type(aeros_grid_class),  intent(in) :: grd
+        type(aeros_vgrid_class), intent(in) :: vg
+        real(wp), intent(in) :: qv_g(:,:,:), lnps_g(:,:)
+
+        real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
+        real(dp) :: s, wsum
+        integer  :: i, j, k
+
+        s = 0.0_dp; wsum = 0.0_dp
+        !$omp parallel do collapse(2) schedule(static) private(i,j,k,phalf,pfull,dpc) &
+        !$omp   reduction(+:s,wsum)
+        do j = 1, grd%nlat
+            do i = 1, grd%nlon
+                call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
+                do k = 1, vg%nlev
+                    s = s + real(qv_g(i,j,k)*dpc(k), dp)*real(grd%area(i,j), dp)
+                end do
+                wsum = wsum + real(grd%area(i,j), dp)
+            end do
+        end do
+        !$omp end parallel do
+        w = s/(wsum*real(grav, dp))
+
+        return
+
+    end function global_water
 
     subroutine speed_limit_drag(ts, vg)
         ! Module header, "Speed-limit drag": F = -c max(0,|V|-vmax)^2 sign(u,v)
@@ -1446,7 +1519,7 @@ contains
         if (ts%wrk%diag) ts%wrk%dt_vdiff = t3
 
         call aeros_vdiff_apply(ts%vd, vg, t3, now%qv_g, u3, v3, lnps2, ts%dt, &
-                                ts%surf%c_d, ts%surf%u_min)
+                                ts%surf%c_d, ts%surf%gust_speed, ts%surf%wind_slowdown)
 
         if (ts%wrk%diag) ts%wrk%dt_vdiff = t3 - ts%wrk%dt_vdiff
 

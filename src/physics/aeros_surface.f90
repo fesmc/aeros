@@ -54,7 +54,13 @@ module aeros_surface
         ! Bulk-flux parameters.
         real(wp) :: c_h   = 1.5e-3_wp      ! sensible-heat exchange coefficient
         real(wp) :: c_e   = 1.5e-3_wp      ! moisture exchange coefficient
-        real(wp) :: u_min = 1.0_wp         ! wind floor / gustiness [m s-1]
+        ! Surface wind the fluxes see (SpeedyWeather's SurfaceCondition):
+        !   |V_0| = sqrt( (wind_slowdown |V_1|)^2 + gust_speed^2 )
+        ! the lowest-level wind slowed toward the surface plus sub-grid gusts in
+        ! quadrature. The gust term is what keeps the fluxes alive under weak
+        ! resolved winds (a 1 m/s floor gave a third of the observed evaporation).
+        real(wp) :: gust_speed    = 5.0_wp     ! [m s-1]
+        real(wp) :: wind_slowdown = 0.95_wp    ! [-]
         ! Surface momentum drag coefficient. The bulk stress tau = rho C_d |u| u
         ! is the boundary-layer momentum sink; without it a surface-trapped jet
         ! (the RCE's low-level jet) spins up unbraked. Applied IMPLICITLY as the
@@ -77,6 +83,7 @@ module aeros_surface
     public :: aeros_surface_load
     public :: aeros_surface_end
     public :: aeros_surface_apply
+    public :: aeros_surface_wind
     public :: aeros_surface_report
 
 contains
@@ -114,18 +121,21 @@ contains
         type(aeros_grid_class), intent(in)    :: grd
 
         logical  :: enabled
-        real(wp) :: c_h, c_e, u_min, c_d
+        real(wp) :: c_h, c_e, gust, slow, c_d
 
         enabled = surf%enabled
-        c_h = surf%c_h; c_e = surf%c_e; u_min = surf%u_min; c_d = surf%c_d
+        c_h = surf%c_h; c_e = surf%c_e; gust = surf%gust_speed; slow = surf%wind_slowdown
+        c_d = surf%c_d
 
         call nml_read(filename, "surface", "enabled", enabled, defaults_file=defaults_file)
         call nml_read(filename, "surface", "c_h",     c_h, defaults_file=defaults_file)
         call nml_read(filename, "surface", "c_e",     c_e, defaults_file=defaults_file)
-        call nml_read(filename, "surface", "u_min",   u_min, defaults_file=defaults_file)
+        call nml_read(filename, "surface", "gust_speed",    gust, defaults_file=defaults_file)
+        call nml_read(filename, "surface", "wind_slowdown", slow, defaults_file=defaults_file)
         call nml_read(filename, "surface", "c_d",     c_d, defaults_file=defaults_file)
 
-        surf%c_h = c_h; surf%c_e = c_e; surf%u_min = u_min; surf%c_d = c_d
+        surf%c_h = c_h; surf%c_e = c_e; surf%gust_speed = gust; surf%wind_slowdown = slow
+        surf%c_d = c_d
 
         call aeros_surface_init(surf, grd, enabled)
 
@@ -197,7 +207,7 @@ contains
 
                 ! lowest-layer air density (virtual temperature) and wind speed
                 rho1 = pfull(ks)/(R_d*t1*(1.0_wp + RV_OVER_RD_M1*q1))
-                wind = max(surf%u_min, sqrt(u(i,j,ks)**2 + v(i,j,ks)**2))
+                wind = aeros_surface_wind(surf, u(i,j,ks), v(i,j,ks))
 
                 ! sensible heat flux [W m-2], positive up (into the atmosphere)
                 sh = rho1*cp_d*surf%c_h*wind*(sst(i,j) - t1)
@@ -235,6 +245,16 @@ contains
         return
     end subroutine aeros_surface_apply
 
+    pure real(wp) function aeros_surface_wind(surf, u1, v1) result(wind)
+        ! The surface wind speed the bulk fluxes (and the momentum drag in
+        ! aeros_vdiff) see: lowest-level wind slowed toward the surface plus
+        ! sub-grid gusts in quadrature (class header).
+        implicit none
+        type(aeros_surf_class), intent(in) :: surf
+        real(wp), intent(in) :: u1, v1
+        wind = sqrt((surf%wind_slowdown**2)*(u1*u1 + v1*v1) + surf%gust_speed**2)
+    end function aeros_surface_wind
+
     subroutine aeros_surface_report(surf, io_unit)
         implicit none
         type(aeros_surf_class), intent(in) :: surf
@@ -244,6 +264,7 @@ contains
         write(io_unit, '(a,l1)')   "    enabled = ", surf%enabled
         if (.not. surf%enabled) return
         write(io_unit, '(a,es10.2,a,es10.2)') "    C_H/C_E = ", surf%c_h, " / ", surf%c_e
+        write(io_unit, '(a,f6.2,a,f5.2)') "    gust_speed / wind_slowdown = ", surf%gust_speed, " / ", surf%wind_slowdown
         return
     end subroutine aeros_surface_report
 
