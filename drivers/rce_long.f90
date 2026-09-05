@@ -1616,13 +1616,17 @@ contains
         ! Global-mean TOA and surface energy budget. A secular drift of the
         ! column temperature is a TOA imbalance (absorbed SW - OLR /= 0); this
         ! separates an energy-balance problem from a mixing/numerics one.
-        real(wp) :: olr, swup, swin, shf, lhf, wsum
+        real(wp) :: olr, swup, swin, shf, lhf, wsum, olrc, swupc, cov
         integer  :: j
         if (.not. (l_rad .or. l_surf)) return
         olr = 0.0_wp; swup = 0.0_wp; swin = 0.0_wp; shf = 0.0_wp; lhf = 0.0_wp
+        olrc = 0.0_wp; swupc = 0.0_wp; cov = 0.0_wp
         if (l_rad) then
             olr  = gmean2(ts%rad%olr)
             swup = gmean2(ts%rad%sw_up_toa)
+            olrc = gmean2(ts%rad%olr_cs)
+            swupc = gmean2(ts%rad%sw_up_toa_cs)
+            cov  = gmean2(ts%rad%cover)
             wsum = 0.0_wp
             do j = 1, grd%nlat
                 swin = swin + ts%rad%sw_toa(j)*sum(grd%area(:,j))
@@ -1636,6 +1640,11 @@ contains
         write(*,"(a,f7.1,a,f7.1,a,f7.2,a,f7.1,a,f7.1,a)") &
             "   TOA: SWin ", swin, "  OLR ", olr, "  net ", swin-swup-olr, &
             " W/m2 | sfc SH ", shf, "  LH ", lhf, " W/m2"
+        ! Cloud radiative effect = all-sky minus clear-sky (ERA5 1991-2020: absorbed SW
+        ! 243, OLR 242, clear 289 / 264, CRE SW -46 LW +22, total cover 0.63).
+        if (l_rad .and. l_rad_clouds) write(*,"(a,f7.1,a,f7.1,a,f6.1,a,f6.1,a,f5.2)") &
+            "   TOA clear: SWabs ", swin-swupc, "  OLR ", olrc, " | CRE SW ", swupc-swup, &
+            "  LW ", olrc-olr, " W/m2 | cloud cover ", cov
         call water_balance()
         return
     end subroutine energy_balance

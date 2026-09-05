@@ -268,7 +268,7 @@ contains
 
     subroutine aeros_ecckd_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
                                             q_co2, l_o3, cf, clwc, ciwc, &
-                                            fnet, heat, olr, fdw_sur)
+                                            fnet, heat, olr, fdw_sur, olr_clear)
         ! All-sky longwave: SESAM's run-twice-and-blend (aeros_lw_cloudy_column),
         ! but on the ecCKD gas g-points. A clear column and an overcast column
         ! (clear-sky gas g-points times a per-layer grey cloud transmission built
@@ -282,6 +282,7 @@ contains
         logical,  intent(in)  :: l_o3
         real(wp), intent(in)  :: cf(:), clwc(:), ciwc(:)
         real(wp), intent(out) :: fnet(0:), heat(:), olr, fdw_sur
+        real(wp), intent(out), optional :: olr_clear   ! clear-sky OLR [W m-2]
 
         real(wp) :: cloud_od(nlev), fnet_cs(0:nlev), fnet_ov(0:nlev)
         real(wp) :: olr_cs, fdw_cs, olr_ov, fdw_ov, cff, lwp, iwp
@@ -291,6 +292,7 @@ contains
         cloud_od = 0.0_wp
         call ecckd_lw_flux(nlev, t, q, o3, dp_lev, ts, q_co2, l_o3, cloud_od, &
                            fnet_cs, olr_cs, fdw_cs)
+        if (present(olr_clear)) olr_clear = olr_cs
 
         cff = 0.0_wp
         do k = 1, nlev
@@ -535,7 +537,7 @@ contains
 
     subroutine aeros_ecckd_sw_cloudy_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
                                             coszen, alb_vis, alb_ir, cf, clwc, ciwc, &
-                                            heat, sw_up_toa, sw_dw_sur, sw_net_sur)
+                                            heat, sw_up_toa, sw_dw_sur, sw_net_sur, sw_up_clear)
         ! All-sky shortwave: SESAM's run-twice-and-blend (aeros_sw_cloudy_column)
         ! on the ecCKD clear-sky SW base. A cloud reflector (conservative-scattering
         ! two-stream on the in-cloud optical depth, plus a small near-IR
@@ -550,6 +552,7 @@ contains
         real(wp), intent(in)  :: swdown_toa, coszen, alb_vis, alb_ir
         real(wp), intent(in)  :: cf(:), clwc(:), ciwc(:)
         real(wp), intent(out) :: heat(:), sw_up_toa, sw_dw_sur, sw_net_sur
+        real(wp), intent(out), optional :: sw_up_clear  ! clear-sky reflected SW [W m-2]
 
         real(wp) :: heat_cs(nlev), up_cs, dw_cs, net_cs
         real(wp) :: tau_c(nlev), cldw(nlev)
@@ -561,6 +564,7 @@ contains
         ! ecCKD clear-sky column (base; also the polar-night / no-cloud guard)
         call aeros_ecckd_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
             coszen, alb_vis, alb_ir, heat_cs, up_cs, dw_cs, net_cs)
+        if (present(sw_up_clear)) sw_up_clear = up_cs
 
         cff = 0.0_wp
         do k = 1, nlev

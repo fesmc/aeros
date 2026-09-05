@@ -244,6 +244,13 @@ module aeros_radiation
         real(wp), allocatable :: sw_dw_sur(:,:)  ! surface downward SW
         real(wp), allocatable :: sw_net_sur(:,:) ! surface net absorbed SW
         real(wp), allocatable :: sw_up_toa(:,:)  ! reflected SW at TOA
+        ! Clear-sky counterparts of olr / sw_up_toa (the same column with the
+        ! cloud removed) and the max-overlap column cloud fraction, so a run
+        ! reports its cloud radiative effect next to the net TOA. With clouds
+        ! off they equal the all-sky values and cover is 0.
+        real(wp), allocatable :: olr_cs(:,:)     ! clear-sky OLR
+        real(wp), allocatable :: sw_up_toa_cs(:,:) ! clear-sky reflected SW at TOA
+        real(wp), allocatable :: cover(:,:)      ! column cloud fraction [-]
     end type aeros_rad_class
 
     public :: aeros_radiation_init
@@ -280,8 +287,11 @@ contains
         allocate(rad%olr(grd%nlon, grd%nlat), rad%lw_dw_sur(grd%nlon, grd%nlat))
         allocate(rad%sw_dw_sur(grd%nlon, grd%nlat), rad%sw_up_toa(grd%nlon, grd%nlat))
         allocate(rad%sw_net_sur(grd%nlon, grd%nlat))
+        allocate(rad%olr_cs(grd%nlon, grd%nlat), rad%sw_up_toa_cs(grd%nlon, grd%nlat))
+        allocate(rad%cover(grd%nlon, grd%nlat))
         rad%olr = 0.0_wp; rad%lw_dw_sur = 0.0_wp
         rad%sw_dw_sur = 0.0_wp; rad%sw_up_toa = 0.0_wp; rad%sw_net_sur = 0.0_wp
+        rad%olr_cs = 0.0_wp; rad%sw_up_toa_cs = 0.0_wp; rad%cover = 0.0_wp
 
         ! Insolation from the insol package (Laskar 2004 orbit at rad%time_bp).
         ! The annual-mean per-latitude sw_toa/coszen seed the annual-mean mode;
@@ -364,6 +374,9 @@ contains
         if (allocated(rad%sw_dw_sur)) deallocate(rad%sw_dw_sur)
         if (allocated(rad%sw_net_sur)) deallocate(rad%sw_net_sur)
         if (allocated(rad%sw_up_toa)) deallocate(rad%sw_up_toa)
+        if (allocated(rad%olr_cs))    deallocate(rad%olr_cs)
+        if (allocated(rad%sw_up_toa_cs)) deallocate(rad%sw_up_toa_cs)
+        if (allocated(rad%cover))     deallocate(rad%cover)
         if (allocated(rad%alb_map))   deallocate(rad%alb_map)   ! feat/land
         call aeros_insol_end(rad%ins)
         rad%enabled = .FALSE.
@@ -554,7 +567,7 @@ contains
 
     subroutine aeros_lw_cloudy_column(nlev, t, q, o3, dp_lev, z_half, ts, &
                                       q_co2, l_o3, cf, clwc, ciwc, &
-                                      fnet, heat, olr, fdw_sur)
+                                      fnet, heat, olr, fdw_sur, olr_clear)
         ! All-sky longwave for one column by SESAM's run-twice-and-blend
         ! (lwr_total): a clear column and an overcast column are computed with the
         ! same band kernel and blended by the column cloud fraction at maximum
@@ -596,6 +609,7 @@ contains
         real(wp), intent(out) :: heat(:)     ! (nlev) LW heating rate [K s-1]
         real(wp), intent(out) :: olr         ! outgoing LW at TOA [W m-2]
         real(wp), intent(out) :: fdw_sur     ! downward LW at surface [W m-2]
+        real(wp), intent(out), optional :: olr_clear  ! clear-sky OLR [W m-2]
 
         ! clear-sky reference
         real(wp) :: fnet_cs(0:nlev), heat_cs(nlev), olr_cs, fdw_cs
@@ -609,6 +623,7 @@ contains
         ! clear-sky column (the reference; also the no-cloud short-circuit)
         call aeros_lw_clearsky_column(nlev, t, q, o3, dp_lev, z_half, ts, &
             q_co2, l_o3, fnet_cs, heat_cs, olr_cs, fdw_cs)
+        if (present(olr_clear)) olr_clear = olr_cs
 
         ! column cloud fraction, maximum overlap
         cff = 0.0_wp
@@ -905,7 +920,7 @@ contains
 
     subroutine aeros_sw_cloudy_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
                                       coszen, alb_vis, alb_ir, cf, clwc, ciwc, &
-                                      heat, sw_up_toa, sw_dw_sur, sw_net_sur)
+                                      heat, sw_up_toa, sw_dw_sur, sw_net_sur, sw_up_clear)
         ! All-sky shortwave for one column. Shortwave is scattering, not grey
         ! absorption, so -- unlike the longwave -- the cloud cannot fold into a
         ! per-layer transmission. Instead the tuned clear-sky column
@@ -949,6 +964,7 @@ contains
         real(wp), intent(out) :: sw_up_toa   ! TOA upward (reflected) SW [W m-2]
         real(wp), intent(out) :: sw_dw_sur   ! surface downward SW [W m-2]
         real(wp), intent(out) :: sw_net_sur  ! surface net absorbed SW [W m-2]
+        real(wp), intent(out), optional :: sw_up_clear  ! clear-sky reflected SW [W m-2]
 
         real(wp) :: heat_cs(nlev), up_cs, dw_cs, net_cs
         real(wp) :: tau_c(nlev), cldw(nlev)
@@ -960,6 +976,7 @@ contains
         ! clear-sky column (the tuned reference; also the polar-night guard)
         call aeros_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
             coszen, alb_vis, alb_ir, heat_cs, up_cs, dw_cs, net_cs)
+        if (present(sw_up_clear)) sw_up_clear = up_cs
 
         ! column cloud fraction: maximum overlap
         cff = 0.0_wp
@@ -1072,6 +1089,7 @@ contains
         real(wp) :: cf(vg%nlev), clwc(vg%nlev), ciwc(vg%nlev)
         real(wp) :: fnet(0:vg%nlev), heat_lw(vg%nlev), heat_sw(vg%nlev)
         real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net, doy, cz, sw, alb
+        real(wp) :: olr_c, sw_up_c, cover_c   ! clear-sky TOA and column cover
         logical  :: have_alb_map
         integer  :: i, j, k, nlev, nrad
         logical  :: use_cf_prog
@@ -1104,7 +1122,8 @@ contains
 
             !$omp parallel do collapse(2) schedule(static) &
             !$omp   private(i,j,phalf,pfull,dpc,phi_full,phi_half,z_half,o3col, &
-            !$omp           cf,clwc,ciwc,fnet,heat_lw,heat_sw,olr,fdw_lw,sw_up,sw_dw,sw_net,alb)
+            !$omp           cf,clwc,ciwc,fnet,heat_lw,heat_sw,olr,fdw_lw,sw_up,sw_dw,sw_net,alb, &
+            !$omp           olr_c,sw_up_c,cover_c)
             do j = 1, rad%nlat
                 do i = 1, rad%nlon
                     call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
@@ -1142,18 +1161,22 @@ contains
                         if (rad%scheme == SCHEME_ECCKD) then
                             call aeros_ecckd_lw_cloudy_column(nlev, t_g(i,j,:), &
                                 qv_g(i,j,:), o3col, dpc, z_half, t_s(i,j), rad%q_co2, &
-                                rad%l_o3, cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw)
+                                rad%l_o3, cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw, &
+                                olr_clear=olr_c)
                             call aeros_ecckd_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
                                 rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb, &
-                                alb, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
+                                alb, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net, &
+                                sw_up_clear=sw_up_c)
                         else
                             call aeros_lw_cloudy_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
                                 o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
-                                cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw)
+                                cf, clwc, ciwc, fnet, heat_lw, olr, fdw_lw, olr_clear=olr_c)
                             call aeros_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
                                 rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb, &
-                                alb, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net)
+                                alb, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net, &
+                                sw_up_clear=sw_up_c)
                         end if
+                        cover_c = min(1.0_wp, max(0.0_wp, maxval(cf)))
                     else
                         ! Clear-sky longwave: dispatch on the scheme selector.
                         ! SESAM is the default (bit-for-bit unchanged); the opt-in
@@ -1174,6 +1197,7 @@ contains
                                 rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb, &
                                 alb, heat_sw, sw_up, sw_dw, sw_net)
                         end if
+                        olr_c = olr; sw_up_c = sw_up; cover_c = 0.0_wp
                     end if
 
                     rad%heat(i,j,:) = heat_lw + heat_sw
@@ -1183,6 +1207,9 @@ contains
                     rad%sw_dw_sur(i,j)  = sw_dw
                     rad%sw_net_sur(i,j) = sw_net
                     rad%sw_up_toa(i,j)  = sw_up
+                    rad%olr_cs(i,j)       = olr_c
+                    rad%sw_up_toa_cs(i,j) = sw_up_c
+                    rad%cover(i,j)        = cover_c
                 end do
             end do
             !$omp end parallel do
