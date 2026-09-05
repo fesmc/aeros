@@ -272,6 +272,48 @@ L12). Findings:
   summer pole itself. The 4 mm/day in the earlier note was an L12/old-physics feature. The
   real precipitation gaps are the ITCZ (4.3 vs 6.4 annual peak) and the storm tracks.
 
+**Update 2026-09-06 (evening): the warm tropical upper troposphere survives every switch.**
+New diagnostics: the report prints clear-sky TOA fluxes, CRE and cloud cover (`TOA clear:` line);
+`cld_rhc_sfc/top`, `cld_lwc/iwc` are `&rce` keys. Every run below is the L6 real-Earth config, 2 yr,
+one change at a time; "lid" = tropical (|lat|<15) top-layer T / q (ERA5 layer mean 213 K / 0.04 g/kg):
+
+| run | lid T [K] | lid q [g/kg] | OLR | CRE SW / LW | P [mm/day] |
+|---|---|---|---|---|---|
+| default | 230.9 | 0.62 | 189 | −113 / +67 | 2.18 |
+| ozone off | 230.3 | 0.58 | 186 | | 2.27 |
+| clear-sky radiation | 235.0 | 0.91 | 256 | | 2.63 |
+| no high cloud (`cld_rhc_top=1`) | 229.9 | 0.55 | 222 | −59 / +35 | 2.64 |
+| convection off | 229.2 | 0.52 | 178 | −126 / +76 | 2.07 |
+| van Leer vertical q transport | 231.0 | 0.60 | 199 | −100 / +60 | 2.34 |
+| dt = 900 | 231.8 | 0.66 | 195 | −106 / +60 | 2.31 |
+| SW water absorption by mass (scratch) | 229.0 | 0.51 | 181 | | 2.11 |
+| topography off | 232.5 | 0.73 | 186 | | 2.24 |
+| aquaplanet, real SST + seasons | 233.1 | 0.79 | 180 | | 2.47 |
+| uniform insolation, real SST/land | 231.3 | 0.65 | 186 | | 2.19 |
+| idealized SST, seasonal insolation | 215.8 | 0.11 | 151 (TOA +42) | | 1.08 |
+| RCE (uniform insolation, idealized SST) | 214.2 | 0.09 | 146 (TOA +23) | | 1.07 |
+| L12 default (198 hPa level) | 245 at 198 hPa | | 166 | | |
+
+- The column physics can make the right tropical profile: the two idealized-SST runs sit on the
+  moist adiabat with a 214–216 K lid, deep convection to the top, and 0.1 g/kg aloft — but with a
+  half-strength hydrological cycle (LH 31 W/m²) and a dead equatorial column in one of them.
+- With the real SST the tropical column is warm and stable above ~450 hPa at any level count;
+  the convective band (Frierson) never reaches it (h_b 330–340 kJ/kg vs h* 375–410); grid-scale
+  condensation does the deep moist processing there (+0.3–0.9 K/day) and radiation cannot remove
+  it. Not caused by clouds, ozone, the SW distribution, the convection scheme, transport, dt, land,
+  topography or the insolation pattern individually. It is a circulation-regime property: the
+  boundary layer is too dry (12.6 vs 14.8 g/kg at 950 hPa, RH 75% vs 85%), h_b is ~5–10 kJ/kg low,
+  the mean meridional circulation is 3–4× too weak (ITCZ ascent −7 hPa/day at 500 hPa vs ERA5
+  ~−25), low-level winds 5.2 vs ~7 m/s, evaporation ~35% low — one loop.
+- Offline column probe (scratch `probe_lid.f90`): the SESAM/ecCKD SW deposits the near-IR
+  water absorption by the drop of a 2-exponential transmission, so the first ~1.5 kg/m² of water
+  from the top absorb ~40 W/m² (+1.5 K/day) — 2–3× a reference profile; the coupled test says it
+  is secondary (−2 K on the lid). Worth a proper near-IR k-distribution later.
+- SW-cloud fix (`cld_rhc_top=1`) brings the CRE to −59/+35 (ERA5 −46/+22) and P to 2.64 but leaves
+  TOA at +17 W/m² (albedo was tuned against the old clouds) — a retune is a 4-knob / 3-target job.
+- Polar-cap precipitation is NOT a deficit at L6/L8 (see the morning entry).
+
+
 
 **►► NEXT (in order):**
 1. **Re-validate the climate at full-rate physics.** The 1-yr aquaplanet at dt=3600 has OLR
