@@ -236,6 +236,43 @@ max [u] 52 m/s (L8 56), DJF NH Z500* RMS 85 m (L8 77; ERA5 76), NH-land t2m ampl
 (L8 32.5; ERA5 33.6), **2810 SYPD** (L8 2190; SW 1040). The metrics move within the level-sweep
 scatter; the stationary wave is the one that worsens (85 vs 76 m).
 
+**Update 2026-09-06 (deficits 1 and 2 diagnosed, no fix yet).** Tools: the L6 harness run with
+`l_diag`, the per-term heating tables, `output/rce_rh.nc`, ERA5 pressure-level q/T/r and TOA
+fluxes (`tisr/tsr/ttr/tsrc/ttrc/tcc`), 2-yr sensitivity runs (ozone off, clear-sky radiation,
+L12). Findings:
+- **The lid is not a moisture problem, it is a temperature problem.** aeros' top layer (L6:
+  0–250 hPa) is 231 K in the tropics against ERA5's mass-weighted 213 K, and 199–206 K at the
+  poles against 213–220 K: a 40 K equator-pole contrast at the lid where ERA5's is reversed.
+  That warm layer holds 0.62 g/kg at the 0.95·q_sat(liquid) cap (ERA5 0.04; ice saturation would
+  cap it at 0.44, RH_ice is 134–158%). SpeedyWeather's 0–250 hPa is just as warm (232 K) and
+  holds 0.25 g/kg; its "dry lid" is an RH artefact of a warm low-pressure top layer.
+- **It is not the thick top layer.** L12 with the current code: 245 K at 198 hPa (ERA5 220),
+  257 K at 313 hPa (ERA5 240), RH 66–93% there. The tropical warm bias grows from ~0 at the
+  surface to +20–25 K at 200 hPa at every level count.
+- **Not ozone** (`l_o3 = .false.`, now an `&rce` key: lid 230.3 K, 0.58 g/kg, unchanged),
+  **not cloud LW trapping alone** (clear-sky run: lid warmer, 235 K; TOA +42 W/m²).
+- **Heat budget of the tropical upper troposphere** (per-term tables, L6 and L12): convection
+  is zero above ~450 hPa (the surface parcel's h_b 330–340 kJ/kg never reaches h* 375–410
+  kJ/kg of the warm layers); grid-scale condensation heats 200–300 hPa at +0.3–0.9 K/day
+  (≈0.5 mm/day of tropical rain forms in the top layer); radiation cools it at only −0.2 to
+  −0.5 K/day (Earth: −1 to −1.5). A self-consistent warm state: warm aloft → h* too high →
+  no deep convection → the resolved ascent does the convecting with 100% precipitation
+  efficiency → warm, saturated, cirrus-capped.
+- **The planet runs dim.** Global TOA (aeros L6 / ERA5): OLR 189 / 242, absorbed SW 185 / 243
+  (planetary albedo 0.47 / 0.29), clear-sky OLR ~256 / 264, cloud LW effect ~+67 / +22,
+  cloud SW effect ~−113 / −46, total cloud cover 0.75 / 0.63. The diagnostic cloud scheme
+  (tuned on ERA5 columns) driven by the model's own saturated upper troposphere makes a
+  permanent cirrus deck (cf 0.4–0.8 at the lid). The net TOA is balanced by construction,
+  but at 185 W/m² throughput the atmosphere's radiative cooling (~0.4 K/day column mean) and
+  hence P = E (2.2 vs 2.9 mm/day) and the tropical LH (51 vs ~110 W/m²) are all ~25% low.
+  Deficits 1 and 3 (evaporation) are one loop.
+- **Deficit 2 (polar precipitation) is not there at L6/L8.** Cap means (aeros / ERA5, mm/day):
+  DJF 60–90S 0.91 / 0.75, JJA 60–90N 1.26 / 1.41, DJF 60–90N 0.43 / 0.88, JJA 60–90S 0.49 /
+  0.90 — the winter poles are too dry, not too wet; the only excess is ~0.5 mm/day over the
+  summer pole itself. The 4 mm/day in the earlier note was an L12/old-physics feature. The
+  real precipitation gaps are the ITCZ (4.3 vs 6.4 annual peak) and the storm tracks.
+
+
 **►► NEXT (in order):**
 1. **Re-validate the climate at full-rate physics.** The 1-yr aquaplanet at dt=3600 has OLR
    ~117 W/m² (was ~155), a 188 K level-1 mean (172 K min) and an 81 m/s lid jet — the

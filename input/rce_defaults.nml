@@ -156,4 +156,9 @@
     ! profile). A .nc with sst(lat,month) on the model grid (scripts/
     ! make_seasonal_sst.jl) overrides SST daily in prescribed-SST mode.
     sst_seasonal_file = ""
+
+    ! Prescribed analytic ozone in the radiation (stratospheric SW heating and
+    ! the LW ozone band). .false. is a diagnostic: it leaves the lid moisture
+    ! and temperature unchanged (2026-09-06 test), so it is not a tuning lever.
+    l_o3             = .true.
 /

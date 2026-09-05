@@ -83,6 +83,7 @@ program rce_long
     logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
     logical  :: l_dry_adjust = .TRUE. ! dry convective adjustment before the moist scheme
     logical  :: l_rad_clouds = .FALSE. ! diagnostic all-sky clouds in the radiation
+    logical  :: l_o3 = .TRUE.          ! prescribed analytic ozone in the radiation (SW heating + LW)
     logical  :: l_uniform_insol = .FALSE. ! flatten insolation to its global mean (no meridional gradient)
     logical  :: l_nonrotating = .FALSE.   ! zero Coriolis (no jet organization; RCE vehicle)
     ! Seasonal insolation (feat/seasonal): .FALSE. = annual-mean (bit-for-bit
@@ -325,6 +326,7 @@ program rce_long
     ts%surf%c_d = c_d
     ts%rad%enabled  = l_rad
     ts%rad%clouds   = l_rad_clouds
+    ts%rad%l_o3     = l_o3
     ! Seasonal insolation (feat/seasonal): read into ts%rad before init/apply.
     ts%rad%seasonal = l_seasonal
     ts%rad%doy0     = doy0
@@ -1147,6 +1149,7 @@ contains
         call nml_read(nmlfile, "rce", "l_cnd", l_cnd)
         call nml_read(nmlfile, "rce", "l_rad", l_rad)
         call nml_read(nmlfile, "rce", "l_rad_clouds", l_rad_clouds)
+        call nml_read(nmlfile, "rce", "l_o3", l_o3, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_sponge", l_sponge, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_vdiff", l_vdiff)
