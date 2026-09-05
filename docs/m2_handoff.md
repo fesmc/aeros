@@ -103,6 +103,25 @@ are as good or better (precip 2.1, Z* 69 m, lid 223 K); **L20 blows up at day 35
 dt=3600 (untested at smaller dt). The L12 grid's motivation (design §4.1: polar boundary
 layer / inversions for the ice-sheet SMB) has not yet been tested by any metric.
 
+**Update 2026-09-06 (commits 59657fa, 90e9408).** (ix) **L8 is the default vertical grid**
+(library + driver; L12 stays a namelist choice, Held–Suarez keeps L20). Level sweep on the
+real-Earth run, 2 yr at dt=3600 with the speed limit at 70 m/s: L4 3650 / L5 3250 / L6 2860 /
+L8 2190 / L12 1870 SYPD, all NaN-free, and the harness metrics are as good or better with
+fewer levels (precip 2.3→1.9 mm/day from L4 to L8, Z500* 76–89 m, t2m amplitude 29–31 K).
+The design-doc case for L16–20 (polar boundary layer for ice-sheet SMB) has no metric yet;
+L20 blew up at day 354 at dt=3600 (not investigated). SpeedyWeather's 8 is SPEEDY's
+(Molteni 2003) count — its physics was built on it. (x) **Speed limit 70 m/s at dt=3600** is
+the production default (the log-law surface drag lets the winter lid jet reach ~95 m/s
+otherwise). (xi) **Surface fluxes are the implicit lower boundary of the vdiff solve**
+(sensible heat in dry static energy, evaporation in q, like the momentum stress): the
+lowest-layer response is independent of that layer's thickness and of dt; `aeros_surface`
+only diagnoses the conductances; ocean/land reservoirs step after the solve; `test_surface`
+rewritten. **L8 real-Earth, 3 yr:** P = E = 2.0 mm/day (SW 3.3, ERA5 2.9), TOA −0.2 W/m²,
+Z500* 77 m (ERA5 76), t2m amplitude 32.5 K (ERA5 33.6), lowest-level T 284.7 (ERA5 287.5),
+2190 SYPD (SW 1040). The evaporation gap is now the wind speed (5.2 m/s lowest level vs
+ERA5 ~7 at 10 m; the zonal means match, the eddies are weak) and the moist lowest layer
+(RH 80%).
+
 **►► NEXT (in order):**
 1. **Re-validate the climate at full-rate physics.** The 1-yr aquaplanet at dt=3600 has OLR
    ~117 W/m² (was ~155), a 188 K level-1 mean (172 K min) and an 81 m/s lid jet — the
