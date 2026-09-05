@@ -69,6 +69,24 @@ warm lid); aeros' deficits are **too little precipitation/evaporation (LH ~35 W/
 **saturated upper troposphere/lid (RH ~100% above 200 hPa)**, **spurious polar precipitation**,
 and weak stationary waves; both models over-strong upper jets.
 
+**Update 2026-09-05 (evening, commits 9236f67 / <transport>).** (vi) **SpeedyWeather's
+speed-limit drag** (quadratic above 80 m/s) is now in aeros; it is what lets SW hold dt = 1 h,
+and with it aeros runs the real-Earth config 3 yr at **dt = 3600** (1870 SYPD), climate
+unchanged vs 2700. (vii) **The FV tracer transport was creating water**: 0.5–0.9 mm/day, a
+third of the precipitation — q was divided by the FV-advanced air mass and the next step
+re-diagnosed layer masses from the spectral p_s. Fixed by dividing by the spectral layer
+mass at n+1 (constancy of a uniform tracer becomes approximate; cf clamped at 1). The
+`rce_long` report now prints a global water budget (W, P, E, residual) and, with `l_diag`, a
+per-operator water tally — use them. (viii) Surface fluxes use SpeedyWeather's surface wind
+(0.95 slowdown + 5 m/s gust in quadrature) instead of a 1 m/s floor.
+
+Real-Earth metrics after (vi)–(viii): P = E = **1.85** mm/day (SW 3.3, ERA5 2.9), W 30 mm
+(ERA5 ~25), lowest-level T 287.5 (ERA5 287.5), max [u] 60 (SW 63, ERA5 34), **DJF NH Z500*
+RMS 67 m** (SW 68, ERA5 76; was 40–50 with the leak), NH-land t2m amplitude 30 K (ERA5 34).
+Remaining first-order deficit: **evaporation ~35% low** — aeros' lowest-level wind is 3 m/s
+vs SW's 5.6 (its lowest level is ~500 m vs aeros' ~120 m), so V0 is 5.8 vs 7.7 m/s; the
+exchange coefficient (1.5e-3 fixed vs SW's Richardson ~1e-3) is not the gap.
+
 **►► NEXT (in order):**
 1. **Re-validate the climate at full-rate physics.** The 1-yr aquaplanet at dt=3600 has OLR
    ~117 W/m² (was ~155), a 188 K level-1 mean (172 K min) and an 81 m/s lid jet — the
