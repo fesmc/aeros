@@ -67,9 +67,15 @@ mutable struct MonthlyAccumulator <: SpeedyWeather.AbstractCallback
     temp::Any; uwnd::Any; vwnd::Any; rh::Any      # [point, k, month]
     tlow::Any; prec::Any; z500::Any               # [point, month]
     vlow::Any; v0::Any; cdrag::Any; evap::Any; shf::Any   # [point, month] surface-flux ingredients
+    # eddy covariances per point [point, k, month]: (v-[v])(T-[T]), (v-[v])(q-[q]),
+    # ((u-[u])^2+(v-[v])^2)/2 with [.] the ring (zonal) mean of the sample -- the
+    # same [v'T'], [v'q'], EKE aeros' rce_long writes; humidity monthly mean too
+    # (the stationary part needs the monthly-mean u, v, T, q).
+    rings::Any; hum::Any; vt::Any; vq::Any; eke::Any
 end
 MonthlyAccumulator() = MonthlyAccumulator(Float64[], zeros(Int, NMON),
     nothing, nothing, nothing, nothing, nothing, nothing, nothing,
+    nothing, nothing, nothing, nothing, nothing,
     nothing, nothing, nothing, nothing, nothing)
 
 function SpeedyWeather.initialize!(cb::MonthlyAccumulator, vars, model)
@@ -86,6 +92,11 @@ function SpeedyWeather.initialize!(cb::MonthlyAccumulator, vars, model)
     cb.z500 = zeros(Float64, np, NMON)
     cb.vlow = zeros(Float64, np, NMON); cb.v0 = zeros(Float64, np, NMON); cb.cdrag = zeros(Float64, np, NMON)
     cb.evap = zeros(Float64, np, NMON); cb.shf = zeros(Float64, np, NMON)
+    cb.rings = collect(SpeedyWeather.RingGrids.eachring(vars.grid.temperature))
+    cb.hum = zeros(Float64, np, nk, NMON)
+    cb.vt  = zeros(Float64, np, nk, NMON)
+    cb.vq  = zeros(Float64, np, nk, NMON)
+    cb.eke = zeros(Float64, np, nk, NMON)
     return nothing
 end
 
@@ -109,6 +120,17 @@ function SpeedyWeather.callback!(cb::MonthlyAccumulator, vars, model)
         cb.uwnd[ij, k, m] += u[ij, k]
         cb.vwnd[ij, k, m] += v[ij, k]
         cb.rh[ij, k, m]   += qsat > 0 ? 100.0*q[ij, k]/qsat : 0.0
+        cb.hum[ij, k, m]  += q[ij, k]
+    end
+    @inbounds for k in 1:nk, ring in cb.rings
+        ub = mean(@view u[ring, k]); vb = mean(@view v[ring, k])
+        tb = mean(@view T[ring, k]); qb = mean(@view q[ring, k])
+        for ij in ring
+            vp = v[ij, k] - vb; up = u[ij, k] - ub
+            cb.vt[ij, k, m]  += vp*(T[ij, k] - tb)
+            cb.vq[ij, k, m]  += vp*(q[ij, k] - qb)
+            cb.eke[ij, k, m] += 0.5*(up*up + vp*vp)
+        end
     end
     @inbounds for ij in 1:np
         cb.tlow[ij, m] += T[ij, nk]
@@ -170,6 +192,7 @@ lond = collect(0:nlon-1) .* (360.0/nlon)
 nk   = NLAYERS
 
 t_o  = fill(NaN, nlat, nk, NMON); u_o = copy(t_o); v_o = copy(t_o); rh_o = copy(t_o)
+vt_o = copy(t_o); vq_o = copy(t_o); eke_o = copy(t_o); vts_o = copy(t_o); vqs_o = copy(t_o); ekes_o = copy(t_o)
 pr_o = fill(NaN, nlat, NMON)
 t2m_o = fill(NaN, nlon, nlat, NMON); pr2d_o = copy(t2m_o); z500_o = copy(t2m_o)
 vlow_o = copy(t2m_o); v0_o = copy(t2m_o); cdrag_o = copy(t2m_o); evap_o = copy(t2m_o); shf_o = copy(t2m_o)
@@ -180,6 +203,17 @@ for m in 1:NMON
         u_o[:, k, m]  = vec(mean(regrid_level(acc.uwnd[:, k, m] ./ n, spectral_grid, R); dims=1))
         v_o[:, k, m]  = vec(mean(regrid_level(acc.vwnd[:, k, m] ./ n, spectral_grid, R); dims=1))
         rh_o[:, k, m] = vec(mean(regrid_level(acc.rh[:, k, m]   ./ n, spectral_grid, R); dims=1))
+        vt_o[:, k, m]  = vec(mean(regrid_level(acc.vt[:, k, m]  ./ n, spectral_grid, R); dims=1))
+        vq_o[:, k, m]  = vec(mean(regrid_level(acc.vq[:, k, m]  ./ n, spectral_grid, R); dims=1)) .* 1000.0
+        eke_o[:, k, m] = vec(mean(regrid_level(acc.eke[:, k, m] ./ n, spectral_grid, R); dims=1))
+        # stationary part: eddy covariances of the monthly-mean fields on the full grid
+        ub = regrid_level(acc.uwnd[:, k, m] ./ n, spectral_grid, R); ub .-= mean(ub; dims=1)
+        vb = regrid_level(acc.vwnd[:, k, m] ./ n, spectral_grid, R); vb .-= mean(vb; dims=1)
+        tb = regrid_level(acc.temp[:, k, m] ./ n, spectral_grid, R); tb .-= mean(tb; dims=1)
+        qb = regrid_level(acc.hum[:, k, m]  ./ n, spectral_grid, R); qb .-= mean(qb; dims=1)
+        vts_o[:, k, m]  = vec(mean(vb .* tb; dims=1))
+        vqs_o[:, k, m]  = vec(mean(vb .* qb; dims=1)) .* 1000.0
+        ekes_o[:, k, m] = vec(mean(0.5 .* (ub.^2 .+ vb.^2); dims=1))
     end
     P = regrid_level(acc.prec[:, m] ./ n, spectral_grid, R)
     pr2d_o[:, :, m] = P
@@ -217,6 +251,12 @@ NCDataset(NCPATH, "c") do ds
     put("cdrag",    cdrag_o,("lon","lat","month"), "1",      "monthly boundary-layer drag coefficient")
     put("evap",     evap_o, ("lon","lat","month"), "mm/day", "monthly surface evaporation")
     put("shf",      shf_o,  ("lon","lat","month"), "W/m2",   "monthly surface sensible heat flux (up)")
+    put("vt",       vt_o,   ("lat","lev","month"), "K m/s",    "monthly zonal-mean eddy heat flux [v'T'] (stationary + transient)")
+    put("vq",       vq_o,   ("lat","lev","month"), "g/kg m/s", "monthly zonal-mean eddy moisture flux [v'q'] (stationary + transient)")
+    put("eke",      eke_o,  ("lat","lev","month"), "m2/s2",    "monthly zonal-mean eddy kinetic energy (stationary + transient)")
+    put("vt_stat",  vts_o,  ("lat","lev","month"), "K m/s",    "monthly stationary eddy heat flux [v*T*] of the monthly-mean fields")
+    put("vq_stat",  vqs_o,  ("lat","lev","month"), "g/kg m/s", "monthly stationary eddy moisture flux [v*q*] of the monthly-mean fields")
+    put("eke_stat", ekes_o, ("lat","lev","month"), "m2/s2",    "monthly stationary eddy kinetic energy of the monthly-mean fields")
     ds.attrib["model"] = "SpeedyWeather.jl $(pkgversion(SpeedyWeather)) PrimitiveWetModel, real Earth, prescribed seasonal SST"
     ds.attrib["trunc"] = TRUNC; ds.attrib["nlayers"] = NLAYERS
     ds.attrib["dt_sec"] = Δt; ds.attrib["spinup_days"] = SPINUP; ds.attrib["mean_years"] = MEANYR
