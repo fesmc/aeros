@@ -232,6 +232,13 @@ program rce_long
     ! Surface-flux ingredients: lowest-level wind speed [m/s], evaporation
     ! [mm/day] and sensible heat flux [W/m2] (2D monthly).
     real(wp), allocatable :: mon_vlow(:,:,:), mon_evap(:,:,:), mon_shf(:,:,:)
+    ! Radiative / cloud budget (the winter high-latitude cold-bias diagnosis):
+    ! zonal-mean per-level cloud fraction (the radiation's own -- diagnostic RH
+    ! cloud or the prognostic cf), and 2D skin temperature (land skin where land
+    ! is on, else SST), surface downward LW, OLR, clear-sky OLR and column cover.
+    real(wp), allocatable :: mon_cf(:,:,:)
+    real(wp), allocatable :: mon_skin(:,:,:), mon_lwd(:,:,:), mon_olr(:,:,:), &
+                             mon_olrcs(:,:,:), mon_cover(:,:,:)
     ! Global water budget (report): precipitable water W [kg/m2] at the last
     ! report and the mean precipitation / evaporation since [mm/day].
     real(wp) :: wb_w_last = -1.0_wp, wb_p_acc = 0.0_wp, wb_e_acc = 0.0_wp
@@ -651,6 +658,11 @@ program rce_long
         allocate(mon_vlow(grd%nlon,grd%nlat,NMON), mon_evap(grd%nlon,grd%nlat,NMON), &
                  mon_shf(grd%nlon,grd%nlat,NMON))
         mon_vlow = 0.0_wp; mon_evap = 0.0_wp; mon_shf = 0.0_wp
+        allocate(mon_cf(grd%nlat,nlev,NMON), mon_skin(grd%nlon,grd%nlat,NMON), &
+                 mon_lwd(grd%nlon,grd%nlat,NMON), mon_olr(grd%nlon,grd%nlat,NMON), &
+                 mon_olrcs(grd%nlon,grd%nlat,NMON), mon_cover(grd%nlon,grd%nlat,NMON))
+        mon_cf = 0.0_wp; mon_skin = 0.0_wp; mon_lwd = 0.0_wp; mon_olr = 0.0_wp
+        mon_olrcs = 0.0_wp; mon_cover = 0.0_wp
         nacc_mon = max(1, nint(86400.0_wp/dt))   ! ~1 sample/day
         if (.not. ts%rad%seasonal) write(*,"(a)") &
             " rce_long:: WARNING monthly_out set but radiation%seasonal=.FALSE. -- "// &
@@ -966,6 +978,7 @@ contains
         real(wp) :: tzm(grd%nlat,nlev), uzm(grd%nlat,nlev), vzm(grd%nlat,nlev), rzm(grd%nlat,nlev)
         real(wp) :: sstz(grd%nlat), prz(grd%nlat)
         real(wp) :: phif(nlev), phih, alph, pr_ij, wgt
+        real(wp) :: cfz(grd%nlat,nlev), cfc(nlev), clwc(nlev), ciwc(nlev)
         logical  :: have_pr
 
         day  = ts%rad%doy0 + real(n,wp)*dt/86400.0_wp
@@ -975,10 +988,18 @@ contains
         have_pr = allocated(ts%cnv%precip) .and. allocated(ts%cnd%precip)
         rnlon = real(grd%nlon, wp)
         tzm = 0.0_wp; uzm = 0.0_wp; vzm = 0.0_wp; rzm = 0.0_wp
-        sstz = 0.0_wp; prz = 0.0_wp
+        sstz = 0.0_wp; prz = 0.0_wp; cfz = 0.0_wp
         do jj = 1, grd%nlat
             do ii = 1, grd%nlon
                 call aeros_vgrid_pressure(vg, now%ps(ii,jj), phc, pfc, dpcc)
+                ! per-level cloud fraction as radiation sees it
+                if (ts%cpr%enabled) then
+                    cfc = now%cf_g(ii,jj,:)
+                else
+                    call aeros_cloud_diagnose(nlev, now%temp_g(ii,jj,:), &
+                        now%qv_g(ii,jj,:), pfc, now%ps(ii,jj), cfc, clwc, ciwc)
+                end if
+                cfz(jj,:) = cfz(jj,:) + cfc
                 do kk = 1, nlev
                     call aeros_qsat(now%temp_g(ii,jj,kk), pfc(kk), qsl, dqsl)
                     tzm(jj,kk) = tzm(jj,kk) + now%temp_g(ii,jj,kk)
@@ -1023,6 +1044,18 @@ contains
         mon_rh(:,:,imon) = mon_rh(:,:,imon) + rzm/rnlon
         mon_sst(:,imon)  = mon_sst(:,imon)  + sstz/rnlon
         mon_pr(:,imon)   = mon_pr(:,imon)   + prz/rnlon
+        mon_cf(:,:,imon) = mon_cf(:,:,imon) + cfz/rnlon
+        if (ts%land%enabled .and. allocated(ts%land%skin)) then
+            mon_skin(:,:,imon) = mon_skin(:,:,imon) + ts%land%skin
+        else
+            mon_skin(:,:,imon) = mon_skin(:,:,imon) + ts%ocn%sst
+        end if
+        if (allocated(ts%rad%olr)) then
+            mon_lwd(:,:,imon)   = mon_lwd(:,:,imon)   + ts%rad%lw_dw_sur
+            mon_olr(:,:,imon)   = mon_olr(:,:,imon)   + ts%rad%olr
+            mon_olrcs(:,:,imon) = mon_olrcs(:,:,imon) + ts%rad%olr_cs
+            mon_cover(:,:,imon) = mon_cover(:,:,imon) + ts%rad%cover
+        end if
         mon_t2m(:,:,imon) = mon_t2m(:,:,imon) + now%temp_g(:,:,nlev)  ! full 2D near-surface T
         mon_vlow(:,:,imon) = mon_vlow(:,:,imon) + sqrt(now%u(:,:,nlev)**2 + now%v(:,:,nlev)**2)
         if (allocated(ts%surf%evap)) then
@@ -1042,6 +1075,8 @@ contains
         real(wp), allocatable :: t_o(:,:,:), u_o(:,:,:), v_o(:,:,:), rh_o(:,:,:)
         real(wp), allocatable :: sst_o(:,:), pr_o(:,:), t2m_o(:,:,:)
         real(wp), allocatable :: pr2d_o(:,:,:), z500_o(:,:,:), vlow_o(:,:,:), evap_o(:,:,:), shf_o(:,:,:)
+        real(wp), allocatable :: cf_o(:,:,:), skin_o(:,:,:), lwd_o(:,:,:), olr_o(:,:,:), &
+                                 olrcs_o(:,:,:), cover_o(:,:,:)
         integer :: m
         allocate(latout(grd%nlat), lonout(grd%nlon), levout(nlev), monout(NMON))
         allocate(t_o(grd%nlat,nlev,NMON), u_o(grd%nlat,nlev,NMON), &
@@ -1050,6 +1085,9 @@ contains
                  t2m_o(grd%nlon,grd%nlat,NMON), pr2d_o(grd%nlon,grd%nlat,NMON), &
                  z500_o(grd%nlon,grd%nlat,NMON), vlow_o(grd%nlon,grd%nlat,NMON), &
                  evap_o(grd%nlon,grd%nlat,NMON), shf_o(grd%nlon,grd%nlat,NMON))
+        allocate(cf_o(grd%nlat,nlev,NMON), skin_o(grd%nlon,grd%nlat,NMON), &
+                 lwd_o(grd%nlon,grd%nlat,NMON), olr_o(grd%nlon,grd%nlat,NMON), &
+                 olrcs_o(grd%nlon,grd%nlat,NMON), cover_o(grd%nlon,grd%nlat,NMON))
         latout = grd%lat(1:grd%nlat)
         lonout = grd%lon(1:grd%nlon)
         levout = vg%sigma_full(1:nlev)
@@ -1068,8 +1106,16 @@ contains
                 vlow_o(:,:,m) = mon_vlow(:,:,m)/real(mon_cnt(m),wp)
                 evap_o(:,:,m) = mon_evap(:,:,m)/real(mon_cnt(m),wp)
                 shf_o(:,:,m)  = mon_shf(:,:,m) /real(mon_cnt(m),wp)
+                cf_o(:,:,m)   = mon_cf(:,:,m)  /real(mon_cnt(m),wp)
+                skin_o(:,:,m) = mon_skin(:,:,m)/real(mon_cnt(m),wp)
+                lwd_o(:,:,m)  = mon_lwd(:,:,m) /real(mon_cnt(m),wp)
+                olr_o(:,:,m)  = mon_olr(:,:,m) /real(mon_cnt(m),wp)
+                olrcs_o(:,:,m) = mon_olrcs(:,:,m)/real(mon_cnt(m),wp)
+                cover_o(:,:,m) = mon_cover(:,:,m)/real(mon_cnt(m),wp)
             else
                 vlow_o(:,:,m) = MISS; evap_o(:,:,m) = MISS; shf_o(:,:,m) = MISS
+                cf_o(:,:,m) = MISS; skin_o(:,:,m) = MISS; lwd_o(:,:,m) = MISS
+                olr_o(:,:,m) = MISS; olrcs_o(:,:,m) = MISS; cover_o(:,:,m) = MISS
                 t_o(:,:,m) = MISS; u_o(:,:,m) = MISS; v_o(:,:,m) = MISS
                 rh_o(:,:,m) = MISS; sst_o(:,m) = MISS; pr_o(:,m) = MISS
                 t2m_o(:,:,m) = MISS; pr2d_o(:,:,m) = MISS; z500_o(:,:,m) = MISS
@@ -1104,10 +1150,23 @@ contains
             units="mm/day", long_name="monthly surface evaporation")
         call nc_write(fname, "shf", shf_o, dim1="lon", dim2="lat", dim3="month", &
             units="W/m2", long_name="monthly surface sensible heat flux (up)")
+        call nc_write(fname, "cf", cf_o, dim1="lat", dim2="lev", dim3="month", &
+            units="1", long_name="monthly zonal-mean layer cloud fraction (as seen by radiation)")
+        call nc_write(fname, "skin", skin_o, dim1="lon", dim2="lat", dim3="month", &
+            units="K", long_name="monthly skin temperature (land skin over land, SST over ocean)")
+        call nc_write(fname, "lwd", lwd_o, dim1="lon", dim2="lat", dim3="month", &
+            units="W/m2", long_name="monthly surface downward longwave")
+        call nc_write(fname, "olr", olr_o, dim1="lon", dim2="lat", dim3="month", &
+            units="W/m2", long_name="monthly outgoing longwave at TOA")
+        call nc_write(fname, "olr_cs", olrcs_o, dim1="lon", dim2="lat", dim3="month", &
+            units="W/m2", long_name="monthly clear-sky outgoing longwave at TOA")
+        call nc_write(fname, "cover", cover_o, dim1="lon", dim2="lat", dim3="month", &
+            units="1", long_name="monthly column cloud cover (max overlap)")
         write(*,"(a,i0,a,a)") " rce_long:: wrote monthly climatology (", &
             count(mon_cnt>0), " months populated) -> ", trim(fname)
         deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o, &
-                   pr2d_o, z500_o, vlow_o, evap_o, shf_o)
+                   pr2d_o, z500_o, vlow_o, evap_o, shf_o, cf_o, skin_o, lwd_o, olr_o, &
+                   olrcs_o, cover_o)
     end subroutine dump_monthly
 
     subroutine read_config()
