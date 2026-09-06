@@ -916,7 +916,9 @@ contains
         ! on the land-only map is static (built once at init) and this is skipped,
         ! bit-for-bit; with no land or ice, rad%alb_map stays unallocated and
         ! radiation uses its scalar albedo.
-        land_snow  = ts%land%enabled .and. ts%land%snow_albedo >= 0.0_wp
+        ! (also when the bare land albedo itself is seasonal: aeros_land_set_albedo
+        ! updates land%albedo daily and the map has to follow it)
+        land_snow  = ts%land%enabled .and. (ts%land%snow_albedo >= 0.0_wp .or. ts%land%albedo_seasonal)
         seaice_alb = ts%ocn%l_seaice .and. allocated(ts%ocn%alb)
         if (land_snow .or. seaice_alb) then
             ! Land albedo on land (with the snow bump when active), ocean scalar on

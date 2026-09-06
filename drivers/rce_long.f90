@@ -35,7 +35,7 @@ program rce_long
     use aeros_radiation, only : SCHEME_ECCKD
     use aeros_ocean,    only : aeros_ocean_init
     use aeros_topography, only : aeros_topography_load, aeros_topography_scale
-    use aeros_land,     only : aeros_land_init, aeros_land_couple_radiation
+    use aeros_land,     only : aeros_land_init, aeros_land_couple_radiation, aeros_land_set_albedo
     use aeros_bcinput,  only : aeros_bcinput_read_field
     use nml,            only : nml_read
     use ncio,           only : nc_create, nc_write_dim, nc_write, nc_write_attr, nc_read, nc_size, nc_ndims
@@ -177,6 +177,7 @@ program rce_long
     real(wp) :: c_soil           = 2.0e6_wp ! soil areal heat capacity [J m-2 K-1]
     real(wp) :: land_albedo      = 0.20_wp  ! fallback land albedo (no albedo file)
     real(wp) :: snow_albedo      = -1.0_wp  ! snow-albedo feedback cold endpoint [-]; <0 = off
+    logical  :: land_albedo_seasonal = .FALSE. ! monthly ERA5 fal (interpolated daily) instead of its mean
     real(wp) :: snow_dt          = 5.0_wp   ! snow-albedo ramp width below T0 [K]
 
     ! --- prognostic cloud fraction (feat/clouds) ----------------------------
@@ -450,8 +451,10 @@ program rce_long
     ts%land%land_albedo      = land_albedo
     ts%land%snow_albedo      = snow_albedo
     ts%land%snow_dt          = snow_dt
+    ts%land%albedo_seasonal  = land_albedo_seasonal
     call aeros_land_init(ts%land, grd, l_land)
     if (l_land) then
+        call aeros_land_set_albedo(ts%land, doy0)      ! seed the seasonal bare albedo
         call aeros_land_couple_radiation(ts%land, ts%rad%alb_map, ts%rad%albedo)
         write(*,"(a,a)") " rce_long:: land-sea mask from ", trim(lsm_file)
         write(*,"(a,i0,a,i0,a)") " rce_long:: land cells ", count(ts%land%mask), &
@@ -676,6 +679,9 @@ program rce_long
         ! the step consumes it in the surface fluxes and radiation.
         if (l_sst_seasonal .and. mod(n, max(1, nint(86400.0_wp/dt))) == 0) &
             call set_seasonal_sst(doy0 + real(n,wp)*dt/86400.0_wp)
+        ! Seasonal bare land albedo, same daily cadence (no-op unless enabled).
+        if (l_land .and. land_albedo_seasonal .and. mod(n, max(1, nint(86400.0_wp/dt))) == 0) &
+            call aeros_land_set_albedo(ts%land, doy0 + real(n,wp)*dt/86400.0_wp)
         ! Advance the topography ramp: a pure function of absolute elapsed time
         ! n*dt, so it is restart-safe -- a run resumed at n0 continues the ramp at
         ! the right amplitude. Only re-set phis while the factor is still changing
@@ -1232,6 +1238,8 @@ contains
         call nml_read(nmlfile, "rce", "c_soil", c_soil, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "land_albedo", land_albedo, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "land_albedo_seasonal", land_albedo_seasonal, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "snow_albedo", snow_albedo, &
                       defaults_file="input/rce_defaults.nml")

@@ -106,7 +106,7 @@ at a clean end (not on a NaN).
 1. ~~Make **L6** the default~~ — done 2026-09-06 (library + driver defaults, harness namelist
    `aeros_realearth_T21L6.nml`, climatology above).
 2. Deficit 1 (upper-troposphere moisture), then deficit 2 (polar precipitation).
-3. Re-do the land t2m calibration through the harness afterwards (the old numbers are void).
+3. ~~Re-do the land t2m calibration~~ — done 2026-09-07 (seasonal albedo, c_soil 5e6); the residual is the winter atmospheric cold bias.
 
 ---
 
@@ -338,6 +338,33 @@ one change at a time; "lid" = tropical (|lat|<15) top-layer T / q (ERA5 layer me
   hydrological cycle over-drives both. Next: the land calibration (already void), and the
   stationary wave (orographic + thermal forcing at T21).
 - The tropical lid is unchanged (225 K top-level mean; the mechanism entry above stands).
+
+**Update 2026-09-07: land recalibration (through the harness).** Findings, then what changed:
+- The harness metric compares the model's LOWEST LEVEL (~350 m at L6) with ERA5 2 m. Under the
+  winter inversion that hides half the bias: at 60–70N land the model's DJF lowest level is
+  241 K vs ERA5 2 m 249 K and ERA5 925 hPa 255 K. **The DJF cold is the whole lower troposphere**
+  (zonal mean at 64–69N: 700 hPa −7 K, 850 −10 K, 925 −13 K; JJA within 1 K), land and ocean
+  alike — an atmospheric (winter heat-transport / boundary) problem, not the land scheme.
+- **Seasonal land albedo** (`land_albedo_seasonal = .true.`, `aeros_land_set_albedo`): the 12
+  monthly ERA5 `fal` slices interpolated daily (mid-month centres, as the seasonal SST). The
+  annual-mean map is snow-contaminated (0.36 at 65N, vs 0.15 in July) and left JJA high-latitude
+  land 6 K cold; with the monthly field JJA matches ERA5 within 1–2 K in every NH band, and the
+  diagnostic snow bump (`snow_albedo`) is redundant (off in the harness). Bug fixed on the way:
+  the per-step albedo-map refresh in `aeros_timestep` was gated on the snow bump, so without it a
+  seasonal albedo would have stuck at its January value.
+- **`c_soil` IS a lever now** (the 2026-07 "not the lever" note was on stale sampling): 2e6 → 1e7
+  cuts the NH-land amplitude by ~5 K (DJF +2, JJA −3.5). Chosen **5e6** (physical: 2.5e6 J m⁻³ K⁻¹
+  over the ~2 m annual penetration depth), which keeps JJA right rather than buying winter with a
+  summer cold bias. Single-month land means over 60–90 grid points vary by ±2–3 K between 2-yr
+  runs; calibrate on DJF/JJA means.
+- Harness 3 yr (`docs/refs/realearth_metrics_2026-09-06_L6_land.md`): P 2.70, TOA +2.1, Z500* 80 m
+  (ERA5 76; was 93 with the annual-mean albedo), lowest-level |Jul−Jan| NH-land 38.6 K (the
+  single-month lowest-level metric; DJF/JJA band table in the ref file), 2720 SYPD.
+- **Next:** the winter high-latitude lower-troposphere cold bias (7–13 K) — candidates: winter
+  low cloud / LW down over cold land and sea ice (`cld_rhc_sfc`, mixed-phase RH), the polar ocean
+  freeze floor without sea ice, eddy heat transport at T21. A 2 m diagnostic from the surface layer
+  would make the harness metric honest.
+
 
 
 

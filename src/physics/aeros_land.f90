@@ -97,9 +97,19 @@ module aeros_land
         ! small soil heat capacity and are not a tuning knob.
         real(wp) :: t_soil_init = 288.0_wp          ! initial soil temperature [K]
 
+        ! Seasonal bare albedo: read the 12 monthly slices of the ERA5 fal file
+        ! (albedo_clim) and interpolate them to the running day (aeros_land_set_
+        ! albedo, called daily by the driver) instead of the time-mean map. The
+        ! annual-mean fal is snow-contaminated (0.36 at 65N), which leaves summer
+        ! high-latitude land 6 K too cold; the monthly field carries the real
+        ! snow season, so the diagnostic snow bump is then redundant. Off by
+        ! default (bit-for-bit: the static mean map).
+        logical :: albedo_seasonal = .FALSE.
+
         ! Static maps (rebuilt from file on init).
         logical,  allocatable :: mask(:,:)          ! .TRUE. on land
         real(wp), allocatable :: albedo(:,:)        ! land albedo (used on land)
+        real(wp), allocatable :: albedo_clim(:,:,:) ! (nlon,nlat,12) when albedo_seasonal
 
         ! Prognostic state (serialized in the restart).
         real(wp), allocatable :: w(:,:)             ! soil moisture [m]
@@ -120,6 +130,7 @@ module aeros_land
     public :: aeros_land_pre
     public :: aeros_land_step
     public :: aeros_land_couple_radiation
+    public :: aeros_land_set_albedo
     public :: aeros_land_report
     public :: aeros_land_is_land
 
@@ -146,6 +157,7 @@ contains
         logical,                intent(in)    :: enabled
 
         real(wp), allocatable :: tmp(:,:)
+        integer :: mm
         integer :: i, j
 
         call aeros_land_end(land)
@@ -181,8 +193,17 @@ contains
 
         ! --- land albedo: the ERA5 forecast albedo map, or a constant ---------
         if (len_trim(land%albedo_file) > 0) then
-            call aeros_bcinput_read_field(trim(land%albedo_file), "fal", &
-                                          grd%lon, grd%lat, land%albedo)
+            if (land%albedo_seasonal) then
+                allocate(land%albedo_clim(grd%nlon, grd%nlat, 12))
+                do mm = 1, 12
+                    call aeros_bcinput_read_field(trim(land%albedo_file), "fal", &
+                                                  grd%lon, grd%lat, land%albedo_clim(:,:,mm), itime=mm)
+                end do
+                land%albedo = sum(land%albedo_clim, dim=3)/12.0_wp   ! until the first set_albedo
+            else
+                call aeros_bcinput_read_field(trim(land%albedo_file), "fal", &
+                                              grd%lon, grd%lat, land%albedo)
+            end if
         else
             land%albedo = land%land_albedo
         end if
@@ -217,8 +238,10 @@ contains
         real(wp)           :: lsm_threshold, w_field_capacity, w_crit, c_soil
         real(wp)           :: land_albedo, c_h_land, c_e_land
         real(wp)           :: snow_albedo, snow_dt
+        logical            :: albedo_seasonal
 
         enabled          = land%enabled
+        albedo_seasonal  = land%albedo_seasonal
         lsm_file         = land%lsm_file
         albedo_file      = land%albedo_file
         lsm_threshold    = land%lsm_threshold
@@ -245,7 +268,9 @@ contains
         call nml_read(filename, "land", "freeze_floor",     freeze_floor, defaults_file=defaults_file)
         call nml_read(filename, "land", "snow_albedo",      snow_albedo, defaults_file=defaults_file)
         call nml_read(filename, "land", "snow_dt",          snow_dt, defaults_file=defaults_file)
+        call nml_read(filename, "land", "albedo_seasonal",  albedo_seasonal, defaults_file=defaults_file)
 
+        land%albedo_seasonal  = albedo_seasonal
         land%lsm_file         = lsm_file
         land%albedo_file      = albedo_file
         land%lsm_threshold    = lsm_threshold
@@ -269,6 +294,7 @@ contains
         type(aeros_land_class), intent(inout) :: land
         if (allocated(land%mask))   deallocate(land%mask)
         if (allocated(land%albedo)) deallocate(land%albedo)
+        if (allocated(land%albedo_clim)) deallocate(land%albedo_clim)
         if (allocated(land%w))      deallocate(land%w)
         if (allocated(land%t_soil)) deallocate(land%t_soil)
         if (allocated(land%skin))   deallocate(land%skin)
@@ -377,6 +403,26 @@ contains
 
         return
     end subroutine aeros_land_step
+
+    subroutine aeros_land_set_albedo(land, day)
+        ! Bare land albedo at day-of-year `day` from the monthly climatology:
+        ! mid-month centres, linear cyclic interpolation (the seasonal-SST rule).
+        ! No-op unless albedo_seasonal.
+        implicit none
+        type(aeros_land_class), intent(inout) :: land
+        real(wp),               intent(in)    :: day
+        real(wp), parameter :: DAYS_YR = 365.0_wp
+        real(wp) :: x, w
+        integer  :: im0, m0, m1
+        if (.not. (land%enabled .and. land%albedo_seasonal)) return
+        x   = modulo(day, DAYS_YR)/DAYS_YR*12.0_wp - 0.5_wp
+        im0 = floor(x)
+        w   = x - real(im0, wp)
+        m0  = modulo(im0,     12) + 1
+        m1  = modulo(im0 + 1, 12) + 1
+        land%albedo = (1.0_wp - w)*land%albedo_clim(:,:,m0) + w*land%albedo_clim(:,:,m1)
+        return
+    end subroutine aeros_land_set_albedo
 
     subroutine aeros_land_couple_radiation(land, alb_map, ocean_albedo)
         ! Build the per-point surface albedo map radiation reads: the ocean
