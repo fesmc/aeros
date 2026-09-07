@@ -243,6 +243,11 @@ program rce_long
     ! plus the monthly-mean 3D u,v,T,q from which the stationary part
     ! ([v*][T*] of the time-mean fields) is computed at dump time.
     real(wp), allocatable :: mon_vt(:,:,:), mon_vq(:,:,:), mon_eke(:,:,:)
+    ! Tracer mass-rescaling term r = dp_FV/dp_spec - 1 of the last transport
+    ! call: zonal mean, and its eddy covariances with T and q (the drying of the
+    ! warm sector by the FV/spectral mass gap, if that is what it does).
+    real(wp), allocatable :: mon_mr(:,:,:), mon_mrt(:,:,:), mon_mrq(:,:,:)
+    real(wp), allocatable :: mon_mr2(:,:,:)   ! 2D monthly-mean r at the lowest level
     real(wp), allocatable :: mon_u3(:,:,:,:), mon_v3(:,:,:,:), mon_t3(:,:,:,:), mon_q3(:,:,:,:)
     real(wp), allocatable :: mon_skin(:,:,:), mon_lwd(:,:,:), mon_olr(:,:,:), &
                              mon_olrcs(:,:,:), mon_cover(:,:,:)
@@ -674,6 +679,9 @@ program rce_long
                  mon_u3(grd%nlon,grd%nlat,nlev,NMON), mon_v3(grd%nlon,grd%nlat,nlev,NMON), &
                  mon_t3(grd%nlon,grd%nlat,nlev,NMON), mon_q3(grd%nlon,grd%nlat,nlev,NMON))
         mon_vt = 0.0_wp; mon_vq = 0.0_wp; mon_eke = 0.0_wp
+        allocate(mon_mr(grd%nlat,nlev,NMON), mon_mrt(grd%nlat,nlev,NMON), mon_mrq(grd%nlat,nlev,NMON))
+        mon_mr = 0.0_wp; mon_mrt = 0.0_wp; mon_mrq = 0.0_wp
+        allocate(mon_mr2(grd%nlon,grd%nlat,NMON)); mon_mr2 = 0.0_wp
         mon_u3 = 0.0_wp; mon_v3 = 0.0_wp; mon_t3 = 0.0_wp; mon_q3 = 0.0_wp
         nacc_mon = max(1, nint(86400.0_wp/dt))   ! ~1 sample/day
         if (.not. ts%rad%seasonal) write(*,"(a)") &
@@ -993,6 +1001,7 @@ contains
         real(wp) :: cfz(grd%nlat,nlev), cfc(nlev), clwc(nlev), ciwc(nlev)
         real(wp) :: qzm(grd%nlat,nlev), vtzm(grd%nlat,nlev), vqzm(grd%nlat,nlev)
         real(wp) :: u2zm(grd%nlat,nlev), v2zm(grd%nlat,nlev)
+        real(wp) :: mrzm(grd%nlat,nlev), mrtzm(grd%nlat,nlev), mrqzm(grd%nlat,nlev), mr
         logical  :: have_pr
 
         day  = ts%rad%doy0 + real(n,wp)*dt/86400.0_wp
@@ -1004,6 +1013,7 @@ contains
         tzm = 0.0_wp; uzm = 0.0_wp; vzm = 0.0_wp; rzm = 0.0_wp
         sstz = 0.0_wp; prz = 0.0_wp; cfz = 0.0_wp
         qzm = 0.0_wp; vtzm = 0.0_wp; vqzm = 0.0_wp; u2zm = 0.0_wp; v2zm = 0.0_wp
+        mrzm = 0.0_wp; mrtzm = 0.0_wp; mrqzm = 0.0_wp
         do jj = 1, grd%nlat
             do ii = 1, grd%nlon
                 call aeros_vgrid_pressure(vg, now%ps(ii,jj), phc, pfc, dpcc)
@@ -1027,6 +1037,10 @@ contains
                     vqzm(jj,kk) = vqzm(jj,kk) + now%v(ii,jj,kk)*now%qv_g(ii,jj,kk)
                     u2zm(jj,kk) = u2zm(jj,kk) + now%u(ii,jj,kk)**2
                     v2zm(jj,kk) = v2zm(jj,kk) + now%v(ii,jj,kk)**2
+                    mr = ts%mst%mass_ratio(ii,jj,kk) - 1.0_wp
+                    mrzm(jj,kk)  = mrzm(jj,kk)  + mr
+                    mrtzm(jj,kk) = mrtzm(jj,kk) + mr*now%temp_g(ii,jj,kk)
+                    mrqzm(jj,kk) = mrqzm(jj,kk) + mr*now%qv_g(ii,jj,kk)
                 end do
                 sstz(jj) = sstz(jj) + ts%ocn%sst(ii,jj)
                 if (have_pr) then
@@ -1069,6 +1083,10 @@ contains
         mon_vt(:,:,imon)  = mon_vt(:,:,imon)  + (vtzm - vzm*tzm/rnlon)/rnlon
         mon_vq(:,:,imon)  = mon_vq(:,:,imon)  + (vqzm - vzm*qzm/rnlon)/rnlon
         mon_eke(:,:,imon) = mon_eke(:,:,imon) + 0.5_wp*(u2zm + v2zm - (uzm**2 + vzm**2)/rnlon)/rnlon
+        mon_mr(:,:,imon)  = mon_mr(:,:,imon)  + mrzm/rnlon
+        mon_mrt(:,:,imon) = mon_mrt(:,:,imon) + (mrtzm - mrzm*tzm/rnlon)/rnlon
+        mon_mrq(:,:,imon) = mon_mrq(:,:,imon) + (mrqzm - mrzm*qzm/rnlon)/rnlon
+        mon_mr2(:,:,imon) = mon_mr2(:,:,imon) + ts%mst%mass_ratio(:,:,nlev) - 1.0_wp
         mon_u3(:,:,:,imon) = mon_u3(:,:,:,imon) + now%u(:,:,1:nlev)
         mon_v3(:,:,:,imon) = mon_v3(:,:,:,imon) + now%v(:,:,1:nlev)
         mon_t3(:,:,:,imon) = mon_t3(:,:,:,imon) + now%temp_g(:,:,1:nlev)
@@ -1107,6 +1125,7 @@ contains
                                  olrcs_o(:,:,:), cover_o(:,:,:)
         real(wp), allocatable :: vt_o(:,:,:), vq_o(:,:,:), eke_o(:,:,:), &
                                  vts_o(:,:,:), vqs_o(:,:,:), ekes_o(:,:,:)
+        real(wp), allocatable :: mr_o(:,:,:), mrt_o(:,:,:), mrq_o(:,:,:), mr2_o(:,:,:)
         real(wp) :: ub(grd%nlon), vb(grd%nlon), tb(grd%nlon), qb(grd%nlon), rn
         integer :: m, jj, kk
         allocate(latout(grd%nlat), lonout(grd%nlon), levout(nlev), monout(NMON))
@@ -1116,6 +1135,8 @@ contains
                  t2m_o(grd%nlon,grd%nlat,NMON), pr2d_o(grd%nlon,grd%nlat,NMON), &
                  z500_o(grd%nlon,grd%nlat,NMON), vlow_o(grd%nlon,grd%nlat,NMON), &
                  evap_o(grd%nlon,grd%nlat,NMON), shf_o(grd%nlon,grd%nlat,NMON))
+        allocate(mr_o(grd%nlat,nlev,NMON), mrt_o(grd%nlat,nlev,NMON), mrq_o(grd%nlat,nlev,NMON))
+        allocate(mr2_o(grd%nlon,grd%nlat,NMON))
         allocate(vt_o(grd%nlat,nlev,NMON), vq_o(grd%nlat,nlev,NMON), eke_o(grd%nlat,nlev,NMON), &
                  vts_o(grd%nlat,nlev,NMON), vqs_o(grd%nlat,nlev,NMON), ekes_o(grd%nlat,nlev,NMON))
         allocate(cf_o(grd%nlat,nlev,NMON), skin_o(grd%nlon,grd%nlat,NMON), &
@@ -1149,6 +1170,10 @@ contains
                 vt_o(:,:,m)  = mon_vt(:,:,m) /rn
                 vq_o(:,:,m)  = mon_vq(:,:,m) /rn*1000.0_wp
                 eke_o(:,:,m) = mon_eke(:,:,m)/rn
+                mr_o(:,:,m)  = mon_mr(:,:,m) /rn
+                mrt_o(:,:,m) = mon_mrt(:,:,m)/rn
+                mrq_o(:,:,m) = mon_mrq(:,:,m)/rn*1000.0_wp
+                mr2_o(:,:,m) = mon_mr2(:,:,m)/rn
                 ! stationary part from the monthly-mean fields: [v*T*] etc.
                 do kk = 1, nlev
                     do jj = 1, grd%nlat
@@ -1163,6 +1188,7 @@ contains
                 end do
             else
                 vt_o(:,:,m) = MISS; vq_o(:,:,m) = MISS; eke_o(:,:,m) = MISS
+                mr_o(:,:,m) = MISS; mrt_o(:,:,m) = MISS; mrq_o(:,:,m) = MISS; mr2_o(:,:,m) = MISS
                 vts_o(:,:,m) = MISS; vqs_o(:,:,m) = MISS; ekes_o(:,:,m) = MISS
                 vlow_o(:,:,m) = MISS; evap_o(:,:,m) = MISS; shf_o(:,:,m) = MISS
                 cf_o(:,:,m) = MISS; skin_o(:,:,m) = MISS; lwd_o(:,:,m) = MISS
@@ -1225,11 +1251,19 @@ contains
             units="g/kg m/s", long_name="monthly stationary eddy moisture flux [v*q*] of the monthly-mean fields")
         call nc_write(fname, "eke_stat", ekes_o, dim1="lat", dim2="lev", dim3="month", &
             units="m2/s2", long_name="monthly stationary eddy kinetic energy of the monthly-mean fields")
+        call nc_write(fname, "mr", mr_o, dim1="lat", dim2="lev", dim3="month", &
+            units="1", long_name="monthly zonal-mean tracer mass-rescaling term dp_FV/dp_spec - 1 (per step)")
+        call nc_write(fname, "mrt", mrt_o, dim1="lat", dim2="lev", dim3="month", &
+            units="K", long_name="monthly zonal-mean eddy covariance [r' T'] of the rescaling term with temperature")
+        call nc_write(fname, "mrq", mrq_o, dim1="lat", dim2="lev", dim3="month", &
+            units="g/kg", long_name="monthly zonal-mean eddy covariance [r' q'] of the rescaling term with humidity")
+        call nc_write(fname, "mr2d", mr2_o, dim1="lon", dim2="lat", dim3="month", &
+            units="1", long_name="monthly-mean tracer mass-rescaling term dp_FV/dp_spec - 1 at the lowest level")
         write(*,"(a,i0,a,a)") " rce_long:: wrote monthly climatology (", &
             count(mon_cnt>0), " months populated) -> ", trim(fname)
         deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o, &
                    pr2d_o, z500_o, vlow_o, evap_o, shf_o, cf_o, skin_o, lwd_o, olr_o, &
-                   olrcs_o, cover_o, vt_o, vq_o, eke_o, vts_o, vqs_o, ekes_o)
+                   olrcs_o, cover_o, vt_o, vq_o, eke_o, vts_o, vqs_o, ekes_o, mr_o, mrt_o, mrq_o, mr2_o)
     end subroutine dump_monthly
 
     subroutine read_config()
