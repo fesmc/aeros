@@ -4,10 +4,14 @@
 
 ### Where the model is
 
-All on `main` through **9e7b227**, 26/26 tests (`test_transport` now has a direction test). Same
-production configuration as below (real-Earth T21L6, dt 3600, ~2700 SYPD); the harness namelist
-`mwm/D_realearth/aeros_realearth_T21L6.nml` is unchanged, every knob that moved is a default in
-`input/rce_defaults.nml`. Climatology: `docs/refs/realearth_metrics_2026-09-07_L6.md`.
+All on `main`: 9e7b227 (morning), then **6b8b55a** (surface exchange: Monin-Obukhov unstable
+branch) and the cloud re-balance commit after it (evening; see "Update 2026-09-07 (evening)"
+below). 25/26 tests: `test_ecckd` fails 3 SW checks against SESAM since the near-IR re-anchoring
+(9e7b227) -- the test's SESAM reference, not the model; decide whether to loosen the 3 % or
+re-anchor SESAM's copy. Same production configuration (real-Earth T21L6, dt 3600, ~2700 SYPD);
+the harness namelist `mwm/D_realearth/aeros_realearth_T21L6.nml` is unchanged, every knob that
+moved is a default in `input/rce_defaults.nml`. Climatology:
+`docs/refs/realearth_metrics_2026-09-07_L6_surface.md` (morning state: `..._2026-09-07_L6.md`).
 
 ### What changed on 2026-09-07 (in order; the detailed chain is the two "Update 2026-09-07"
 entries under the land-calibration section below)
@@ -57,13 +61,30 @@ land 50 vs ERA5 101/41), SH 20.5, TOA −5.6 W/m², CRE −47/+7. A pinned `c_h 
 the same picture (sweep 1.0/1.5/2.0e-3; 1.5 overshoots, P 3.7). Next: re-balance the clouds toward
 LW CRE +22 (the deficit that was always there; TOA −5.6 now) — separate commit. What remains after
 the warming is the extratropical warm σ 0.365 (+7 at 30–45N) / cold 0.56–0.86 pair, a
-static-stability item that grows with the warming. `test_ecckd` fails 3 SW checks against SESAM
+static-stability item that grows with the warming.
+
+**Cloud re-balance (next commit).** `cld_rhc_top` 1.40 → **1.03** (threshold 0.96 in the lid, 0.84
+at 365 hPa: high cloud back below the lid, LW CRE +7 → +21), `cld_lwc` 0.035e-3 → **0.031e-3**
+(TOA). Sweep (10 runs, `mwm/D_realearth/diag/S*,P*`, `summary.sh`): `cld_iwc` hardly matters
+(0.010–0.020e-3: LW ±1); rhc_top 1.00 gives LW +26 / SW −60; lwc moves TOA by ~1 W/m² per
+0.001e-3. Net CRE cannot reach ERA5's −24 while the clear-sky OLR is 257 vs 264 (clear-sky net
++33 vs +25): the clouds must supply −33. Result (3 yr, `..._L6_surface.md`): TOA +0.1, CRE
+−55/+21, cover 0.57, P 3.11 (2.9), LH 90 (84; ocean 108/land 48 vs 101/41), SH 16.5, column
+water 25.3 (24.5). T bias annual: tropics +3.6/+1.2/−0.3/−0.8/+0.5 K at σ 0.36–0.96, 45–60N
++2.4/−2.2/−2.7/−2.0/−1.2, 60–75N −1.9/−1.7/−1.2/−0.7/−0.1; DJF 69N −2.3/−1.6/−1.4/−1.3/−0.7 (was
+−4.1/−8.0/−6.1/−5.1/−3.8 in the morning) — the winter-cap cold bias (deficit 2's T part) is
+largely gone with it. NH-land t2m amplitude 33.1 (ERA5 33.6, was 35.2); Z500* 101.6 (1-yr noise);
+jet 56.9 m/s. `test_ecckd` fails 3 SW checks against SESAM
 (surface down SW 359 vs 384) since the near-IR re-anchoring in 9e7b227 — the test's SESAM
 reference, not the model.
 
-### Known deficits, in the order to attack them
+### Known deficits, in the order to attack them (as of the evening; deficit 1 below is RESOLVED
+except for its 300 hPa part — see the evening update)
 
-1. **Cold lower troposphere / warm 300 hPa.** 700–850 hPa is 3–7 K cold at all latitudes and
+0. **Warm σ 0.365 / cold 0.56–0.86 outside the tropics** (annual +7.7 at 30–45N over −3.5/−4.2 at
+   30–45S; tropics +3.6 at 0.365): the 360–560 hPa layer is too stable (dT/dlnp 33–38 vs ERA5
+   45–51). Static-stability structure; grew with the warming. Next.
+1. **~~Cold lower troposphere~~ / warm 300 hPa.** (Cold part resolved 2026-09-07 evening.) 700–850 hPa is 3–7 K cold at all latitudes and
    seasons, 300 hPa 5–8 K warm outside the tropics (annual, `docs/refs/..._2026-09-07_L6.md`).
    Not vertical resolution (L8/L12 identical at dt 1800), not the boundary layer, and only 1 K
    of it was the SW gap. Column water 20.6 vs 24.5 mm with P and E right → moisture residence
