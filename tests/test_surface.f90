@@ -66,6 +66,7 @@ program test_surface
     call test_fluxes_up(nfail)
     call test_equilibrium(nfail)
     call test_no_negative_q(nfail)
+    call test_stability(nfail)
 
     call aeros_ocean_end(ocn)
     call aeros_vdiff_end(vd)
@@ -204,6 +205,31 @@ contains
         call check(minval(qv) >= 0.0_wp, "q never goes negative under a downward flux", nfail)
         call check(all(qv == qv) .and. minval(qv) < qmin0, "q decreased and stayed finite", nfail)
     end subroutine test_no_negative_q
+
+    ! === 4. The diagnosed coefficient follows the surface-layer stability ====
+    subroutine test_stability(nfail)
+        ! Unstable (warm skin under cooler air): Monin-Obukhov enhances the
+        ! coefficient above the neutral log-law value. Stable (cold skin):
+        ! Frierson's reduction keeps it below neutral and above the floor.
+        integer, intent(inout) :: nfail
+        real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev), z1, cneut, cd_un, cd_st
+
+        write(*,*) ""
+        write(*,*) " -- exchange coefficient vs the bulk Richardson number"
+
+        call aeros_vgrid_pressure(vg, exp(lnps(1,1)), phalf, pfull, dpc)
+        call column_state(5.0_wp, 0.7_wp)
+        z1    = real(R_d,wp)*t_g(1,1,nlev)/real(grav,wp)*log(exp(lnps(1,1))/pfull(nlev))
+        cneut = (0.4_wp/log(z1/surf%z0_ocean))**2
+        call aeros_surface_apply(surf, vg, ocn%sst, t_g, qv, lnps, u, v)
+        cd_un = surf%cdrag(1,1)
+        call column_state(-30.0_wp, 0.9_wp)
+        call aeros_surface_apply(surf, vg, ocn%sst, t_g, qv, lnps, u, v)
+        cd_st = surf%cdrag(1,1)
+        write(*,"(a,3es12.3)") "   C_D neutral / unstable / stable ", cneut, cd_un, cd_st
+        call check(cd_un > 1.2_wp*cneut, "unstable: C_D above the neutral log-law value", nfail)
+        call check(cd_st < cneut .and. cd_st >= surf%cd_min, "stable: C_D reduced, above the floor", nfail)
+    end subroutine test_stability
 
     subroutine check(ok, label, nfail)
         logical, intent(in) :: ok

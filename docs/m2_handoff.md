@@ -36,6 +36,31 @@ entries under the land-calibration section below)
    clear-sky columns vs 76.5 (surface down SW +14); SW_A1 0.28 / SW_B2 0.033 → 78. Coupled
    atmospheric solar absorption 55 → 68 W/m² (ERA5 79).
 
+### Update 2026-09-07 (evening): deficit 1 traced to the surface exchange coefficient
+
+Same-pressure comparison on the sigma levels (`mwm/D_realearth/diag/tbias_vs_era5.py`, also reads
+the `l_diag` zonal dump): the structure is identical at L6/L8/L12 and worse in SpeedyWeather (−5 to
+−18 K). The tropical lowest level is 2.4 K cold / 1.4 g/kg dry at the right LH (131 vs 132) with
+winds NOT weak (5.5 vs 5.5 m/s at σ 0.96; `wind_vs_era5.py`). The SBM deep closure shifts the whole
+reference, sub-cloud layer included, and extracts ~2 K/day from the lowest layer; the surface has to
+pay that through a large SST–air contrast because the bulk coefficient was the neutral log law at
+the lowest-level height (~360 m at L6: 7e-4 over ocean, stable-only Richardson reduction — faithful
+to SpeedyWeather). The cold, dry parcel anchors a cold moist adiabat; eddies export it.
+
+Fix (this commit): the bulk Richardson number now uses the actual skin→level-1 virtual static-energy
+jump, and Ri < 0 goes to Monin-Obukhov with Businger-Dyer ψ functions (C_D with ψ_m, C_H = C_E with
+ψ_m ψ_h; `bulk_coefficients` in `aeros_surface.f90`, `test_surface` check 4). Over the warm tropical
+ocean it gives ~1.1e-3. Same clouds, 3 yr: tropics bias σ 0.36/0.56/0.73/0.86/0.96 = +3.6/+1.1/−0.3/
+−0.8/+0.4 K (was −1.7/−2.7/−3.6/−4.0/−2.4), 45–60N −4.4/−4.4/−3.4/−2.4 (was −6.3/−6.3/−5.2/−4.0),
+column water 24.5 mm (ERA5 24.5), clear-sky OLR 257 (was 252; ERA5 264), P 3.28, LH 95 (ocean 114 /
+land 50 vs ERA5 101/41), SH 20.5, TOA −5.6 W/m², CRE −47/+7. A pinned `c_h = c_e = 1.0e-3` gives
+the same picture (sweep 1.0/1.5/2.0e-3; 1.5 overshoots, P 3.7). Next: re-balance the clouds toward
+LW CRE +22 (the deficit that was always there; TOA −5.6 now) — separate commit. What remains after
+the warming is the extratropical warm σ 0.365 (+7 at 30–45N) / cold 0.56–0.86 pair, a
+static-stability item that grows with the warming. `test_ecckd` fails 3 SW checks against SESAM
+(surface down SW 359 vs 384) since the near-IR re-anchoring in 9e7b227 — the test's SESAM
+reference, not the model.
+
 ### Known deficits, in the order to attack them
 
 1. **Cold lower troposphere / warm 300 hPa.** 700–850 hPa is 3–7 K cold at all latitudes and

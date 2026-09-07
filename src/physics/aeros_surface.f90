@@ -54,12 +54,29 @@ module aeros_surface
         integer :: nlon = 0, nlat = 0
 
         ! Bulk-flux parameters.
-        ! Exchange coefficients. <= 0 (the default) = the bulk-Richardson
-        ! log-law coefficient diagnosed per point (below, SpeedyWeather's
-        ! BulkRichardsonDrag / Frierson 2006): C = kappa^2 / ln^2(z_1/z_0) *
-        ! (1 - Ri/Ri_c)^2, one coefficient for heat, moisture and momentum. A
-        ! positive value pins a fixed coefficient instead (intercomparison,
-        ! tests). z_1 is the lowest-level height, z_0 the roughness length.
+        ! Exchange coefficients. <= 0 (the default) = the surface-layer log-law
+        ! coefficient diagnosed per point from the bulk Richardson number of the
+        ! lowest layer, Ri = g z_1 (s_v1 - s_v0) / (cp T_v0 |V_0|^2) with the
+        ! virtual dry static energies of the level-1 air and of the skin:
+        !   Ri >= 0 (stable):   C = kappa^2/ln^2(z_1/z_0) (1 - Ri/Ri_c)^2
+        !                       (Frierson 2006 eqs 12-15 / SpeedyWeather's
+        !                       BulkRichardsonDrag, one coefficient for all)
+        !   Ri <  0 (unstable): Monin-Obukhov with the Businger-Dyer functions,
+        !                       C_D = kappa^2/(ln(z_1/z_0) - psi_m)^2,
+        !                       C_H = C_E = kappa^2/((ln - psi_m)(ln - psi_h)),
+        !                       zeta = z_1/L solved from Ri by fixed-point
+        !                       iteration.
+        ! SpeedyWeather (and Frierson) evaluate Ri with the skin air taken as
+        ! the level-1 air brought down dry-adiabatically (Ri = (g z_1)^2/(cp T_v
+        ! |V|^2) > 0 always) and use the neutral value for unstable columns.
+        ! With the lowest level at ~360 m (L6) the neutral ocean value is 7e-4;
+        ! over the warm tropical ocean (skin 2-3 K unstable in static energy)
+        ! the neutral coefficient forced a cold, dry boundary layer (2.4 K /
+        ! 1.4 g/kg vs ERA5 at the same pressure) and, through the SBM's
+        ! reference adiabat, a 3-4 K cold tropical troposphere (2026-09-07);
+        ! the unstable branch gives ~1.1e-3 there. A positive c_h/c_e/c_d pins a
+        ! fixed coefficient instead (intercomparison, tests). z_1 is the
+        ! lowest-level height, z_0 the roughness length.
         real(wp) :: c_h   = -1.0_wp        ! sensible-heat exchange coefficient
         real(wp) :: c_e   = -1.0_wp        ! moisture exchange coefficient
         real(wp) :: z0_ocean = 1.0e-4_wp   ! roughness length over sea [m]
@@ -232,7 +249,7 @@ contains
         logical,  intent(in), optional :: is_land(:,:)  ! (nlon,nlat) roughness selector
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: ps, t1, q1, wind, rho1, qs_s, dqs, beta
-        real(wp) :: z1, z0, cbulk, ri, ch, ce
+        real(wp) :: z1, z0, cdb, chb, ri, ch, ce, tv1, tvs
         logical  :: have_beta, have_land
         integer  :: i, j, ks
         if (.not. surf%enabled) return
@@ -240,7 +257,7 @@ contains
         have_land = present(is_land)
         ks = vg%nlev                              ! lowest (surface) layer
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,beta,z1,z0,cbulk,ri,ch,ce)
+        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,beta,z1,z0,cdb,chb,ri,ch,ce,tv1,tvs)
         do j = 1, surf%nlat
             do i = 1, surf%nlon
                 ps = exp(lnps_g(i,j))
@@ -250,30 +267,29 @@ contains
                 ! lowest-layer air density (virtual temperature) and the surface wind
                 rho1 = pfull(ks)/(R_d*t1*(1.0_wp + RV_OVER_RD_M1*q1))
                 wind = aeros_surface_wind(surf, u(i,j,ks), v(i,j,ks))
-                ! Bulk transfer coefficient (class header): the neutral log-law
-                ! value for the lowest-level height z_1 (hypsometric, from the
-                ! layer's own T) over the roughness z_0, reduced by the bulk
-                ! Richardson number of that layer -- SpeedyWeather's form of
-                ! Frierson (2006) eqs 12-15, where the surface air is the level-1
-                ! air brought down dry-adiabatically, so the static-energy jump
-                ! over the layer is g z_1 and Ri = (g z_1)^2 / (cp T_v |V_0|^2).
+                beta = 1.0_wp
+                if (have_beta) beta = evap_eff(i,j)
+                call aeros_qsat(sst(i,j), ps, qs_s, dqs)
+                ! Bulk transfer coefficients (class header) for the lowest-level
+                ! height z_1 (hypsometric, from the layer's own T) over the
+                ! roughness z_0, from the bulk Richardson number of the layer.
+                ! The skin humidity for the virtual static energy is beta-
+                ! weighted between saturation and the air value (a drying soil).
                 z1 = real(R_d,wp)*t1/real(grav,wp)*log(ps/pfull(ks))
                 z0 = surf%z0_ocean
                 if (have_land) then
                     if (is_land(i,j)) z0 = surf%z0_land
                 end if
                 z1 = max(z1, z0)
-                cbulk = (VON_KARMAN/log(z1/z0))**2
-                ri = (real(grav,wp)*z1)**2/(real(cp_d,wp)*t1*(1.0_wp + RV_OVER_RD_M1*q1)*wind*wind)
-                ri = min(max(ri, 0.0_wp), surf%ri_crit)
-                cbulk = max(surf%cd_min, cbulk*(1.0_wp - ri/surf%ri_crit)**2)
-                ch = surf%c_h; if (ch <= 0.0_wp) ch = cbulk
-                ce = surf%c_e; if (ce <= 0.0_wp) ce = cbulk
+                tv1 = t1*(1.0_wp + RV_OVER_RD_M1*q1)
+                tvs = sst(i,j)*(1.0_wp + RV_OVER_RD_M1*(beta*qs_s + (1.0_wp - beta)*q1))
+                ri = real(grav,wp)*z1*(real(cp_d,wp)*(tv1 - tvs) + real(grav,wp)*z1) &
+                     /(real(cp_d,wp)*tvs*wind*wind)
+                call bulk_coefficients(z1, z0, ri, surf%ri_crit, surf%cd_min, cdb, chb)
+                ch = surf%c_h; if (ch <= 0.0_wp) ch = chb
+                ce = surf%c_e; if (ce <= 0.0_wp) ce = chb
                 surf%cdrag(i,j) = surf%c_d
-                if (surf%c_d < 0.0_wp) surf%cdrag(i,j) = cbulk
-                beta = 1.0_wp
-                if (have_beta) beta = evap_eff(i,j)
-                call aeros_qsat(sst(i,j), ps, qs_s, dqs)
+                if (surf%c_d < 0.0_wp) surf%cdrag(i,j) = cdb
                 surf%ch_v(i,j)    = rho1*ch*wind
                 surf%ce_v(i,j)    = beta*rho1*ce*wind
                 surf%skin(i,j)    = sst(i,j)
@@ -283,6 +299,46 @@ contains
         !$omp end parallel do
         return
     end subroutine aeros_surface_apply
+
+    pure subroutine bulk_coefficients(z1, z0, ri, ri_crit, cd_min, cd, ch)
+        ! Surface-layer transfer coefficients for momentum (cd) and for heat and
+        ! moisture (ch) at height z1 over roughness z0 from the bulk Richardson
+        ! number ri of the layer (class header). Stable: Frierson (2006)'s
+        ! reduction of the neutral log-law value, cut off at ri_crit. Unstable:
+        ! Monin-Obukhov similarity with the Businger-Dyer (Paulson 1970)
+        ! integrated stability functions, zeta = z1/L from
+        !   ri = zeta (ln(z1/z0) - psi_h(zeta)) / (ln(z1/z0) - psi_m(zeta))^2
+        ! by fixed-point iteration (a contraction for the unstable branch; four
+        ! sweeps converge to < 1 % in zeta). The same z0 serves momentum and
+        ! scalars. cd_min floors both.
+        implicit none
+        real(wp), intent(in)  :: z1, z0, ri, ri_crit, cd_min
+        real(wp), intent(out) :: cd, ch
+        real(wp) :: lnz, cneut, zeta, x, psim, psih
+        integer  :: it
+        lnz   = log(z1/z0)
+        cneut = (VON_KARMAN/lnz)**2
+        if (ri >= 0.0_wp) then
+            cd = max(cd_min, cneut*(1.0_wp - min(ri, ri_crit)/ri_crit)**2)
+            ch = cd
+        else
+            zeta = ri*lnz
+            do it = 1, 4
+                x    = (1.0_wp - 16.0_wp*zeta)**0.25_wp
+                psim = 2.0_wp*log(0.5_wp*(1.0_wp + x)) + log(0.5_wp*(1.0_wp + x*x)) &
+                       - 2.0_wp*atan(x) + 0.5_wp*pi
+                psih = 2.0_wp*log(0.5_wp*(1.0_wp + x*x))
+                zeta = max(ri*(lnz - psim)**2/(lnz - psih), -1.0e3_wp)
+            end do
+            x    = (1.0_wp - 16.0_wp*zeta)**0.25_wp
+            psim = 2.0_wp*log(0.5_wp*(1.0_wp + x)) + log(0.5_wp*(1.0_wp + x*x)) &
+                   - 2.0_wp*atan(x) + 0.5_wp*pi
+            psih = 2.0_wp*log(0.5_wp*(1.0_wp + x*x))
+            cd = max(cd_min, VON_KARMAN**2/(lnz - psim)**2)
+            ch = max(cd_min, VON_KARMAN**2/((lnz - psim)*(lnz - psih)))
+        end if
+        return
+    end subroutine bulk_coefficients
 
     pure real(wp) function aeros_surface_wind(surf, u1, v1) result(wind)
         ! The surface wind speed the bulk fluxes (and the momentum drag in

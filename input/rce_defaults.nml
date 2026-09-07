@@ -153,9 +153,11 @@
     ! SurfaceCondition): sqrt((wind_slowdown*|V_low|)^2 + gust_speed^2).
     gust_speed       = 5.0
     wind_slowdown    = 0.95
-    ! Bulk exchange coefficients: <= 0 = SpeedyWeather's bulk-Richardson log-law
-    ! kappa^2/ln^2(z1/z0)*(1-Ri/Ri_c)^2 diagnosed per point (one coefficient for
-    ! heat, moisture and momentum); > 0 pins a fixed value. c_d = 0 = no drag.
+    ! Bulk exchange coefficients: <= 0 = the surface-layer log law diagnosed per
+    ! point from the bulk Richardson number of the lowest layer (virtual static
+    ! energy jump skin -> level 1): stable, Frierson's kappa^2/ln^2(z1/z0)*
+    ! (1-Ri/Ri_c)^2; unstable, Monin-Obukhov with Businger-Dyer psi functions
+    ! (C_H = C_E, C_D separate). > 0 pins a fixed value. c_d = 0 = no drag.
     c_h              = -1.0
     c_e              = -1.0
     c_d              = -1.0
