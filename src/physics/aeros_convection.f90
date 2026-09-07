@@ -141,6 +141,12 @@ module aeros_convection
         ! humidity the moist adiabat is dried toward. Frierson (2007) values.
         real(wp) :: tau    = 14400.0_wp  ! [s] 4 h (SpeedyWeather BettsMiller time_scale)
         real(wp) :: rh_ref = 0.7_wp      ! [-]
+        ! Sub-cloud reference humidity (sbm_frierson): below the cloud base the
+        ! reference is a mixed layer -- dry adiabat in T, rh_ref_bl*q_sat in q
+        ! (Betts 1986's sub-cloud structure) -- rather than the moist adiabat
+        ! dried to rh_ref. Keeps the boundary layer near its observed humidity
+        ! (tropical ocean 85 %) while the cloud layer is dried to rh_ref.
+        real(wp) :: rh_ref_bl = 0.85_wp  ! [-]
 
         ! Dry convective adjustment, run BEFORE the moist scheme. A moist scheme
         ! (SBM here) will not touch a hot, dry, super-adiabatic layer: once the
@@ -186,6 +192,7 @@ contains
         cnv%scheme  = SCHEME_SBM_FRIERSON
         cnv%tau     = 14400.0_wp
         cnv%rh_ref  = 0.7_wp
+        cnv%rh_ref_bl = 0.85_wp
         cnv%nlon    = grd%nlon
         cnv%nlat    = grd%nlat
 
@@ -312,7 +319,7 @@ contains
                     call dry_adjust_column(tcol, pfull, dpc, nlev, cnv%tau, dt)
 
                 call adjust_column(cnv%scheme, tcol, qcol, pfull, dpc, nlev, &
-                                        cnv%tau, cnv%rh_ref, dt)
+                                        cnv%tau, cnv%rh_ref, cnv%rh_ref_bl, dt)
 
                 ! Temperature change as a forward increment [K]; humidity set to
                 ! the adjusted profile; precip is the column water removed.
@@ -331,7 +338,7 @@ contains
 
     end subroutine aeros_convection_apply
 
-    subroutine adjust_column(scheme, t, q, pfull, dp, nlev, tau, rh_ref, dt)
+    subroutine adjust_column(scheme, t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt)
         ! Dispatch to the convective scheme. tau/rh_ref/dt are the Simplified
         ! Betts-Miller parameters and are ignored by Manabe.
 
@@ -341,13 +348,13 @@ contains
         real(wp), intent(inout) :: t(:), q(:)
         real(wp), intent(in)    :: pfull(:), dp(:)
         integer,  intent(in)    :: nlev
-        real(wp), intent(in)    :: tau, rh_ref, dt
+        real(wp), intent(in)    :: tau, rh_ref, rh_ref_bl, dt
 
         select case (scheme)
         case (SCHEME_SBM)
             call sbm_adjust(t, q, pfull, dp, nlev, tau, rh_ref, dt)
         case (SCHEME_SBM_FRIERSON)
-            call sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, dt)
+            call sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt)
         case (SCHEME_MANABE)
             call manabe_adjust(t, q, pfull, dp, nlev)
         case default
@@ -502,7 +509,7 @@ contains
 
     end subroutine sbm_adjust
 
-    subroutine sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, dt)
+    subroutine sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt)
         ! Simplified Betts-Miller with the Frierson (2007) / SpeedyWeather trigger
         ! and convecting depth -- the variant that stays active at RCE. It differs
         ! from sbm_adjust (above) in exactly two places; the reference profiles,
@@ -543,12 +550,12 @@ contains
         real(wp), intent(inout) :: t(:), q(:)
         real(wp), intent(in)    :: pfull(:), dp(:)
         integer,  intent(in)    :: nlev
-        real(wp), intent(in)    :: tau, rh_ref, dt
+        real(wp), intent(in)    :: tau, rh_ref, rh_ref_bl, dt
 
         real(wp) :: phi(nlev), tref(nlev), qref(nlev)
         real(wp) :: hb, hstar, qs, dqs, cp, a, lvk(nlev), lpq
-        real(wp) :: sumdp, sumqref, pq, pt, shift, ct, fq
-        integer  :: k, ktop
+        real(wp) :: sumdp, sumqref, pq, pt, shift, ct, fq, tdry
+        integer  :: k, ktop, kbase
 
         cp = real(cp_d, wp)
         do k = 1, nlev
@@ -579,12 +586,37 @@ contains
         end do
         if (ktop == nlev) return    ! surface parcel not buoyant -> no convection
 
-        ! Reference profiles over the layer: the moist adiabat carrying h_b, dried
-        ! to rh_ref of its own saturation.
+        ! Cloud base: the first level, scanning up from the surface, at which the
+        ! dry-adiabatically lifted parcel is saturated. The whole layer
+        ! [ktop, nlev] is adjusted (the sub-cloud moisture excess IS the
+        ! cloud-base moisture supply and its latent heat, through the enthalpy
+        ! closure below), but with Betts (1986)'s sub-cloud reference: below the
+        ! base a mixed layer -- dry adiabat in T (at the lowest level T itself)
+        ! and rh_ref_bl*q_sat in q -- instead of the moist adiabat dried to
+        ! rh_ref. (Until 2026-09-07 the lowest level was relaxed to rh_ref*q_sat
+        ! and toward its saturation-equivalent T like the cloud layer, which held
+        ! the tropical boundary layer at 76-79 % RH and 1.7 K cold against
+        ! ERA5's 85-88 %, and made the reference adiabat ~4 K too cold aloft.)
+        kbase = nlev
+        do k = nlev, ktop, -1
+            tdry = t(nlev)*(pfull(k)/pfull(nlev))**real(kappa, wp)
+            call aeros_qsat(tdry, pfull(k), qs, dqs)
+            kbase = k
+            if (q(nlev) >= qs) exit
+        end do
+
+        ! Reference profiles: the moist adiabat carrying h_b, dried to rh_ref of
+        ! its own saturation, over the cloud layer; the mixed layer below it.
         do k = ktop, nlev
-            tref(k) = moist_adiabat_temp(hb - phi(k), pfull(k), t(k))
-            call aeros_qsat(tref(k), pfull(k), qs, dqs)
-            qref(k) = rh_ref*qs
+            if (k <= kbase) then
+                tref(k) = moist_adiabat_temp(hb - phi(k), pfull(k), t(k))
+                call aeros_qsat(tref(k), pfull(k), qs, dqs)
+                qref(k) = rh_ref*qs
+            else
+                tref(k) = t(nlev)*(pfull(k)/pfull(nlev))**real(kappa, wp)
+                call aeros_qsat(tref(k), pfull(k), qs, dqs)
+                qref(k) = rh_ref_bl*qs
+            end if
         end do
 
         ! Column integrals over the layer (lpq: the latent heat of the water).

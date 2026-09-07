@@ -40,7 +40,8 @@
     ! surface-to-LZB depth + integrated Pt/Pq trigger (stays active at RCE, dries
     ! the free troposphere); "manabe" = the reference pairwise scheme.
     conv_scheme      = "sbm_frierson"
-    conv_rh_ref      = 0.7
+    conv_rh_ref      = 0.6
+    conv_rh_ref_bl   = 0.85
     ! Boundary-layer vertical diffusion. richardson = .true. diagnoses the mixed-
     ! layer depth from the bulk Richardson number (Frierson 2006 / SpeedyWeather);
     ! .false. uses the legacy fixed vdiff_sigma depth. Both diffuse dry static
