@@ -25,8 +25,9 @@ entries under the land-calibration section below)
    amplitude 38.6 → 32 K, jet 56 → 50 m/s. **Every moisture, cloud and land calibration and every
    moisture-related conclusion older than this commit was made against a reversed transport.**
 3. **Recalibration** (aa002e2): `vert_vanleer` default, `cld_rhc_top` 1.40, `cld_lwc` 0.035e-3
-   → TOA balanced with CRE ≈ −44/+8 (ERA5 −46/+22). Sweep runner: the runs live in
-   `mwm/D_realearth/cal/` (namelists + logs; outputs `output/cal_*.nc`).
+   → TOA balanced with CRE ≈ −44/+8 (ERA5 −46/+22). The 15 sweep runs were deleted after the
+   session (results in the entries below); the pattern is a copy of the harness namelist with
+   `&rce` overrides and its own `monthly_out`, ~95 s per 3-yr run.
 4. **Betts sub-cloud reference in the Frierson SBM** (55c3ccf): below the cloud base the reference
    is a dry adiabat with `conv_rh_ref_bl` (0.85) × q_sat; cloud layer `conv_rh_ref` (0.6). Puts the
    tropical boundary layer at ERA5's 85–88 % RH. Excluding the sub-cloud layer instead (Betts-Miller
@@ -61,7 +62,7 @@ entries under the land-calibration section below)
 - `validate_era5.x /Users/alrobi001/data/era5 output/x.nc ecckd` — ERA5 clear-sky column
   validation, 0.6 s; the SW/LW parameters are compile-time in `aeros_ecckd.f90` (edit, `make all`,
   `make validate-era5`).
-- `mwm/D_realearth/cal/` — calibration runs; the driver's `&rce` keys `cond_rh_crit`,
+- Calibration sweeps: the driver's `&rce` keys `cond_rh_crit`,
   `conv_rh_ref`, `conv_rh_ref_bl`, `cld_*`, `vert_vanleer` are all namelist-overridable.
 - SW harness `sw_realearth.jl` writes `vt`,`vq`,`eke`,`*_stat` (needs ~6 min); the compare script
   asserts both models on the T21 grid (no T31).
@@ -466,7 +467,7 @@ meridional wind (d2f96fc).** Chain of evidence, in the order it was found:
   condensation and land calibrations: all pre-fix moisture/cloud numbers in this file are void,
   and the "subtropical RH 94 %", "saturated lid" and "water-creating transport" histories should
   be re-read with this in mind.
-- **Recalibration** (`mwm/D_realearth/cal/`, 15 runs; `docs/refs/realearth_metrics_2026-09-07_L6_vfix.md`):
+- **Recalibration** (15 sweep runs, since deleted; `docs/refs/realearth_metrics_2026-09-07_L6_vfix.md`):
   `cond_rh_crit` and the new `conv_rh_ref` key move the clear-sky OLR by < 3 W/m²; it is 250 vs
   ERA5 264 in every latitude band because the troposphere is 3–6 K cold at 500–850 hPa
   (prescribed SST, lowest level within 1–2 K). Balance therefore needs CRE ≈ −46/+10: defaults
