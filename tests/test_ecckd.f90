@@ -14,9 +14,13 @@ program test_ecckd
     !      and doubling CO2 raises the greenhouse (OLR drops) by ~3-4 W/m2.
     !   4. SW REDUCES TO SESAM. The ecCKD SW is SESAM's validated clear-sky SW
     !      with ozone upgraded from a constant band transmission to a correlated-k;
-    !      the reused Rayleigh + near-IR H2O structure must keep the two within the
-    !      small (a few percent) intended ozone difference -- a regression guard on
-    !      the reuse. Asserted to 3% relative on TOA-up, surface-down, surface-net.
+    !      the reused Rayleigh + near-IR H2O structure must keep the two close --
+    !      a regression guard on the reuse. Since the near-IR H2O band was
+    !      re-anchored on ERA5 clear-sky columns (2026-09-07, SW_A1 0.28 /
+    !      SW_B2 0.033 in aeros_ecckd only; SESAM's copy keeps the TOA-anchored
+    !      pair) the intended difference is ~7% at the surface (359 vs 384 W/m2
+    !      down), so the guard is 10% relative on TOA-up, surface-down,
+    !      surface-net.
     !
     ! This drives the SCHEME_ECCKD kernels explicitly; the SESAM default path is
     ! unchanged (its own tests cover it).
@@ -183,7 +187,7 @@ contains
         real(wp) :: he(nlev), hs(nlev), cz, swdn
         real(wp) :: eup, edw, enet, sup, sdw, snet
         write(*,*) ""
-        write(*,*) " -- ecCKD SW agrees with SESAM SW (ozone is the only deviation)"
+        write(*,*) " -- ecCKD SW agrees with SESAM SW (ozone + the re-anchored near-IR band)"
         call aeros_insolation_daily(30.0_wp*real(pi,wp)/180.0_wp, 172.0_wp, real(S0,wp), cz, swdn)
         call aeros_ecckd_sw_clearsky_column(nlev, q, o3, .TRUE., dp_lev, swdn, cz, &
                                             0.06_wp, 0.06_wp, he, eup, edw, enet)
@@ -191,9 +195,9 @@ contains
                                       0.06_wp, 0.06_wp, hs, sup, sdw, snet)
         write(*,"(a,3f9.3)") "   ecCKD up/dw/net               ", eup, edw, enet
         write(*,"(a,3f9.3)") "   SESAM up/dw/net               ", sup, sdw, snet
-        call check(abs(eup-sup)/max(1.0_wp,sup)   < 0.03_wp, "TOA up SW within 3% of SESAM", nfail)
-        call check(abs(edw-sdw)/max(1.0_wp,sdw)   < 0.03_wp, "surface down SW within 3% of SESAM", nfail)
-        call check(abs(enet-snet)/max(1.0_wp,snet) < 0.03_wp, "surface net SW within 3% of SESAM", nfail)
+        call check(abs(eup-sup)/max(1.0_wp,sup)   < 0.10_wp, "TOA up SW within 10% of SESAM", nfail)
+        call check(abs(edw-sdw)/max(1.0_wp,sdw)   < 0.10_wp, "surface down SW within 10% of SESAM", nfail)
+        call check(abs(enet-snet)/max(1.0_wp,snet) < 0.10_wp, "surface net SW within 10% of SESAM", nfail)
     end subroutine test_sw_reduces_to_sesam
 
     ! === 5. All-sky (grey cloud folded into the g-points) =====================
