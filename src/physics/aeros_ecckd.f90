@@ -65,9 +65,16 @@ module aeros_ecckd
     ! SESAM's validated two-band SW (§14, TOA net SW bias only ~-5 W/m2) as an
     ! explicit g-point sum and upgrades ozone from a constant band transmission to
     ! a real correlated-k absorber:
-    !   - near-IR H2O band: SESAM's tuned 2-exponential reused VERBATIM as its two
-    !     g-points (weights SW_A1/A2, exponents SW_B1/B2) -- don't re-derive what
-    !     works. No atmospheric scattering (near-IR Rayleigh negligible).
+    !   - near-IR H2O band: SESAM's 2-exponential as its two g-points (weights
+    !     SW_A1/A2, exponents SW_B1/B2). Re-anchored 2026-09-07: SESAM's values
+    !     (0.21/0.79, 6.27/0.0267) reproduced the TOA net but absorbed only 63
+    !     W/m2 in the ERA5 clear-sky column against ERA5's 76.5, the 14 W/m2
+    !     landing on the surface instead; in the coupled model that was a 24 W/m2
+    !     deficit in atmospheric solar heating and a 3-8 K cold free troposphere.
+    !     0.28/0.72, 6.27/0.033 gives 78 W/m2 (bands within 5 of ERA5: the
+    !     residual tilt, tropics +5 / poles -4, is not water vapour), surface
+    !     down SW 241.5 (242.3), TOA net -2.5. No atmospheric scattering
+    !     (near-IR Rayleigh negligible).
     !   - visible+UV band: SESAM's Rayleigh single-reflection scattering reused
     !     as-is, but the constant ozone transmission SW_C_ITF_O is replaced by a
     !     3-g-point ozone k-distribution (strong Hartley/Huggins UV, weak Chappuis,
@@ -170,8 +177,8 @@ module aeros_ecckd
     real(wp), parameter :: SW_FRAC_VU = 0.45_wp        ! visible+UV fraction of TSI
     real(wp), parameter :: SW_RSCAT   = 0.17_wp        ! Rayleigh visible reflectance
     real(wp), parameter :: SW_COSZ_O  = 1.0_wp/1.66_wp ! diffuse-beam cosine
-    real(wp), parameter :: SW_A1_W = 0.21_wp, SW_A2_W = 0.79_wp   ! near-IR H2O weights
-    real(wp), parameter :: SW_B1_W = 6.27_wp, SW_B2_W = 0.0267_wp ! near-IR H2O exponents
+    real(wp), parameter :: SW_A1_W = 0.28_wp, SW_A2_W = 0.72_wp   ! near-IR H2O weights
+    real(wp), parameter :: SW_B1_W = 6.27_wp, SW_B2_W = 0.033_wp ! near-IR H2O exponents
 
     ! Visible ozone k-distribution (3 g-points): the a-priori SHAPE is the ozone
     ! SW cross-section spread (strong Hartley/Huggins UV, weak Chappuis, transparent

@@ -399,6 +399,20 @@ meridional wind (d2f96fc).** Chain of evidence, in the order it was found:
   amplitude 34.8 (33.6). Cost: with thin high cloud the free-troposphere cold bias is 4–10 K at
   500–850 hPa at all latitudes and seasons (69N DJF −8/−4 K at σ 0.56/0.96) and the winter cap
   is still overcast (RH 82–101 % at 64N, cover 0.82, OLR 160 vs 177).
+- **Cold free troposphere, traced (2026-09-07, later):** not vertical resolution (L8/L12 at dt 1800:
+  same −3..−8 K at 500–700 hPa), not the boundary layer (Betts sub-cloud reference `conv_rh_ref_bl`
+  0.85 puts the tropical BL at ERA5's 85–88 % RH but leaves the column 1 K colder; kept, with
+  `conv_rh_ref` 0.6). The atmospheric energy budget (new `swn`, `swup` monthly outputs) showed the
+  atmosphere absorbing 55 W/m² of solar against ERA5's 79 (surface 190 vs 163), so the troposphere
+  cools 19 W/m² less by LW — by being cold. The clear-sky column validation had this all along
+  (63 vs 76.5, surface down SW +14): SESAM's near-IR H2O 2-exponential was anchored on the TOA
+  net only. Re-anchored on ERA5 columns (SW_A1 0.28, SW_B2 0.033 in aeros_ecckd; SESAM's copy in
+  aeros_radiation untouched): clear-sky atm absorption 78, surface down 241.5, TOA net −2.5,
+  bands within 5 (residual tilt tropics +5 / poles −4 is ozone/airmass, not water). Coupled:
+  atm SW 68 (ERA5 79; the model's column water 20.6 vs 24.5 mm accounts for most of the rest),
+  500 hPa bias −3.7 → −2.8 K (tropics) / −4.6 → −3.7 (47N), TOA +2.2 with the same clouds.
+  700–850 hPa is still 3–7 K cold with 300 hPa 5–8 K warm outside the tropics: a lapse-rate /
+  subsidence structure, next on the list with the column water.
 - **Next:** the cold free troposphere is now the model's first-order bias and the reason the
   clear-sky OLR is low. Hypothesis: the tropical boundary layer is too dry (lowest-level RH 80 %
   vs ERA5 87 %, LH 87 W/m² — the "evaporation 30 % low" item) so the SBM reference moist adiabat

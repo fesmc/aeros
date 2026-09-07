@@ -250,6 +250,7 @@ program rce_long
     ! warm sector by the FV/spectral mass gap, if that is what it does).
     real(wp), allocatable :: mon_mr(:,:,:), mon_mrt(:,:,:), mon_mrq(:,:,:)
     real(wp), allocatable :: mon_mr2(:,:,:)   ! 2D monthly-mean r at the lowest level
+    real(wp), allocatable :: mon_swn(:,:,:), mon_swup(:,:,:)   ! surface net SW, TOA reflected SW
     real(wp), allocatable :: mon_u3(:,:,:,:), mon_v3(:,:,:,:), mon_t3(:,:,:,:), mon_q3(:,:,:,:)
     real(wp), allocatable :: mon_skin(:,:,:), mon_lwd(:,:,:), mon_olr(:,:,:), &
                              mon_olrcs(:,:,:), mon_cover(:,:,:)
@@ -686,6 +687,7 @@ program rce_long
         allocate(mon_mr(grd%nlat,nlev,NMON), mon_mrt(grd%nlat,nlev,NMON), mon_mrq(grd%nlat,nlev,NMON))
         mon_mr = 0.0_wp; mon_mrt = 0.0_wp; mon_mrq = 0.0_wp
         allocate(mon_mr2(grd%nlon,grd%nlat,NMON)); mon_mr2 = 0.0_wp
+        allocate(mon_swn(grd%nlon,grd%nlat,NMON), mon_swup(grd%nlon,grd%nlat,NMON)); mon_swn = 0.0_wp; mon_swup = 0.0_wp
         mon_u3 = 0.0_wp; mon_v3 = 0.0_wp; mon_t3 = 0.0_wp; mon_q3 = 0.0_wp
         nacc_mon = max(1, nint(86400.0_wp/dt))   ! ~1 sample/day
         if (.not. ts%rad%seasonal) write(*,"(a)") &
@@ -1105,6 +1107,8 @@ contains
             mon_olr(:,:,imon)   = mon_olr(:,:,imon)   + ts%rad%olr
             mon_olrcs(:,:,imon) = mon_olrcs(:,:,imon) + ts%rad%olr_cs
             mon_cover(:,:,imon) = mon_cover(:,:,imon) + ts%rad%cover
+            mon_swn(:,:,imon)   = mon_swn(:,:,imon)   + ts%rad%sw_net_sur
+            mon_swup(:,:,imon)  = mon_swup(:,:,imon)  + ts%rad%sw_up_toa
         end if
         mon_t2m(:,:,imon) = mon_t2m(:,:,imon) + now%temp_g(:,:,nlev)  ! full 2D near-surface T
         mon_vlow(:,:,imon) = mon_vlow(:,:,imon) + sqrt(now%u(:,:,nlev)**2 + now%v(:,:,nlev)**2)
@@ -1130,6 +1134,7 @@ contains
         real(wp), allocatable :: vt_o(:,:,:), vq_o(:,:,:), eke_o(:,:,:), &
                                  vts_o(:,:,:), vqs_o(:,:,:), ekes_o(:,:,:)
         real(wp), allocatable :: mr_o(:,:,:), mrt_o(:,:,:), mrq_o(:,:,:), mr2_o(:,:,:)
+        real(wp), allocatable :: swn_o(:,:,:), swup_o(:,:,:)
         real(wp) :: ub(grd%nlon), vb(grd%nlon), tb(grd%nlon), qb(grd%nlon), rn
         integer :: m, jj, kk
         allocate(latout(grd%nlat), lonout(grd%nlon), levout(nlev), monout(NMON))
@@ -1141,6 +1146,7 @@ contains
                  evap_o(grd%nlon,grd%nlat,NMON), shf_o(grd%nlon,grd%nlat,NMON))
         allocate(mr_o(grd%nlat,nlev,NMON), mrt_o(grd%nlat,nlev,NMON), mrq_o(grd%nlat,nlev,NMON))
         allocate(mr2_o(grd%nlon,grd%nlat,NMON))
+        allocate(swn_o(grd%nlon,grd%nlat,NMON), swup_o(grd%nlon,grd%nlat,NMON))
         allocate(vt_o(grd%nlat,nlev,NMON), vq_o(grd%nlat,nlev,NMON), eke_o(grd%nlat,nlev,NMON), &
                  vts_o(grd%nlat,nlev,NMON), vqs_o(grd%nlat,nlev,NMON), ekes_o(grd%nlat,nlev,NMON))
         allocate(cf_o(grd%nlat,nlev,NMON), skin_o(grd%nlon,grd%nlat,NMON), &
@@ -1178,6 +1184,7 @@ contains
                 mrt_o(:,:,m) = mon_mrt(:,:,m)/rn
                 mrq_o(:,:,m) = mon_mrq(:,:,m)/rn*1000.0_wp
                 mr2_o(:,:,m) = mon_mr2(:,:,m)/rn
+                swn_o(:,:,m) = mon_swn(:,:,m)/rn; swup_o(:,:,m) = mon_swup(:,:,m)/rn
                 ! stationary part from the monthly-mean fields: [v*T*] etc.
                 do kk = 1, nlev
                     do jj = 1, grd%nlat
@@ -1193,6 +1200,7 @@ contains
             else
                 vt_o(:,:,m) = MISS; vq_o(:,:,m) = MISS; eke_o(:,:,m) = MISS
                 mr_o(:,:,m) = MISS; mrt_o(:,:,m) = MISS; mrq_o(:,:,m) = MISS; mr2_o(:,:,m) = MISS
+                swn_o(:,:,m) = MISS; swup_o(:,:,m) = MISS
                 vts_o(:,:,m) = MISS; vqs_o(:,:,m) = MISS; ekes_o(:,:,m) = MISS
                 vlow_o(:,:,m) = MISS; evap_o(:,:,m) = MISS; shf_o(:,:,m) = MISS
                 cf_o(:,:,m) = MISS; skin_o(:,:,m) = MISS; lwd_o(:,:,m) = MISS
@@ -1263,11 +1271,15 @@ contains
             units="g/kg", long_name="monthly zonal-mean eddy covariance [r' q'] of the rescaling term with humidity")
         call nc_write(fname, "mr2d", mr2_o, dim1="lon", dim2="lat", dim3="month", &
             units="1", long_name="monthly-mean tracer mass-rescaling term dp_FV/dp_spec - 1 at the lowest level")
+        call nc_write(fname, "swn", swn_o, dim1="lon", dim2="lat", dim3="month", &
+            units="W/m2", long_name="monthly surface net absorbed shortwave")
+        call nc_write(fname, "swup", swup_o, dim1="lon", dim2="lat", dim3="month", &
+            units="W/m2", long_name="monthly reflected shortwave at TOA")
         write(*,"(a,i0,a,a)") " rce_long:: wrote monthly climatology (", &
             count(mon_cnt>0), " months populated) -> ", trim(fname)
         deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o, &
                    pr2d_o, z500_o, vlow_o, evap_o, shf_o, cf_o, skin_o, lwd_o, olr_o, &
-                   olrcs_o, cover_o, vt_o, vq_o, eke_o, vts_o, vqs_o, ekes_o, mr_o, mrt_o, mrq_o, mr2_o)
+                   olrcs_o, cover_o, vt_o, vq_o, eke_o, vts_o, vqs_o, ekes_o, mr_o, mrt_o, mrq_o, mr2_o, swn_o, swup_o)
     end subroutine dump_monthly
 
     subroutine read_config()
