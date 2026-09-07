@@ -73,6 +73,7 @@ program test_transport
     ! tested.
     call set_lnps(grd, lnps)
 
+    call test_direction(nfail)
     call test_constancy(nfail)
     call test_conservation(nfail)
     call test_positivity(nfail)
@@ -181,6 +182,42 @@ contains
     end subroutine blob
 
     ! === 1. Constancy ========================================================
+
+    subroutine test_direction(nfail)
+        ! A tracer band moves WITH the wind: east under u > 0, north under
+        ! v > 0 (the grid v is northward, aeros_vordiv). The invariant tests
+        ! below are all blind to direction, so this is the only check that
+        ! catches a sign error in a sweep.
+        implicit none
+        integer, intent(inout) :: nfail
+        integer  :: i, j, jb, ib, n
+        real(wp) :: qn, qs, qe, qw
+        write(*,*) ""
+        write(*,*) " -- direction: a band under a uniform wind, 10 steps of 1 h"
+        lnps = log(real(p0,wp))
+        ! northward v = 5 m/s, band at the row nearest 30N
+        jb = minloc(abs(grd%lat - 30.0_wp), 1)
+        q = 0.0_wp; q(:,jb,:) = 1.0_wp
+        u = 0.0_wp; v = 5.0_wp
+        do n = 1, 10
+            call aeros_transport_transport(mst, vg, u, v, lnps, q, 3600.0_wp)
+        end do
+        qn = sum(q(:,jb-1,:)); qs = sum(q(:,jb+1,:))
+        write(*,"(a40,2es12.3)") "   tracer north / south of band   ", qn, qs
+        call check(qn > 1.0e-3_wp .and. qs < 1.0e-12_wp, "v > 0 moves tracer north", nfail)
+        ! eastward u = 5 m/s, band at the column nearest 180E
+        ib = minloc(abs(grd%lon - 180.0_wp), 1)
+        q = 0.0_wp; q(ib,:,:) = 1.0_wp
+        u = 5.0_wp; v = 0.0_wp
+        do n = 1, 10
+            call aeros_transport_transport(mst, vg, u, v, lnps, q, 3600.0_wp)
+        end do
+        qe = sum(q(ib+1,:,:)); qw = sum(q(ib-1,:,:))
+        write(*,"(a40,2es12.3)") "   tracer east / west of band     ", qe, qw
+        call check(qe > 1.0e-3_wp .and. qw < 1.0e-12_wp, "u > 0 moves tracer east", nfail)
+        call set_lnps(grd, lnps)
+        return
+    end subroutine test_direction
 
     subroutine test_constancy(nfail)
         implicit none

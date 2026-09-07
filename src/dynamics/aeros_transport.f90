@@ -145,6 +145,11 @@ module aeros_transport
         real(wp) :: last_cfl   = 0.0_wp        ! max total Courant last call
         integer  :: last_nsub  = 0             ! sub-steps taken last call
         real(dp) :: mass_consistency = 0.0_dp  ! |FV - spectral| ps tendency gap
+        ! Per-point FV/spectral layer-mass ratio of the last call, dp_FV/dp_spec
+        ! (nlon,nlat,nlev): the factor by which the mass-consistent division
+        ! rescales q relative to the FV-advanced q. Retained for diagnostics
+        ! (rce_long's monthly eddy covariance with T). Allocated with the scratch.
+        real(wp), allocatable :: mass_ratio(:,:,:)
     end type aeros_transport_class
 
     ! Courant target per sub-step. Below 1 for the donor-cell max principle;
@@ -205,6 +210,8 @@ contains
         allocate(mst%dp_lev(grd%nlon,grd%nlat,nlev))
         allocate(mst%qm    (grd%nlon,grd%nlat,nlev))
         allocate(mst%dp0   (grd%nlon,grd%nlat,nlev))
+        allocate(mst%mass_ratio(grd%nlon,grd%nlat,nlev))
+        mst%mass_ratio = 1.0_wp
 
         return
 
@@ -222,6 +229,7 @@ contains
         if (allocated(mst%dp_lev))   deallocate(mst%dp_lev)
         if (allocated(mst%qm))       deallocate(mst%qm)
         if (allocated(mst%dp0))      deallocate(mst%dp0)
+        if (allocated(mst%mass_ratio)) deallocate(mst%mass_ratio)
 
         mst%nlon = 0; mst%nlat = 0; mst%nlev = 0
         mst%last_cfl = 0.0_wp; mst%last_nsub = 0; mst%mass_consistency = 0.0_dp
@@ -298,6 +306,7 @@ contains
                         gap  = gap  + abs(real(mst%dp_lev(i,j,k) - dpc(k), dp))
                         wsum = wsum + real(dpc(k), dp)
                         q(i,j,k) = mst%qm(i,j,k)/dpc(k)
+                        mst%mass_ratio(i,j,k) = mst%dp_lev(i,j,k)/dpc(k)
                     end do
                 end do
             end do
@@ -503,8 +512,14 @@ contains
                 ! Interior faces j+1/2 (between rows j and j+1), j = 1..nlat-1.
                 fair(0) = 0.0_wp; fq(0) = 0.0_wp         ! north pole face
                 fair(nlat) = 0.0_wp; fq(nlat) = 0.0_wp   ! south pole face
+                ! Rows run north to south, so the along-row (+j) velocity at
+                ! the face is MINUS the northward wind: vf > 0 is a southward
+                ! flow whose donor is the northern cell j. (Until 2026-09-07 the
+                ! sign was missing and the sweep moved tracer AGAINST the
+                ! meridional wind, undetected because every invariant test is
+                ! direction-blind; test_direction now pins it.)
                 do j = 1, nlat - 1
-                    vf   = 0.5_wp*(v(i,j,k) + v(i,j+1,k))
+                    vf   = -0.5_wp*(v(i,j,k) + v(i,j+1,k))
                     ! dy for the Courant number: the mu-band width scaled to a
                     ! latitude distance at the interface, a dmu / cos(lat_face).
                     dy   = r_earth*mst%dmu(j)/max(mst%cos_face(j), 1.0e-6_wp)
