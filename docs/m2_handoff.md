@@ -1,6 +1,82 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION (written 2026-09-06): state, performance, recipe, and what to do
+## ►► NEXT SESSION (written 2026-09-07): state, what changed, and what to do
+
+### Where the model is
+
+All on `main` through **9e7b227**, 26/26 tests (`test_transport` now has a direction test). Same
+production configuration as below (real-Earth T21L6, dt 3600, ~2700 SYPD); the harness namelist
+`mwm/D_realearth/aeros_realearth_T21L6.nml` is unchanged, every knob that moved is a default in
+`input/rce_defaults.nml`. Climatology: `docs/refs/realearth_metrics_2026-09-07_L6.md`.
+
+### What changed on 2026-09-07 (in order; the detailed chain is the two "Update 2026-09-07"
+entries under the land-calibration section below)
+
+1. **Diagnostics** (e272fbb, 3b25ed2, 54b8f7d, 9e7b227): `monthly_out` now carries `skin` (true
+   skin T; the old `sst` field is the land-filled ocean array), `lwd`, `olr`, `olr_cs`, `cover`,
+   `swn`, `swup`, per-level `cf`, the eddy fluxes `vt`, `vq`, `eke` and their stationary parts
+   `*_stat`, and the tracer mass-rescaling term `mr`/`mr2d`/`mrt`/`mrq`. The SW harness script
+   writes the same eddy fields. With these the atmospheric energy budget and the poleward energy
+   transport (budget residual AND direct eddy fluxes, which agree) can be closed against ERA5.
+2. **The humidity transport advected AGAINST the meridional wind** (d2f96fc): `sweep_merid`
+   had the sign of v wrong (rows run north→south; the grid v is northward). Effects of the fix
+   at the old calibration: winter polar cold bias −12 → −1.4 K at the lowest level, eddy latent
+   transport 0 → 0.9 PW at 58N, the FV/spectral mass mismatch 2.5 → 0.35 %/step, NH-land seasonal
+   amplitude 38.6 → 32 K, jet 56 → 50 m/s. **Every moisture, cloud and land calibration and every
+   moisture-related conclusion older than this commit was made against a reversed transport.**
+3. **Recalibration** (aa002e2): `vert_vanleer` default, `cld_rhc_top` 1.40, `cld_lwc` 0.035e-3
+   → TOA balanced with CRE ≈ −44/+8 (ERA5 −46/+22). Sweep runner: the runs live in
+   `mwm/D_realearth/cal/` (namelists + logs; outputs `output/cal_*.nc`).
+4. **Betts sub-cloud reference in the Frierson SBM** (55c3ccf): below the cloud base the reference
+   is a dry adiabat with `conv_rh_ref_bl` (0.85) × q_sat; cloud layer `conv_rh_ref` (0.6). Puts the
+   tropical boundary layer at ERA5's 85–88 % RH. Excluding the sub-cloud layer instead (Betts-Miller
+   misread) collapses convection — don't.
+5. **Near-IR SW re-anchored** (9e7b227): the ecCKD near-IR H2O band absorbed 63 W/m² on ERA5
+   clear-sky columns vs 76.5 (surface down SW +14); SW_A1 0.28 / SW_B2 0.033 → 78. Coupled
+   atmospheric solar absorption 55 → 68 W/m² (ERA5 79).
+
+### Known deficits, in the order to attack them
+
+1. **Cold lower troposphere / warm 300 hPa.** 700–850 hPa is 3–7 K cold at all latitudes and
+   seasons, 300 hPa 5–8 K warm outside the tropics (annual, `docs/refs/..._2026-09-07_L6.md`).
+   Not vertical resolution (L8/L12 identical at dt 1800), not the boundary layer, and only 1 K
+   of it was the SW gap. Column water 20.6 vs 24.5 mm with P and E right → moisture residence
+   / vertical distribution; RH at 500 hPa 62–76 % vs 47–60. Look at the subsidence warming
+   distribution (SBM enthalpy shift, vertical advection of T) and the lid layer.
+2. **Winter cap** (DJF >60N): transport into the cap 1.45 PW vs ERA5 2.19 with the current
+   clouds (it was 2.18 at the pre-sub-cloud calibration), column RH 81–102 % at all levels,
+   cover 0.84, OLR 161 vs 177, 69N bias −4 to −8 K. The cap needs a drying process for
+   near-saturated cold columns (ice-phase precipitation efficiency) and mixed-phase cloud optics
+   (below 250 K everything is ice at cirrus IWC → radiatively thin).
+3. **Consistent FV mass flux** (option 3 of the transport discussion): build the face air fluxes
+   from the spectral divergence so the rescaling r vanishes; r is 0.4 %/step now, 1.4 % at the
+   polar row — a real but second-order term since the sign fix.
+4. Lid: σ 0.13 is −20 K at 60N and warm in the subtropical summer; stratosphere without ozone
+   heating structure (SW ozone k-distribution exists, `l_o3`).
+5. Z500* DJF RMS varies 78–106 m between same-physics 1-yr samples: use ≥ 3 sampled years before
+   reading it.
+
+### Tools that exist now
+
+- `validate_era5.x /Users/alrobi001/data/era5 output/x.nc ecckd` — ERA5 clear-sky column
+  validation, 0.6 s; the SW/LW parameters are compile-time in `aeros_ecckd.f90` (edit, `make all`,
+  `make validate-era5`).
+- `mwm/D_realearth/cal/` — calibration runs; the driver's `&rce` keys `cond_rh_crit`,
+  `conv_rh_ref`, `conv_rh_ref_bl`, `cld_*`, `vert_vanleer` are all namelist-overridable.
+- SW harness `sw_realearth.jl` writes `vt`,`vq`,`eke`,`*_stat` (needs ~6 min); the compare script
+  asserts both models on the T21 grid (no T31).
+- Untracked experiment namelists in `mwm/D_realearth/` (tau12, T31, vanleer, rhc1): disposable.
+
+### First actions next session
+
+1. Deficit 1: diagnose the lapse-rate structure (per-process heating tables with `l_diag`,
+   zonal ω·T), then the column-water residence.
+2. Deficit 2: winter-cap microphysics/optics (a bounded change), then re-balance clouds.
+3. Deficit 3 when the transport is next touched.
+
+---
+
+## Log 2026-09-06 — previous hand-off (superseded above where they disagree)
 
 ### Where the model is
 
