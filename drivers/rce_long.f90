@@ -77,6 +77,7 @@ program rce_long
     real(wp) :: z0_ocean = 1.0e-4_wp, z0_land = 0.5_wp                ! roughness lengths [m]
     real(wp) :: gust_speed = 5.0_wp, wind_slowdown = 0.95_wp   ! surface wind for the fluxes (SW)
     character(len=32) :: conv_scheme = "sbm_frierson" ! "sbm" | "sbm_frierson" | "manabe"
+    real(wp) :: conv_rh_ref = 0.7_wp        ! SBM reference RH the moist adiabat is dried toward
     real(wp) :: c_d = -1.0_wp         ! surface momentum drag (0 = off; <= 0 log-law; brakes the low-level jet)
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
     logical  :: l_rad = .TRUE., l_sponge = .FALSE., l_vdiff = .FALSE.
@@ -339,6 +340,7 @@ program rce_long
     ts%cnd%time_scale = cond_time_scale
     ts%cnv%enabled = l_cnv
     ts%cnv%tau = conv_tau
+    ts%cnv%rh_ref = conv_rh_ref
     ts%cnv%dry_adjust = l_dry_adjust
     select case (trim(conv_scheme))
     case ("sbm");          ts%cnv%scheme = SCHEME_SBM
@@ -1290,6 +1292,7 @@ contains
         call nml_read(nmlfile, "rce", "raw_alpha", raw_alpha, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "conv_tau", conv_tau)
+        call nml_read(nmlfile, "rce", "conv_rh_ref", conv_rh_ref, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "c_h", c_h, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "c_e", c_e, &

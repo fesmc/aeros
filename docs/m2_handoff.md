@@ -365,6 +365,47 @@ one change at a time; "lid" = tropical (|lat|<15) top-layer T / q (ERA5 layer me
   freeze floor without sea ice, eddy heat transport at T21. A 2 m diagnostic from the surface layer
   would make the harness metric honest.
 
+**Update 2026-09-07: the winter cold bias was the humidity transport advecting AGAINST the
+meridional wind (d2f96fc).** Chain of evidence, in the order it was found:
+- New monthly diagnostics (`skin`, `lwd`, `olr`, `olr_cs`, `cover`, per-level `cf`; e272fbb) showed
+  the winter cap atmosphere loses LESS heat locally than ERA5 yet is colder: the implied northward
+  energy transport was half of ERA5 at every latitude 30–75N (cap >60N: 52 vs 99 W/m² convergence,
+  latent 13 vs 32). Not the surface (prescribed SST = ERA5 skt incl. sea ice; the old `sst` output
+  was the land-filled ocean field, not the skin), not radiation. Unchanged at L8, L12 (dt 1800 —
+  both NaN at the top at dt 3600 with the current physics), T31, tau_diff 12 h, `vert_vanleer`,
+  `cond_rh_crit` 1.0.
+- Eddy-flux diagnostics (`vt`, `vq`, `eke` + `*_stat`, in rce_long and the SW harness; 3b25ed2):
+  aeros' transient eddies carried heat poleward (16 K m/s at 850 hPa, twice SW) but MOISTURE
+  EQUATORWARD at 500–850 hPa; SW's [v'q'] is positive at every level.
+- The tracer mass-rescaling term dp_FV/dp_spec − 1 (54b8f7d) had a persistent pattern of 1.6–1.9 %
+  per step in mid-latitudes and 13 % at the polar row: the FV meridional mass flux ran opposite
+  to the spectral one. Root cause: `sweep_merid` used vf = +½(v_j + v_j+1) with rows north→south,
+  i.e. the along-row velocity of a NORTHWARD grid v (aeros_vordiv: v = −V_θ) has the wrong sign.
+  A tracer band under v = +5 m/s moved south. Every transport test was direction-blind;
+  `test_direction` now pins north and east.
+- After the fix (same calibration): r rms 2.5 → 0.35 %/step, eddy latent transport 0 → 0.9 PW at
+  58N, 69N DJF lowest-level bias −12.3 → −1.4 K, NH-land amplitude 38.6 → 32.0 K, jet 56 → 50 m/s;
+  but the free troposphere is moist everywhere (60–90 % RH at 360–730 hPa vs ERA5 30–65 %) and
+  the planet was +11 W/m² (OLR 216). The reversed transport had been compensated by the cloud,
+  condensation and land calibrations: all pre-fix moisture/cloud numbers in this file are void,
+  and the "subtropical RH 94 %", "saturated lid" and "water-creating transport" histories should
+  be re-read with this in mind.
+- **Recalibration** (`mwm/D_realearth/cal/`, 15 runs; `docs/refs/realearth_metrics_2026-09-07_L6_vfix.md`):
+  `cond_rh_crit` and the new `conv_rh_ref` key move the clear-sky OLR by < 3 W/m²; it is 250 vs
+  ERA5 264 in every latitude band because the troposphere is 3–6 K cold at 500–850 hPa
+  (prescribed SST, lowest level within 1–2 K). Balance therefore needs CRE ≈ −46/+10: defaults
+  now `vert_vanleer = .true.`, `cld_rhc_top = 1.40` (little lid cloud), `cld_lwc = 0.035e-3`
+  → TOA +1.6, absorbed 241, OLR 240, P 3.0, cap transport 2.18 PW (ERA5 2.19), Z500* 82,
+  amplitude 34.8 (33.6). Cost: with thin high cloud the free-troposphere cold bias is 4–10 K at
+  500–850 hPa at all latitudes and seasons (69N DJF −8/−4 K at σ 0.56/0.96) and the winter cap
+  is still overcast (RH 82–101 % at 64N, cover 0.82, OLR 160 vs 177).
+- **Next:** the cold free troposphere is now the model's first-order bias and the reason the
+  clear-sky OLR is low. Hypothesis: the tropical boundary layer is too dry (lowest-level RH 80 %
+  vs ERA5 87 %, LH 87 W/m² — the "evaporation 30 % low" item) so the SBM reference moist adiabat
+  is ~3 K too cold aloft; then the winter-cap moisture/cloud (a drying process for near-saturated
+  cold columns), then the consistent FV mass flux (option 3: build the face air fluxes from the
+  spectral divergence, r as the metric; r is 0.35 %/step now, 1.2 % at the polar row).
+
 
 
 

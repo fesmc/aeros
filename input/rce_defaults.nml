@@ -25,7 +25,7 @@
     sponge_sigma     = 0.12
     ! Van Leer (2nd-order monotone) vertical humidity transport instead of the
     ! default first-order upwind donor cell. Off by default (bit-for-bit).
-    vert_vanleer     = .false.
+    vert_vanleer     = .true.
     ! Diagnostic prescribed heating (dry-core heating->omega isolation). Off by
     ! default; when on, set all physics off. amp in K/day.
     l_qforce         = .false.
@@ -40,6 +40,7 @@
     ! surface-to-LZB depth + integrated Pt/Pq trigger (stays active at RCE, dries
     ! the free troposphere); "manabe" = the reference pairwise scheme.
     conv_scheme      = "sbm_frierson"
+    conv_rh_ref      = 0.7
     ! Boundary-layer vertical diffusion. richardson = .true. diagnoses the mixed-
     ! layer depth from the bulk Richardson number (Frierson 2006 / SpeedyWeather);
     ! .false. uses the legacy fixed vdiff_sigma depth. Both diffuse dry static
@@ -96,8 +97,8 @@
     ! (0.52/0.35, 0.017/0.018) are the offline ERA5-column calibration
     ! (docs/m2_results.md section 19) and stay for validate_era5.
     cld_rhc_sfc      = 0.52
-    cld_rhc_top      = 1.07
-    cld_lwc          = 0.020e-3
+    cld_rhc_top      = 1.40
+    cld_lwc          = 0.035e-3
     cld_iwc          = 0.014e-3
     l_cloud_prog     = .false.
     cloud_rhc_sfc    = 0.40
