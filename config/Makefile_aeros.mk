@@ -108,6 +108,7 @@ $(objdir)/aeros_timestep.o: $(dyndir)/aeros_timestep.f90 \
 							$(objdir)/aeros_semiimp.o $(objdir)/aeros_held_suarez.o \
 							$(objdir)/aeros_correction.o $(objdir)/aeros_transport.o \
 							$(objdir)/aeros_held_suarez.o $(objdir)/aeros_condensation.o \
+							$(objdir)/aeros_bd.o \
 							$(objdir)/aeros_convection.o $(objdir)/aeros_surface.o \
 							$(objdir)/aeros_radiation.o $(objdir)/aeros_cloud_prog.o \
 							$(objdir)/aeros_vdiff.o $(objdir)/aeros_ocean.o \
@@ -132,6 +133,11 @@ $(objdir)/aeros_held_suarez.o: $(physdir)/aeros_held_suarez.f90 \
 # coordinate for the layer pressures and nothing spectral -- applied at the
 # grid seam like the Held-Suarez forcing.
 $(objdir)/aeros_condensation.o: $(physdir)/aeros_condensation.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
+# Prescribed Brewer-Dobson residual circulation in the lid layer.
+$(objdir)/aeros_bd.o: $(physdir)/aeros_bd.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
@@ -270,6 +276,7 @@ aeros_dynamics = $(objdir)/aeros_vertical.o \
 
 aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_condensation.o \
+                 $(objdir)/aeros_bd.o \
                  $(objdir)/aeros_convection.o \
                  $(objdir)/aeros_cloud.o \
                  $(objdir)/aeros_cloud_prog.o \

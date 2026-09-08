@@ -189,6 +189,11 @@ condensation : aeros-static
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
 		@echo "    test_condensation.x is ready."
 
+bd : aeros-static
+		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_bd.x $(testdir)/test_bd.f90 \
+			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
+		@echo "    test_bd.x is ready."
+
 convection : aeros-static
 		$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -o $(bindir)/test_convection.x $(testdir)/test_convection.f90 \
 			-L${CURDIR}/$(objdir) -laeros $(LFLAGS)
@@ -260,7 +265,7 @@ adaptive-diff : aeros-static
 		@echo "    test_adaptive_diff.x is ready."
 
 # All acceptance tests
-tests : defs grid spectral vertical vordiv tendency semiimp timestep correction transport condensation convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography land cloud-prog seaice adaptive-diff ncycle
+tests : defs grid spectral vertical vordiv tendency semiimp timestep correction transport condensation bd convection moist-run radiation surface ocean rce held-suarez-test ecckd restart topography land cloud-prog seaice adaptive-diff ncycle
 
 # Driver executables
 drivers : run bench held-suarez

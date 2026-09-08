@@ -267,6 +267,7 @@ module aeros_timestep
     use aeros_transport, only : aeros_transport_class, aeros_transport_init, &
                                 aeros_transport_end, aeros_transport_transport, &
                                 aeros_transport_report
+    use aeros_bd,           only : aeros_bd_class, aeros_bd_apply, aeros_bd_init, aeros_bd_end
     use aeros_condensation, only : aeros_cond_class, aeros_condensation_init, &
                                 aeros_condensation_load, aeros_condensation_end, &
                                 aeros_condensation_apply, aeros_condensation_report
@@ -383,6 +384,10 @@ module aeros_timestep
         ! Moist convective adjustment (aeros_convection), at the grid seam and
         ! BEFORE condensation. Off unless a namelist turns it on.
         type(aeros_conv_class) :: cnv
+
+        ! Prescribed Brewer-Dobson residual circulation in the lid (aeros_bd),
+        ! at the grid seam after condensation. Off unless a file is given.
+        type(aeros_bd_class) :: bd
 
         ! Surface energy/moisture budget (aeros_surface): prescribed-SST bulk
         ! turbulent fluxes into the lowest layer, at the grid seam BEFORE
@@ -660,6 +665,7 @@ contains
             call aeros_land_load(ts%land, filename, grd, defaults_file=defaults_file)   ! feat/land
         else
             call aeros_condensation_init(ts%cnd, grd, .FALSE.)
+            call aeros_bd_init(ts%bd, grd, .FALSE.)
             call aeros_convection_init(ts%cnv, grd, .FALSE.)
             call aeros_surface_init(ts%surf, grd, .FALSE.)
             call aeros_ocean_init(ts%ocn, grd)
@@ -849,6 +855,7 @@ contains
         call aeros_correction_end(ts%cor)
         call aeros_transport_end(ts%mst)
         call aeros_condensation_end(ts%cnd)
+        call aeros_bd_end(ts%bd)
         call aeros_convection_end(ts%cnv)
         call aeros_surface_end(ts%surf)
         call aeros_ocean_end(ts%ocn)
@@ -1040,6 +1047,13 @@ contains
         if (ts%wrk%diag) ts%wrk%dt_cnd = ts%wrk%dt_phys
         if (ts%wrk%diag) call water_tally(3)
 
+        ! Prescribed Brewer-Dobson adiabatic term in the lid (aeros_bd), on the
+        ! same seam: an increment on the top layer only.
+        if (ts%bd%enabled) &
+            call aeros_bd_apply(ts%bd, vg, grd, ts%wrk%t_g, ts%wrk%lnps_g, ts%wrk%dt_phys, &
+                                ts%dt, ts%rad%doy0 + real(ts%nstep,wp)*ts%dt/86400.0_wp)
+        if (ts%wrk%diag) ts%wrk%dt_bd = ts%wrk%dt_phys
+
         ! Prognostic cloud fraction (aeros_cloud_prog), at the same grid seam and
         ! AFTER convection and condensation so it sees the grid-box saturation
         ! state the step ends in, and the convective precip for its detrainment
@@ -1098,7 +1112,8 @@ contains
         ! Top-down so each subtraction still sees the earlier cumulative value;
         ! dt_surf is already the increment (dt_phys started this step at zero).
         if (ts%wrk%diag) then
-            ts%wrk%dt_rad = ts%wrk%dt_rad - ts%wrk%dt_cnd
+            ts%wrk%dt_rad = ts%wrk%dt_rad - ts%wrk%dt_bd
+            ts%wrk%dt_bd  = ts%wrk%dt_bd  - ts%wrk%dt_cnd
             ts%wrk%dt_cnd = ts%wrk%dt_cnd - ts%wrk%dt_cnv
             ts%wrk%dt_cnv = ts%wrk%dt_cnv - ts%wrk%dt_surf
         end if

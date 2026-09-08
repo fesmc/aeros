@@ -172,6 +172,7 @@ module aeros_tendency
         real(wp), allocatable :: dt_surf(:,:,:)   ! surface SH increment [K/step]
         real(wp), allocatable :: dt_cnv(:,:,:)    ! convection increment [K/step]
         real(wp), allocatable :: dt_cnd(:,:,:)    ! condensation increment [K/step]
+        real(wp), allocatable :: dt_bd(:,:,:)     ! lid Brewer-Dobson increment [K/step]
         real(wp), allocatable :: dt_rad(:,:,:)    ! radiation increment [K/step]
         real(wp), allocatable :: dt_vdiff(:,:,:)  ! vdiff grid-T change [K/step]
         real(wp), allocatable :: dt_vadv(:,:,:)   ! -vadv_t + kappa T omega/p [K/s]
@@ -282,6 +283,8 @@ contains
             allocate(wrk%dt_cnd(wrk%nlon,wrk%nlat,wrk%nlev))
         if (.not. allocated(wrk%dt_rad)) &
             allocate(wrk%dt_rad(wrk%nlon,wrk%nlat,wrk%nlev))
+        if (.not. allocated(wrk%dt_bd)) &
+            allocate(wrk%dt_bd(wrk%nlon,wrk%nlat,wrk%nlev))
         if (.not. allocated(wrk%dt_vdiff)) &
             allocate(wrk%dt_vdiff(wrk%nlon,wrk%nlat,wrk%nlev))
         if (.not. allocated(wrk%dt_vadv)) &
@@ -289,7 +292,7 @@ contains
         if (.not. allocated(wrk%omega)) &
             allocate(wrk%omega(wrk%nlon,wrk%nlat,wrk%nlev))
 
-        wrk%dt_surf  = 0.0_wp; wrk%dt_cnv = 0.0_wp; wrk%dt_cnd = 0.0_wp
+        wrk%dt_surf  = 0.0_wp; wrk%dt_cnv = 0.0_wp; wrk%dt_cnd = 0.0_wp; wrk%dt_bd = 0.0_wp
         wrk%dt_rad   = 0.0_wp; wrk%dt_vdiff = 0.0_wp; wrk%dt_vadv = 0.0_wp
         wrk%omega    = 0.0_wp
         wrk%diag = .TRUE.
@@ -330,6 +333,7 @@ contains
         if (allocated(wrk%dt_cnv))   deallocate(wrk%dt_cnv)
         if (allocated(wrk%dt_cnd))   deallocate(wrk%dt_cnd)
         if (allocated(wrk%dt_rad))   deallocate(wrk%dt_rad)
+        if (allocated(wrk%dt_bd))    deallocate(wrk%dt_bd)
         if (allocated(wrk%dt_vdiff)) deallocate(wrk%dt_vdiff)
         if (allocated(wrk%dt_vadv))  deallocate(wrk%dt_vadv)
         if (allocated(wrk%omega))    deallocate(wrk%omega)

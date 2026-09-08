@@ -26,6 +26,32 @@ the stratosphere/lid representation (polar lid −20 to −29 K, no Brewer–Dob
 subsidence warming uses the stability across the lid) and the eddy-driven circulation (missing Ferrel
 cell). 26/26 tests (`test_ecckd` SESAM guard loosened to 10 %, 4c173f8).
 
+### Update 2026-09-08 (evening): prescribed lid Brewer–Dobson circulation (`aeros_bd`)
+
+Relaxing the lid T toward the ERA5 10–257 hPa layer mean (2-day scratch test, `LIDREL`) put
+σ 0.365 at 30–45N from +4.5 to +2.0 K and the jet from 52 to 33.5 m/s (ERA5 34): the lid's
+equator-pole contrast (tropics +5, poles −21 K vs the layer mean — no Brewer–Dobson circulation
+in a one-layer, 10-hPa-top stratosphere) drove the jet by thermal wind and half the remaining
+warm band. Design (docs/design.md rules out SPEEDY-style nudging; SpeedyWeather's default has
+none): the missing adiabatic term only, `dT/dt = −w* S_ref` on the top layer, with w*(lat,month)
+and the reference lid stability S_ref from `input/bd_wstar_era5.nc`; the lid's radiation stays
+interactive. `&rce` keys `bd_file` ("" = off), `bd_scale`, `bd_per_K` (fractional change of w*
+per K of the running annual global-mean lowest-level T anomaly from `bd_t_ref`; 0 default,
++0.02–0.03 is the stratosphere-resolving-model sensitivity), `bd_tau_mean_days`. Dump: `q_bd`.
+`test_bd`. Lessons: (i) multiplying w* by the model's OWN lid stability (lid vs 365 hPa) feeds
+back on itself — polar lid +7 K, jet 26 — hence S_ref from the file; (ii) the free lid's
+response to the fixed heating is nonlocal (the polar lid follows the mid-latitude forcing through
+the jet; a per-latitude Newton update made the poles worse), soft (dT/dQ 10–35 K per K/day) and
+not the relaxed state: the tropical/mid-latitude lid stays +2.5–3 K at any amplitude or latitude
+structure (`BDs05/07/085`, `BDv3`, all 5-yr checked, sampling noise ~1 K). Calibrated by a global
+×0.85 (baked into the file): polar lid within 1 K, 30–60 and tropics +2–3 K.
+Result (`docs/refs/realearth_metrics_2026-09-08_L6_bd.md`, `cld_lwc` 0.029e-3 for TOA): jet
+31.5 (ERA5 33.7, was 52), 200-hPa [u] 29.4 (31.3), DJF Z500* 70.7 m (76), σ 0.365 30–45N +2.3
+(was +4.5), tropics +2.7, TOA −0.3, CRE −51/+18, P 3.15, W 24.8; NH-land t2m amplitude 30.7
+(ERA5 33.6, was 32.7 — the weaker jet/stationary wave). Remaining: tropical/subtropical lid and
+σ 0.365 +2.5–3 K (a free-run property the relaxation pinned; not w*), 30–45S −4 at 0.56–0.73,
+the land amplitude, and P 3.15 vs 2.9.
+
 ### Where the model is
 
 All on `main`: 9e7b227 (morning), then **6b8b55a** (surface exchange: Monin-Obukhov unstable
@@ -105,9 +131,10 @@ reference, not the model.
 ### Known deficits, in the order to attack them (as of the evening; deficit 1 below is RESOLVED
 except for its 300 hPa part — see the evening update)
 
-0. **Warm σ 0.365 outside the tropics** — half resolved 2026-09-08 (see the update above): now
-   +4.5 at 30–45N, +3.0 tropics, over −4 at 30–45S 0.56–0.73. Remaining candidates: lid /
-   stratosphere representation, eddy-driven circulation (no Ferrel cell).
+0. **Warm σ 0.365 outside the tropics** — mostly resolved 2026-09-08 (two updates above): now
+   +2.3 at 30–45N, +2.7 tropics, over −4 at 30–45S 0.56–0.73; the jet is ERA5's. What is left
+   is a free-run lid property (+2.5–3 K tropics/mid-latitudes with the lid circulation on);
+   the eddy-driven circulation (no Ferrel cell) is untouched.
 1. **~~Cold lower troposphere~~ / warm 300 hPa.** (Cold part resolved 2026-09-07 evening.) 700–850 hPa is 3–7 K cold at all latitudes and
    seasons, 300 hPa 5–8 K warm outside the tropics (annual, `docs/refs/..._2026-09-07_L6.md`).
    Not vertical resolution (L8/L12 identical at dt 1800), not the boundary layer, and only 1 K

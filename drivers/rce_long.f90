@@ -33,6 +33,7 @@ program rce_long
     use aeros_convection, only : SCHEME_SBM, SCHEME_SBM_FRIERSON, SCHEME_MANABE
     use aeros_timestep
     use aeros_radiation, only : SCHEME_ECCKD
+    use aeros_bd,        only : aeros_bd_init, aeros_bd_read
     use aeros_ocean,    only : aeros_ocean_init
     use aeros_topography, only : aeros_topography_load, aeros_topography_scale
     use aeros_land,     only : aeros_land_init, aeros_land_couple_radiation, aeros_land_set_albedo
@@ -139,6 +140,12 @@ program rce_long
     real(wp) :: cond_reevap  = 30.0_wp   ! reevaporation efficiency of falling precip
     real(wp) :: cond_time_scale = 3.0_wp ! condensation adjustment time scale [steps] (SW: 3)
     real(wp) :: cond_lid_q_max = 1.0e-5_wp ! lid cold trap: top-layer q ceiling [kg/kg] (<= 0 off)
+    ! Prescribed Brewer-Dobson residual circulation in the lid (aeros_bd):
+    ! bd_file = w*(lat,month) climatology ("" = off), bd_scale amplitude,
+    ! bd_per_K fractional change per K of the running annual global-mean
+    ! lowest-level T anomaly from bd_t_ref, bd_tau_mean_days its time scale.
+    character(len=512) :: bd_file = ""
+    real(wp) :: bd_scale = 1.0_wp, bd_per_K = 0.0_wp, bd_t_ref = 285.0_wp, bd_tau_mean_days = 365.0_wp
     integer  :: ocean_mode = 0       ! 0 prescribed SST, 1 slab
     real(wp) :: ocean_depth = 10.0_wp
     ! Prescribed-SST meridional profile knobs (default = APE Control). sst_shape=1.0
@@ -275,7 +282,7 @@ program rce_long
     ! adiabatic (wrk%dt_vadv), the total dynamical rate (wrk%dtdt; horizontal
     ! advection = dyn - vadv) and vertical diffusion incl. the surface flux
     ! (wrk%dt_vdiff), so the dump closes the zonal-mean T budget per level.
-    real(wp), allocatable :: vadv_tavg(:,:,:), dyn_tavg(:,:,:), vdf_tavg(:,:,:)
+    real(wp), allocatable :: vadv_tavg(:,:,:), dyn_tavg(:,:,:), vdf_tavg(:,:,:), bd_tavg(:,:,:)
     ! Time-mean zonal-mean jet/MMC/eddy-momentum-flux accumulators (lat,lev),
     ! same 2nd-half sampling as w_tavg. uv_tavg = [u*v*] (zonal-mean of the
     ! deviations from the instantaneous zonal mean) -- the northward eddy flux
@@ -347,6 +354,14 @@ program rce_long
     ts%cnd%reevap  = cond_reevap
     ts%cnd%time_scale = cond_time_scale
     ts%cnd%lid_q_max = cond_lid_q_max
+    if (len_trim(bd_file) > 0) then
+        call aeros_bd_init(ts%bd, grd, .TRUE.)
+        ts%bd%scale = bd_scale; ts%bd%per_k = bd_per_K; ts%bd%t_ref = bd_t_ref
+        ts%bd%tau_mean = bd_tau_mean_days*86400.0_wp; ts%bd%tmean = bd_t_ref
+        call aeros_bd_read(ts%bd, trim(bd_file), grd)
+        write(*,"(a,a,a,f5.2,a,f6.3,a,f6.1)") " rce_long:: lid Brewer-Dobson w* from ", trim(bd_file), &
+            "  scale ", bd_scale, "  per_K ", bd_per_K, "  t_ref ", bd_t_ref
+    end if
     ts%cnv%enabled = l_cnv
     ts%cnv%tau = conv_tau
     ts%cnv%rh_ref = conv_rh_ref
@@ -670,6 +685,7 @@ program rce_long
     allocate(vadv_tavg(grd%nlon,grd%nlat,nlev), dyn_tavg(grd%nlon,grd%nlat,nlev), &
              vdf_tavg(grd%nlon,grd%nlat,nlev))
     vadv_tavg = 0.0_wp; dyn_tavg = 0.0_wp; vdf_tavg = 0.0_wp
+    allocate(bd_tavg(grd%nlon,grd%nlat,nlev)); bd_tavg = 0.0_wp
     allocate(uv_tavg(grd%nlat,nlev), ubar_tavg(grd%nlat,nlev), vbar_tavg(grd%nlat,nlev))
     uv_tavg = 0.0_wp; ubar_tavg = 0.0_wp; vbar_tavg = 0.0_wp
     ! Monthly-mean climatology bins (feat/seasonal), only when requested.
@@ -768,6 +784,7 @@ program rce_long
             vadv_tavg = vadv_tavg + ts%wrk%dt_vadv*dt      ! rates [K/s] -> [K/step]
             dyn_tavg  = dyn_tavg  + ts%wrk%dtdt*dt
             vdf_tavg  = vdf_tavg  + ts%wrk%dt_vdiff
+            bd_tavg   = bd_tavg   + ts%wrk%dt_bd
             call accum_zmflux()
             call accum_espec()
             n_wacc = n_wacc + 1
@@ -831,7 +848,8 @@ contains
         real(wp), allocatable :: rh_zm(:,:), cf_zm(:,:), t_zm(:,:), q_zm(:,:), p_zm(:,:)
         real(wp), allocatable :: u_zm(:,:), v_zm(:,:), w_zm(:,:)
         real(wp), allocatable :: cnv_zm(:,:), cnd_zm(:,:), rad_zm(:,:), &
-                                 surf_zm(:,:), qnet_zm(:,:), vadv_zm(:,:), dyn_zm(:,:), vdf_zm(:,:)
+                                 surf_zm(:,:), qnet_zm(:,:), vadv_zm(:,:), dyn_zm(:,:), vdf_zm(:,:), &
+                                 bd_zm(:,:)
         real(wp), allocatable :: cover(:), latout(:), levout(:)
         real(wp) :: kday
         integer :: ii, jj, kk
@@ -845,9 +863,9 @@ contains
         p_zm = 0.0_wp; u_zm = 0.0_wp; v_zm = 0.0_wp; w_zm = 0.0_wp; cover = 0.0_wp
         allocate(cnv_zm(grd%nlat,nlev), cnd_zm(grd%nlat,nlev), rad_zm(grd%nlat,nlev), &
                  surf_zm(grd%nlat,nlev), qnet_zm(grd%nlat,nlev), vadv_zm(grd%nlat,nlev), &
-                 dyn_zm(grd%nlat,nlev), vdf_zm(grd%nlat,nlev))
+                 dyn_zm(grd%nlat,nlev), vdf_zm(grd%nlat,nlev), bd_zm(grd%nlat,nlev))
         cnv_zm = 0.0_wp; cnd_zm = 0.0_wp; rad_zm = 0.0_wp; surf_zm = 0.0_wp
-        vadv_zm = 0.0_wp; dyn_zm = 0.0_wp; vdf_zm = 0.0_wp
+        vadv_zm = 0.0_wp; dyn_zm = 0.0_wp; vdf_zm = 0.0_wp; bd_zm = 0.0_wp
         latout = grd%lat(1:grd%nlat)
         levout = vg%sigma_full(1:nlev)
         ! [K/step] time-mean -> [K/day]: /n_wacc (time), /nlon (zonal), *86400/dt.
@@ -881,6 +899,7 @@ contains
                         vadv_zm(jj,kk) = vadv_zm(jj,kk) + vadv_tavg(ii,jj,kk)/real(n_wacc,wp)*kday
                         dyn_zm(jj,kk)  = dyn_zm(jj,kk)  + dyn_tavg(ii,jj,kk) /real(n_wacc,wp)*kday
                         vdf_zm(jj,kk)  = vdf_zm(jj,kk)  + vdf_tavg(ii,jj,kk) /real(n_wacc,wp)*kday
+                        bd_zm(jj,kk)   = bd_zm(jj,kk)   + bd_tavg(ii,jj,kk)  /real(n_wacc,wp)*kday
                     end if
                     colcov = max(colcov, cf(kk))     ! max-overlap column cover
                 end do
@@ -901,7 +920,9 @@ contains
             vadv_zm(jj,:) = vadv_zm(jj,:)/rnlon
             dyn_zm(jj,:)  = dyn_zm(jj,:)/rnlon
             vdf_zm(jj,:)  = vdf_zm(jj,:)/rnlon
-            qnet_zm(jj,:) = cnv_zm(jj,:) + cnd_zm(jj,:) + rad_zm(jj,:) + surf_zm(jj,:) + vdf_zm(jj,:)
+            bd_zm(jj,:)   = bd_zm(jj,:)/rnlon
+            qnet_zm(jj,:) = cnv_zm(jj,:) + cnd_zm(jj,:) + rad_zm(jj,:) + surf_zm(jj,:) + vdf_zm(jj,:) &
+                            + bd_zm(jj,:)
             cover(jj)   = cover(jj)/rnlon
         end do
 
@@ -944,8 +965,10 @@ contains
             long_name="zonal-mean surface-flux heating")
         call nc_write(fname, "q_vdiff", vdf_zm, dim1="lat", dim2="lev", units="K/day", &
             long_name="zonal-mean vertical-diffusion heating (incl. the surface flux)")
+        call nc_write(fname, "q_bd",   bd_zm,   dim1="lat", dim2="lev", units="K/day", &
+            long_name="zonal-mean prescribed Brewer-Dobson heating (lid)")
         call nc_write(fname, "q_net",  qnet_zm, dim1="lat", dim2="lev", units="K/day", &
-            long_name="zonal-mean net diabatic heating (cnv+cnd+rad+surf+vdiff)")
+            long_name="zonal-mean net diabatic heating (cnv+cnd+rad+surf+vdiff+bd)")
         call nc_write(fname, "q_vadv", vadv_zm, dim1="lat", dim2="lev", units="K/day", &
             long_name="zonal-mean vertical advection + adiabatic heating")
         call nc_write(fname, "q_dyn",  dyn_zm,  dim1="lat", dim2="lev", units="K/day", &
@@ -1393,6 +1416,12 @@ contains
         call nml_read(nmlfile, "rce", "cond_time_scale", cond_time_scale, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "cond_lid_q_max", cond_lid_q_max, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "bd_file", bd_file, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "bd_scale", bd_scale, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "bd_per_K", bd_per_K, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "bd_t_ref", bd_t_ref, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "bd_tau_mean_days", bd_tau_mean_days, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "ocean_mode", ocean_mode)
         call nml_read(nmlfile, "rce", "ocean_depth", ocean_depth)

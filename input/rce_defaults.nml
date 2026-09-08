@@ -59,6 +59,20 @@
     ! g/kg; the layer-mean saturation of the 0-250 hPa lid is ~0.5 g/kg and
     ! held 10x ERA5's vapour, warming 350 hPa by 2 K). <= 0 disables it.
     cond_lid_q_max   = 1.0e-5
+    ! Prescribed Brewer-Dobson residual circulation in the lid (aeros_bd): the
+    ! missing adiabatic term -w* S_ref on the top layer with w*(lat, month) and
+    ! the reference lid stability S_ref from bd_file ("" = off); the lid stays
+    ! radiatively interactive. bd_scale is a global amplitude factor;
+    ! bd_per_K a fractional change of w* per K of the running annual global-mean
+    ! lowest-level T anomaly from bd_t_ref (stratosphere-resolving models:
+    ! +0.02..0.03 per K of warming; imposed, not emergent), bd_tau_mean_days the
+    ! running-mean time scale. The file w* was backed out of the L6 run relaxed
+    ! toward the ERA5 layer-mean lid (2026-09-08).
+    bd_file          = "input/bd_wstar_era5.nc"
+    bd_scale         = 1.0
+    bd_per_K         = 0.0
+    bd_t_ref         = 285.0
+    bd_tau_mean_days = 365.0
     ! Land surface + land-sea mask (feat/land). l_land off = all-ocean
     ! aquaplanet, the bit-for-bit default. Files are ERA5 climatologies.
     l_land           = .false.
@@ -104,12 +118,13 @@
     ! troposphere warmed 3 K): rhc_top 1.03 puts the threshold at 0.96 in the
     ! lid and 0.84 at 365 hPa (high cloud back below the lid, LW CRE +7 ->
     ! +21), lwc 0.031e-3 -> TOA +0.1, CRE -55/+21 (ERA5 -46/+22), cover 0.57,
-    ! P 3.1. The module's own defaults (0.52/0.35, 0.017/0.018) are the
+    ! P 3.1. lwc 0.029e-3 after the lid Brewer-Dobson term (2026-09-08):
+    ! TOA -0.3, CRE -51/+18. The module's own defaults (0.52/0.35, 0.017/0.018) are the
     ! offline ERA5-column calibration (docs/m2_results.md section 19) and
     ! stay for validate_era5.
     cld_rhc_sfc      = 0.52
     cld_rhc_top      = 1.03
-    cld_lwc          = 0.031e-3
+    cld_lwc          = 0.029e-3
     cld_iwc          = 0.014e-3
     l_cloud_prog     = .false.
     cloud_rhc_sfc    = 0.40
