@@ -41,7 +41,7 @@ module aeros_cloud
     ! 0.63) -- the scheme trades cover for optical depth but gets the CRE right.
 
     use aeros_defs,         only : wp, R_d
-    use aeros_condensation, only : aeros_qsat
+    use aeros_condensation, only : aeros_qsat, aeros_liquid_fraction
 
     implicit none
     private
@@ -54,6 +54,12 @@ module aeros_cloud
     ! own RH profile is not ERA5's.
     real(wp), protected :: CLD_RHC_SFC = 0.52_wp
     real(wp), protected :: CLD_RHC_TOP = 0.35_wp
+    ! Ice-phase critical RH: for the ice fraction of a layer the threshold is
+    ! min(rhc(sigma), CLD_RHC_ICE), blended by the same liquid fraction as the
+    ! saturation -- ice cloud exists well below water saturation, which the
+    ! single warm threshold could only mimic by keeping cold columns near
+    ! saturation (2026-09-08, with the ice condensation threshold). < 0 = off.
+    real(wp), protected :: CLD_RHC_ICE = -1.0_wp
     real(wp), protected :: CLD_LWC = 0.017e-3_wp        ! liquid water content
     real(wp), protected :: CLD_IWC = 0.018e-3_wp       ! ice water content
 
@@ -69,11 +75,12 @@ module aeros_cloud
 
 contains
 
-    subroutine aeros_cloud_configure(rhc_sfc, rhc_top, lwc, iwc)
+    subroutine aeros_cloud_configure(rhc_sfc, rhc_top, lwc, iwc, rhc_ice)
         ! Override the calibrated constants (any subset). rhc in (0,1]; 1 at an
         ! endpoint means no cloud there.
         implicit none
-        real(wp), intent(in), optional :: rhc_sfc, rhc_top, lwc, iwc
+        real(wp), intent(in), optional :: rhc_sfc, rhc_top, lwc, iwc, rhc_ice
+        if (present(rhc_ice)) CLD_RHC_ICE = rhc_ice
         if (present(rhc_sfc)) CLD_RHC_SFC = rhc_sfc
         if (present(rhc_top)) CLD_RHC_TOP = rhc_top
         if (present(lwc))     CLD_LWC = lwc
@@ -95,12 +102,16 @@ contains
         real(wp), intent(out) :: ciwc(:)    ! (nlev) grid-mean cloud ice    [kg kg-1]
 
         integer  :: k
-        real(wp) :: qs, dqsdt, rh, rhc, b
+        real(wp) :: qs, dqsdt, rh, rhc, b, alf
 
         do k = 1, nlev
             call aeros_qsat(t(k), pfull(k), qs, dqsdt)
             rh  = q(k)/max(qs, 1.0e-12_wp)
             rhc = rh_crit(pfull(k)/psfc)
+            if (CLD_RHC_ICE >= 0.0_wp) then
+                alf = aeros_liquid_fraction(t(k))
+                rhc = alf*rhc + (1.0_wp - alf)*min(rhc, CLD_RHC_ICE)
+            end if
 
             ! Sundqvist cloud fraction
             if (rhc < 1.0_wp) then

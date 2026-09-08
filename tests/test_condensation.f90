@@ -77,6 +77,7 @@ program test_condensation
     call test_budgets(nfail)
     call test_reevaporation(nfail)
     call test_lid_trap(nfail)
+    call test_ice_threshold(nfail)
 
     call aeros_condensation_end(cnd)
     call aeros_vgrid_end(vg)
@@ -355,6 +356,39 @@ contains
                     "the excess falls as precipitation and heats the lid", nfail)
         return
     end subroutine test_lid_trap
+
+    ! === 6. Ice-phase threshold: a cold column between the two thresholds ====
+    subroutine test_ice_threshold(nfail)
+        ! At RH 0.85 (of the mixed-phase saturation) with rh_crit 0.95 nothing
+        ! condenses; with rh_crit_ice 0.75 the all-ice layers (T <= -23 C)
+        ! condense down to 0.75 and the warm layers stay untouched.
+        implicit none
+        integer, intent(inout) :: nfail
+        real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev), qs, dqs, rhtop, rhbot, reevap0
+        integer  :: k
+        write(*,*) ""
+        write(*,*) " -- ice-phase condensation threshold"
+        call aeros_vgrid_pressure(vg, real(p0,wp), phalf, pfull, dpc)
+        do k = 1, nlev
+            t_g(:,:,k) = 300.0_wp - 85.0_wp*(1.0_wp - pfull(k)/real(p0,wp))   ! ~220 K top, 300 K base
+            call aeros_qsat(t_g(1,1,k), pfull(k), qs, dqs)
+            qv(:,:,k) = 0.85_wp*qs
+        end do
+        qv0 = qv; dt_phys = 0.0_wp
+        cnd%lid_q_max = 0.0_wp; cnd%rh_crit_ice = 0.75_wp
+        reevap0 = cnd%reevap; cnd%reevap = 0.0_wp
+        call aeros_condensation_apply(cnd, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
+        cnd%rh_crit_ice = -1.0_wp; cnd%reevap = reevap0
+        call aeros_qsat(t_g(1,1,1), pfull(1), qs, dqs); rhtop = qv(1,1,1)/qs
+        call aeros_qsat(t_g(1,1,nlev), pfull(nlev), qs, dqs); rhbot = qv(1,1,nlev)/qs
+        write(*,"(a,f7.1,a,f6.3,a,f6.3)") "   T(top) ", t_g(1,1,1), " K: RH after ", rhtop, "   lowest layer RH ", rhbot
+        ! the layer ends at rh_crit_ice of the latent-heated temperature, so RH
+        ! against the unheated T is a little above 0.75
+        call check(t_g(1,1,1) < 250.0_wp .and. rhtop < 0.80_wp .and. rhtop >= 0.75_wp - 1.0e-6_wp, &
+                   "all-ice layer condensed to rh_crit_ice (of the heated T)", nfail)
+        call check(abs(rhbot - 0.85_wp) < 1.0e-6_wp, "warm layer untouched below rh_crit", nfail)
+        return
+    end subroutine test_ice_threshold
 
     subroutine check(ok, label, nfail)
         implicit none

@@ -99,6 +99,14 @@ module aeros_condensation
         ! adjustment. Pinning the grid mean at 100% (rh_crit=1) is a major cause of
         ! the overcast moist bias, so the sub-saturating default is deliberate.
         real(wp) :: rh_crit = 0.95_wp
+        ! Ice-phase threshold: the critical RH (over the mixed-phase saturation)
+        ! blends from rh_crit (all liquid, T >= 0 C) to rh_crit_ice (all ice,
+        ! T <= -23 C) with the same liquid fraction as the saturation itself.
+        ! Ice clouds precipitate well below water saturation (Bergeron), so a
+        ! single warm threshold left every cold column -- the winter polar cap
+        ! (RH 82-94 % vs ERA5 60-80 %) and the tropical upper troposphere (67
+        ! vs 37 %) -- parked at 93 % (2026-09-08). < 0 = rh_crit (off).
+        real(wp) :: rh_crit_ice = -1.0_wp
 
         ! Reevaporation efficiency [1/(kg/kg)] of falling precipitation into
         ! sub-saturated layers below (SpeedyWeather's `reevaporation`): the
@@ -159,6 +167,7 @@ contains
         cnd%reevap  = 30.0_wp
         cnd%time_scale = 3.0_wp
         cnd%lid_q_max = 1.0e-5_wp
+        cnd%rh_crit_ice = -1.0_wp
         cnd%nlon    = grd%nlon
         cnd%nlat    = grd%nlat
 
@@ -255,13 +264,13 @@ contains
         real(wp), intent(in)    :: dt             ! [s]
 
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
-        real(wp) :: qs, dqsdt, gam, dqc, pfall, hcp, qthr, frac, dqe
+        real(wp) :: qs, dqsdt, gam, dqc, pfall, hcp, qthr, frac, dqe, rhc, alf
         integer  :: i, j, k, it
 
         if (.not. cnd%enabled) return
 
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,k,it,phalf,pfull,dpc,qs,dqsdt,gam,dqc,pfall,hcp,qthr,frac,dqe)
+        !$omp   private(i,j,k,it,phalf,pfull,dpc,qs,dqsdt,gam,dqc,pfall,hcp,qthr,frac,dqe,rhc,alf)
         do j = 1, cnd%nlat
             do i = 1, cnd%nlon
                 call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
@@ -278,7 +287,12 @@ contains
                     ! heat equals L times the water that leaves, exactly
                     hcp = aeros_latent(t_g(i,j,k))/real(cp_d, wp)
                     call aeros_qsat(t_g(i,j,k), pfull(k), qs, dqsdt)
-                    qthr = cnd%rh_crit*qs
+                    rhc = cnd%rh_crit
+                    if (cnd%rh_crit_ice >= 0.0_wp) then
+                        alf = aeros_liquid_fraction(t_g(i,j,k))
+                        rhc = alf*cnd%rh_crit + (1.0_wp - alf)*cnd%rh_crit_ice
+                    end if
+                    qthr = rhc*qs
 
                     ! Reevaporation: rain falling into a layer below the
                     ! condensation threshold evaporates, moistening it toward the
@@ -310,7 +324,7 @@ contains
                     do it = 1, 3
                         call aeros_qsat(t_g(i,j,k) + hcp*dqc, pfull(k), qs, dqsdt)
                         gam = hcp*dqsdt
-                        dqc = dqc + (qv_g(i,j,k) - dqc - cnd%rh_crit*qs)/(1.0_wp + gam)
+                        dqc = dqc + (qv_g(i,j,k) - dqc - rhc*qs)/(1.0_wp + gam)
                     end do
 
                     ! Lid cold trap (class header): the top layer also condenses

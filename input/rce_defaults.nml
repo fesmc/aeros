@@ -64,6 +64,13 @@
     ! g/kg; the layer-mean saturation of the 0-250 hPa lid is ~0.5 g/kg and
     ! held 10x ERA5's vapour, warming 350 hPa by 2 K). <= 0 disables it.
     cond_lid_q_max   = 1.0e-5
+    ! Condensation threshold for all-ice columns (T <= -23 C), blended with
+    ! cond_rh_crit by the liquid fraction; < 0 = single threshold. 0.80 since
+    ! 2026-09-08: with the single 0.93 every cold column sat at the threshold
+    ! (winter cap RH 82-94 % vs ERA5 60-80, LW down over NH winter land +24
+    ! W/m2); with 0.80 (+ cld_rhc_ice 0.60) the cap is at ERA5's RH, January
+    ! land LW down 221 (209), P 2.96 (2.9), CRE -55/+22 (-46/+22).
+    cond_rh_crit_ice = 0.80
     ! Prescribed Brewer-Dobson residual circulation in the lid (aeros_bd): the
     ! missing adiabatic term -w* S_ref on the top layer with w*(lat, month) and
     ! the reference lid stability S_ref from bd_file ("" = off); the lid stays
@@ -129,12 +136,17 @@
     ! lid and 0.84 at 365 hPa (high cloud back below the lid, LW CRE +7 ->
     ! +21), lwc 0.031e-3 -> TOA +0.1, CRE -55/+21 (ERA5 -46/+22), cover 0.57,
     ! P 3.1. lwc 0.029e-3 after the lid Brewer-Dobson term (2026-09-08):
-    ! TOA -0.3, CRE -51/+18. The module's own defaults (0.52/0.35, 0.017/0.018) are the
+    ! TOA -0.3, CRE -51/+18; 0.034e-3 with the ice thresholds (TOA ~0). The module's own defaults (0.52/0.35, 0.017/0.018) are the
     ! offline ERA5-column calibration (docs/m2_results.md section 19) and
     ! stay for validate_era5.
     cld_rhc_sfc      = 0.52
     cld_rhc_top      = 1.03
-    cld_lwc          = 0.029e-3
+    ! Ice-phase cloud threshold: min(rhc(sigma), cld_rhc_ice) for the ice
+    ! fraction of a layer (blended by the liquid fraction); < 0 = off. 0.60
+    ! since 2026-09-08 with cond_rh_crit_ice 0.80 (ice cloud below water
+    ! saturation; 0.40 gave LW CRE +33, 0.70 +14; ERA5 +22).
+    cld_rhc_ice      = 0.60
+    cld_lwc          = 0.034e-3
     cld_iwc          = 0.014e-3
     l_cloud_prog     = .false.
     cloud_rhc_sfc    = 0.40

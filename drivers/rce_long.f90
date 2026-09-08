@@ -141,6 +141,7 @@ program rce_long
     real(wp) :: cond_reevap  = 30.0_wp   ! reevaporation efficiency of falling precip
     real(wp) :: cond_time_scale = 3.0_wp ! condensation adjustment time scale [steps] (SW: 3)
     real(wp) :: cond_lid_q_max = 1.0e-5_wp ! lid cold trap: top-layer q ceiling [kg/kg] (<= 0 off)
+    real(wp) :: cond_rh_crit_ice = -1.0_wp ! condensation threshold for all-ice columns (< 0 = cond_rh_crit)
     ! Prescribed Brewer-Dobson residual circulation in the lid (aeros_bd):
     ! bd_file = w*(lat,month) climatology ("" = off), bd_scale amplitude,
     ! bd_per_K fractional change per K of the running annual global-mean
@@ -198,7 +199,7 @@ program rce_long
     logical  :: l_cloud_prog   = .FALSE.
     ! Diagnostic (RH-based) cloud scheme, aeros_cloud: critical-RH endpoints and
     ! in-cloud water contents [kg m-3]; the coupled calibration (rce_defaults.nml).
-    real(wp) :: cld_rhc_sfc = 0.52_wp, cld_rhc_top = 1.07_wp
+    real(wp) :: cld_rhc_sfc = 0.52_wp, cld_rhc_top = 1.07_wp, cld_rhc_ice = -1.0_wp
     real(wp) :: cld_lwc = 0.020e-3_wp, cld_iwc = 0.014e-3_wp
     real(wp) :: cloud_rhc_sfc  = 0.40_wp    ! critical RH at the surface (calibrated)
     real(wp) :: cloud_rhc_top  = 0.60_wp    ! critical RH at the model top (higher aloft)
@@ -356,6 +357,7 @@ program rce_long
     ts%cnd%reevap  = cond_reevap
     ts%cnd%time_scale = cond_time_scale
     ts%cnd%lid_q_max = cond_lid_q_max
+    ts%cnd%rh_crit_ice = cond_rh_crit_ice
     if (len_trim(bd_file) > 0) then
         call aeros_bd_init(ts%bd, grd, .TRUE.)
         ts%bd%scale = bd_scale; ts%bd%per_k = bd_per_K; ts%bd%t_ref = bd_t_ref
@@ -385,7 +387,8 @@ program rce_long
     ts%surf%c_d = c_d
     ts%rad%enabled  = l_rad
     ts%rad%clouds   = l_rad_clouds
-    call aeros_cloud_configure(rhc_sfc=cld_rhc_sfc, rhc_top=cld_rhc_top, lwc=cld_lwc, iwc=cld_iwc)
+    call aeros_cloud_configure(rhc_sfc=cld_rhc_sfc, rhc_top=cld_rhc_top, lwc=cld_lwc, iwc=cld_iwc, &
+                               rhc_ice=cld_rhc_ice)
     ts%rad%l_o3     = l_o3
     ! Seasonal insolation (feat/seasonal): read into ts%rad before init/apply.
     ts%rad%seasonal = l_seasonal
@@ -1406,6 +1409,7 @@ contains
         call nml_read(nmlfile, "rce", "l_o3", l_o3, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "cld_rhc_sfc", cld_rhc_sfc, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "cld_rhc_top", cld_rhc_top, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cld_rhc_ice", cld_rhc_ice, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "cld_lwc", cld_lwc, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "cld_iwc", cld_iwc, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_sponge", l_sponge, &
@@ -1430,6 +1434,8 @@ contains
         call nml_read(nmlfile, "rce", "cond_time_scale", cond_time_scale, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "cond_lid_q_max", cond_lid_q_max, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "cond_rh_crit_ice", cond_rh_crit_ice, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "bd_file", bd_file, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "bd_scale", bd_scale, defaults_file="input/rce_defaults.nml")

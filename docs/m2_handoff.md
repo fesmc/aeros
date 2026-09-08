@@ -70,6 +70,23 @@ Both land seasons are still ~3–4 K warm at 2 m: January from the moist winter 
 (233 vs 209; RH 82–94 % at 45–75N — deficit 2), July from too little cloud over summer land (SW net
 225 vs 196, cover 0.47 vs 0.57) and LH 100 vs 73.
 
+### Update 2026-09-08 (late): winter-cap moisture — ice-phase condensation and cloud thresholds
+
+The cap's DJF water budget was fine (P−E 0.64 vs ERA5 0.74 mm/day, transport in 0.70, DJF cap ω ≈ 0):
+the columns simply sat at the single 0.93 condensation threshold (RH 82–94 % at 45–75N vs ERA5
+60–80). Ice clouds precipitate well below water saturation, so: **`cond_rh_crit_ice = 0.80`** (the
+threshold blends from `cond_rh_crit` to it with the liquid fraction, `aeros_condensation`) and, because
+the diagnostic cloud then collapsed (winter land cover 0.40, LW CRE +6), **`cld_rhc_ice = 0.60`**
+(the cloud threshold is min(rhc(σ), cld_rhc_ice) for the ice fraction, `aeros_cloud`). Sweep
+(`diag/W1–W9`): cld_rhc_ice 0.40 → LW CRE +33, 0.70 → +14; cond 0.75 dries the cap to ERA5's RH but
+cools it 3–4 K; `cld_lwc` 0.034e-3 closes TOA. `test_condensation` check 6. Result
+(`docs/refs/realearth_metrics_2026-09-08_L6_ice.md`): cap DJF RH 73–86 % (ERA5 68–84), January land
+LW down 233 → 219 (209), 2 m Jan +1.8 K (was +3.8), CRE −55/+22 (−46/+22), P 2.95 (2.9), LH 86 (84),
+TOA +0.2, Z500* 73 (76), jet 31.1 (33.7), NH-land amplitude 35.5/34.5 (33.6; a little large now).
+Not moved: the tropical upper-troposphere RH (66 vs 37 %: set by the convective reference, not
+condensation), July land (SW net 217 vs 196, LH 93 vs 73, cover 0.47 vs 0.57), global cover 0.50
+vs 0.63, OLR 236 vs 242 with clear-sky 258 vs 264.
+
 ### Where the model is
 
 All on `main`: 9e7b227 (morning), then **6b8b55a** (surface exchange: Monin-Obukhov unstable
@@ -159,11 +176,8 @@ except for its 300 hPa part — see the evening update)
    of it was the SW gap. Column water 20.6 vs 24.5 mm with P and E right → moisture residence
    / vertical distribution; RH at 500 hPa 62–76 % vs 47–60. Look at the subsidence warming
    distribution (SBM enthalpy shift, vertical advection of T) and the lid layer.
-2. **Winter cap** (DJF >60N): transport into the cap 1.45 PW vs ERA5 2.19 with the current
-   clouds (it was 2.18 at the pre-sub-cloud calibration), column RH 81–102 % at all levels,
-   cover 0.84, OLR 161 vs 177, 69N bias −4 to −8 K. The cap needs a drying process for
-   near-saturated cold columns (ice-phase precipitation efficiency) and mixed-phase cloud optics
-   (below 250 K everything is ice at cirrus IWC → radiatively thin).
+2. ~~**Winter cap**~~ — resolved 2026-09-08 late (ice-phase condensation + cloud thresholds; the
+   T part earlier by the surface exchange): DJF RH at ERA5's, 69N bias −0.4 to −3.5 K.
 3. **Consistent FV mass flux** (option 3 of the transport discussion): build the face air fluxes
    from the spectral divergence so the rescaling r vanishes; r is 0.4 %/step now, 1.4 % at the
    polar row — a real but second-order term since the sign fix.
