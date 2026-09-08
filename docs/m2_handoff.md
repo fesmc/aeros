@@ -52,6 +52,24 @@ Result (`docs/refs/realearth_metrics_2026-09-08_L6_bd.md`, `cld_lwc` 0.029e-3 fo
 σ 0.365 +2.5–3 K (a free-run property the relaxation pinned; not w*), 30–45S −4 at 0.56–0.73,
 the land amplitude, and P 3.15 vs 2.9.
 
+### Update 2026-09-08 (night): land winter recalibration and an honest 2 m diagnostic
+
+With the jet at ERA5's the NH-land amplitude had dropped to 30.7 (lowest level). Budget over
+40–70N land (`diag/land_budget.py`): the January skin was 4.3 K warm with LW down +26 (cover 0.81
+vs 0.70), downward SH −25 (ERA5 −8) and LH 17–24 from frozen ground (ERA5 4–6); July within 1.5 K
+once the 360 m level is allowed for. Not levers: `c_soil` (3e6: no change) and `cld_rhc_sfc` (0.60:
+winter LW down unchanged, TOA +3.4). Adopted: **`surf_ri_crit = 1`** (Frierson's stable limit;
+new `&rce` key; SpeedyWeather's 10 let the 360 m log law over z0 = 0.5 m pass 25 W/m² downward)
+and **`beta_frozen = 0.1`** (new land key + `&rce` key: beta × 0.1 below T0, ramped over
+`snow_dt`; winter LH 17 → 8, cover 0.81 → 0.68, LW down 235 → 233). And the monthly `t2m` is now a
+**surface-layer 2 m temperature** (skin-to-level-1 potential-temperature profile on the flux
+scheme's own stability functions, `aeros_surface%t2m`; the lowest level is `tlow`), so the harness
+amplitude metric compares like with like. Result (`docs/refs/realearth_metrics_2026-09-08_L6_land.md`):
+amplitude 32.8 (ERA5 33.6), skin 33.1 (35.0), jet 33.5 (33.7), Z500* 71.6 (76), TOA +0.2, P 3.08.
+Both land seasons are still ~3–4 K warm at 2 m: January from the moist winter cap's LW down
+(233 vs 209; RH 82–94 % at 45–75N — deficit 2), July from too little cloud over summer land (SW net
+225 vs 196, cover 0.47 vs 0.57) and LH 100 vs 73.
+
 ### Where the model is
 
 All on `main`: 9e7b227 (morning), then **6b8b55a** (surface exchange: Monin-Obukhov unstable

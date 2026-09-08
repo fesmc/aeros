@@ -75,6 +75,12 @@ module aeros_land
         real(wp) :: lsm_threshold    = 0.5_wp       ! land where lsm >= threshold
         real(wp) :: w_field_capacity = 0.15_wp      ! bucket capacity [m]
         real(wp) :: w_crit           = -1.0_wp      ! beta knee [m]; <0 => 0.75*fc
+        ! Frozen ground: beta is multiplied by beta_frozen once the soil is
+        ! below T0 (ramped over snow_dt kelvin), standing in for the near-zero
+        ! evaporation of frozen soil / snow sublimation (NH 40-70N winter land
+        ! LH 17-24 W/m2 vs ERA5 4-6 with the bucket evaporating freely,
+        ! 2026-09-08). 1 = off (bit-for-bit).
+        real(wp) :: beta_frozen      = 1.0_wp
         real(wp) :: c_soil           = 2.0e6_wp     ! soil heat capacity [J m-2 K-1]
         real(wp) :: land_albedo      = 0.20_wp      ! fallback land albedo [-]
         real(wp) :: c_h_land         = 1.5e-3_wp    ! land sensible exchange coeff
@@ -237,7 +243,7 @@ contains
         character(len=512) :: lsm_file, albedo_file
         real(wp)           :: lsm_threshold, w_field_capacity, w_crit, c_soil
         real(wp)           :: land_albedo, c_h_land, c_e_land
-        real(wp)           :: snow_albedo, snow_dt
+        real(wp)           :: snow_albedo, snow_dt, beta_frozen
         logical            :: albedo_seasonal
 
         enabled          = land%enabled
@@ -254,6 +260,7 @@ contains
         freeze_floor     = land%freeze_floor
         snow_albedo      = land%snow_albedo
         snow_dt          = land%snow_dt
+        beta_frozen      = land%beta_frozen
 
         call nml_read(filename, "land", "enabled",          enabled, defaults_file=defaults_file)
         call nml_read(filename, "land", "lsm_file",         lsm_file, defaults_file=defaults_file)
@@ -268,6 +275,7 @@ contains
         call nml_read(filename, "land", "freeze_floor",     freeze_floor, defaults_file=defaults_file)
         call nml_read(filename, "land", "snow_albedo",      snow_albedo, defaults_file=defaults_file)
         call nml_read(filename, "land", "snow_dt",          snow_dt, defaults_file=defaults_file)
+        call nml_read(filename, "land", "beta_frozen",      beta_frozen, defaults_file=defaults_file)
         call nml_read(filename, "land", "albedo_seasonal",  albedo_seasonal, defaults_file=defaults_file)
 
         land%albedo_seasonal  = albedo_seasonal
@@ -283,6 +291,7 @@ contains
         land%freeze_floor     = freeze_floor
         land%snow_albedo      = snow_albedo
         land%snow_dt          = snow_dt
+        land%beta_frozen      = beta_frozen
 
         call aeros_land_init(land, grd, enabled)
 
@@ -327,6 +336,9 @@ contains
                 if (land%mask(i,j)) then
                     land%skin(i,j) = land%t_soil(i,j)
                     land%beta(i,j) = min(1.0_wp, land%w(i,j)/land%w_crit)
+                    if (land%beta_frozen < 1.0_wp) &
+                        land%beta(i,j) = land%beta(i,j)*(land%beta_frozen + (1.0_wp - land%beta_frozen) &
+                            *min(1.0_wp, max(0.0_wp, (land%t_soil(i,j) - (T0 - land%snow_dt))/land%snow_dt)))
                 else
                     land%skin(i,j) = sst(i,j)
                     land%beta(i,j) = 1.0_wp

@@ -48,6 +48,11 @@
     ! energy. ri_crit is the critical bulk Richardson number.
     vdiff_richardson = .true.
     vdiff_ri_crit    = 10.0
+    ! Surface-layer critical bulk Richardson number (stable branch of the bulk
+    ! coefficient, aeros_surface): SpeedyWeather's 10; Frierson (2006) uses 1.
+    ! 1 since 2026-09-08: with 10 the winter NH land took 25 W/m2 of downward
+    ! sensible heat (ERA5 8) through the 360 m log law over z0 = 0.5 m.
+    surf_ri_crit     = 1.0
     ! Reevaporation efficiency of falling large-scale precip into sub-saturated
     ! layers (SpeedyWeather's ImplicitCondensation reevaporation; 0 disables it).
     cond_reevap      = 30.0
@@ -93,6 +98,11 @@
     land_albedo_seasonal = .true.
     snow_albedo      = -1.0            ! snow-albedo feedback cold endpoint; <0 = off (bit-for-bit)
     snow_dt          = 5.0             ! ramp width [K] below T0
+    ! Frozen-ground evaporation factor on beta below T0 (ramped over snow_dt);
+    ! 1 = off. 0.1 since 2026-09-08: the bucket evaporated 17-24 W/m2 from
+    ! frozen NH winter land (ERA5 4-6), moistening the winter cap (cover 0.81
+    ! -> 0.71, ERA5 0.70).
+    beta_frozen      = 0.1
     restart_in       = ""
     restart_out      = ""
     restart_interval = 0

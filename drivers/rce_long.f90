@@ -112,6 +112,7 @@ program rce_long
     real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
     logical  :: vdiff_richardson = .TRUE.    ! Ri-diagnosed BL depth (else fixed)
     real(wp) :: vdiff_ri_crit = 10.0_wp      ! critical bulk Richardson number
+    real(wp) :: surf_ri_crit  = 10.0_wp      ! surface-layer critical bulk Richardson number (Frierson: 1)
     ! Model-top sponge knobs (defaults match aeros_timestep_class). Exposed to
     ! test the top thermal-wind blow-up: a stronger/deeper sponge that delays or
     ! removes it confirms the terminal event is model-top dynamical.
@@ -189,6 +190,7 @@ program rce_long
     real(wp) :: snow_albedo      = -1.0_wp  ! snow-albedo feedback cold endpoint [-]; <0 = off
     logical  :: land_albedo_seasonal = .FALSE. ! monthly ERA5 fal (interpolated daily) instead of its mean
     real(wp) :: snow_dt          = 5.0_wp   ! snow-albedo ramp width below T0 [K]
+    real(wp) :: beta_frozen      = 1.0_wp   ! frozen-ground evaporation factor (1 = off)
 
     ! --- prognostic cloud fraction (feat/clouds) ----------------------------
     ! Default off = the diagnostic RH->cover scheme, bit-for-bit unchanged. When
@@ -234,7 +236,7 @@ program rce_long
     real(wp), allocatable :: mon_sst(:,:), mon_pr(:,:)
     ! Full 2D near-surface-air T (lowest level), (nlon,nlat,12) -- land-resolved,
     ! so land vs ocean can be separated in post for the land seasonal calibration.
-    real(wp), allocatable :: mon_t2m(:,:,:)
+    real(wp), allocatable :: mon_t2m(:,:,:), mon_tlow(:,:,:)
     ! 2D precipitation [mm/day] and 500 hPa geopotential height [m] (hydrostatic
     ! column, log-p interpolated), for the real-Earth comparison (stationary
     ! waves, precipitation pattern) against SpeedyWeather / ERA5.
@@ -416,6 +418,7 @@ program rce_long
     ts%vd%sigma      = vdiff_sigma
     ts%vd%richardson = vdiff_richardson
     ts%vd%ri_crit    = vdiff_ri_crit
+    ts%surf%ri_crit  = surf_ri_crit
     ts%rad%albedo   = albedo
     ts%rad%co2_ppm  = co2_ppm
     ts%rad%interval = rad_interval
@@ -497,6 +500,7 @@ program rce_long
     ts%land%land_albedo      = land_albedo
     ts%land%snow_albedo      = snow_albedo
     ts%land%snow_dt          = snow_dt
+    ts%land%beta_frozen      = beta_frozen
     ts%land%albedo_seasonal  = land_albedo_seasonal
     call aeros_land_init(ts%land, grd, l_land)
     if (l_land) then
@@ -693,7 +697,7 @@ program rce_long
         allocate(mon_t(grd%nlat,nlev,NMON), mon_u(grd%nlat,nlev,NMON), &
                  mon_rh(grd%nlat,nlev,NMON), mon_v(grd%nlat,nlev,NMON), &
                  mon_sst(grd%nlat,NMON), mon_pr(grd%nlat,NMON), mon_cnt(NMON))
-        allocate(mon_t2m(grd%nlon,grd%nlat,NMON))
+        allocate(mon_t2m(grd%nlon,grd%nlat,NMON), mon_tlow(grd%nlon,grd%nlat,NMON)); mon_tlow = 0.0_wp
         allocate(mon_pr2d(grd%nlon,grd%nlat,NMON), mon_z500(grd%nlon,grd%nlat,NMON))
         mon_t = 0.0_wp; mon_u = 0.0_wp; mon_rh = 0.0_wp; mon_v = 0.0_wp
         mon_sst = 0.0_wp; mon_pr = 0.0_wp; mon_cnt = 0; mon_t2m = 0.0_wp
@@ -1160,7 +1164,12 @@ contains
             mon_swn(:,:,imon)   = mon_swn(:,:,imon)   + ts%rad%sw_net_sur
             mon_swup(:,:,imon)  = mon_swup(:,:,imon)  + ts%rad%sw_up_toa
         end if
-        mon_t2m(:,:,imon) = mon_t2m(:,:,imon) + now%temp_g(:,:,nlev)  ! full 2D near-surface T
+        mon_tlow(:,:,imon) = mon_tlow(:,:,imon) + now%temp_g(:,:,nlev)  ! lowest level (~350 m)
+        if (ts%surf%enabled) then
+            mon_t2m(:,:,imon) = mon_t2m(:,:,imon) + ts%surf%t2m          ! surface-layer 2 m T
+        else
+            mon_t2m(:,:,imon) = mon_t2m(:,:,imon) + now%temp_g(:,:,nlev)
+        end if
         mon_vlow(:,:,imon) = mon_vlow(:,:,imon) + sqrt(now%u(:,:,nlev)**2 + now%v(:,:,nlev)**2)
         if (allocated(ts%surf%evap)) then
             mon_evap(:,:,imon) = mon_evap(:,:,imon) + ts%surf%evap*86400.0_wp
@@ -1177,7 +1186,7 @@ contains
         real(wp), parameter :: MISS = -9999.0_wp
         real(wp), allocatable :: latout(:), lonout(:), levout(:), monout(:)
         real(wp), allocatable :: t_o(:,:,:), u_o(:,:,:), v_o(:,:,:), rh_o(:,:,:)
-        real(wp), allocatable :: sst_o(:,:), pr_o(:,:), t2m_o(:,:,:)
+        real(wp), allocatable :: sst_o(:,:), pr_o(:,:), t2m_o(:,:,:), tlow_o(:,:,:)
         real(wp), allocatable :: pr2d_o(:,:,:), z500_o(:,:,:), vlow_o(:,:,:), evap_o(:,:,:), shf_o(:,:,:)
         real(wp), allocatable :: cf_o(:,:,:), skin_o(:,:,:), lwd_o(:,:,:), olr_o(:,:,:), &
                                  olrcs_o(:,:,:), cover_o(:,:,:)
@@ -1191,7 +1200,7 @@ contains
         allocate(t_o(grd%nlat,nlev,NMON), u_o(grd%nlat,nlev,NMON), &
                  v_o(grd%nlat,nlev,NMON), rh_o(grd%nlat,nlev,NMON), &
                  sst_o(grd%nlat,NMON), pr_o(grd%nlat,NMON), &
-                 t2m_o(grd%nlon,grd%nlat,NMON), pr2d_o(grd%nlon,grd%nlat,NMON), &
+                 t2m_o(grd%nlon,grd%nlat,NMON), tlow_o(grd%nlon,grd%nlat,NMON), pr2d_o(grd%nlon,grd%nlat,NMON), &
                  z500_o(grd%nlon,grd%nlat,NMON), vlow_o(grd%nlon,grd%nlat,NMON), &
                  evap_o(grd%nlon,grd%nlat,NMON), shf_o(grd%nlon,grd%nlat,NMON))
         allocate(mr_o(grd%nlat,nlev,NMON), mrt_o(grd%nlat,nlev,NMON), mrq_o(grd%nlat,nlev,NMON))
@@ -1215,6 +1224,7 @@ contains
                 sst_o(:,m)  = mon_sst(:,m) /real(mon_cnt(m),wp)
                 pr_o(:,m)   = mon_pr(:,m)  /real(mon_cnt(m),wp)
                 t2m_o(:,:,m) = mon_t2m(:,:,m)/real(mon_cnt(m),wp)
+                tlow_o(:,:,m) = mon_tlow(:,:,m)/real(mon_cnt(m),wp)
                 pr2d_o(:,:,m) = mon_pr2d(:,:,m)/real(mon_cnt(m),wp)
                 z500_o(:,:,m) = mon_z500(:,:,m)/real(mon_cnt(m),wp)
                 vlow_o(:,:,m) = mon_vlow(:,:,m)/real(mon_cnt(m),wp)
@@ -1257,7 +1267,7 @@ contains
                 olr_o(:,:,m) = MISS; olrcs_o(:,:,m) = MISS; cover_o(:,:,m) = MISS
                 t_o(:,:,m) = MISS; u_o(:,:,m) = MISS; v_o(:,:,m) = MISS
                 rh_o(:,:,m) = MISS; sst_o(:,m) = MISS; pr_o(:,m) = MISS
-                t2m_o(:,:,m) = MISS; pr2d_o(:,:,m) = MISS; z500_o(:,:,m) = MISS
+                t2m_o(:,:,m) = MISS; tlow_o(:,:,m) = MISS; pr2d_o(:,:,m) = MISS; z500_o(:,:,m) = MISS
             end if
         end do
         call nc_create(fname)
@@ -1279,6 +1289,8 @@ contains
             units="mm/day", long_name="monthly zonal-mean precipitation")
         call nc_write(fname, "t2m", t2m_o, dim1="lon", dim2="lat", dim3="month", &
             units="K", long_name="monthly near-surface (lowest level) air temperature")
+        call nc_write(fname, "tlow", tlow_o, dim1="lon", dim2="lat", dim3="month", &
+            units="K", long_name="monthly lowest-level air temperature (~350 m)")
         call nc_write(fname, "precip2d", pr2d_o, dim1="lon", dim2="lat", dim3="month", &
             units="mm/day", long_name="monthly precipitation")
         call nc_write(fname, "z500", z500_o, dim1="lon", dim2="lat", dim3="month", &
@@ -1327,7 +1339,7 @@ contains
             units="W/m2", long_name="monthly reflected shortwave at TOA")
         write(*,"(a,i0,a,a)") " rce_long:: wrote monthly climatology (", &
             count(mon_cnt>0), " months populated) -> ", trim(fname)
-        deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o, &
+        deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o, tlow_o, &
                    pr2d_o, z500_o, vlow_o, evap_o, shf_o, cf_o, skin_o, lwd_o, olr_o, &
                    olrcs_o, cover_o, vt_o, vq_o, eke_o, vts_o, vqs_o, ekes_o, mr_o, mrt_o, mrq_o, mr2_o, swn_o, swup_o)
     end subroutine dump_monthly
@@ -1405,6 +1417,8 @@ contains
         ! Boundary-layer scheme (optional; inherits input/rce_defaults.nml).
         call nml_read(nmlfile, "rce", "vdiff_richardson", vdiff_richardson, &
                       defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "surf_ri_crit", surf_ri_crit, &
+                      defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "vdiff_ri_crit", vdiff_ri_crit, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "seed_asym", seed_asym)
@@ -1476,6 +1490,8 @@ contains
         call nml_read(nmlfile, "rce", "snow_albedo", snow_albedo, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "snow_dt", snow_dt, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "beta_frozen", beta_frozen, &
                       defaults_file="input/rce_defaults.nml")
         ! Restart knobs (feat/restart): optional (inherit input/rce_defaults.nml)
         ! so existing rce_*.nml files that omit them keep cold-starting, not erroring.

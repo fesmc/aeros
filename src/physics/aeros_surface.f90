@@ -114,6 +114,12 @@ module aeros_surface
         real(wp), allocatable :: shf(:,:)     ! sensible heat flux
         real(wp), allocatable :: lhf(:,:)     ! latent heat flux
         real(wp), allocatable :: evap(:,:)    ! evaporation
+        ! 2 m air temperature diagnosed from the surface-layer profile between
+        ! the skin and the lowest level (log law with the same stability
+        ! functions the fluxes use; neutral log law on the stable branch):
+        ! the honest counterpart of an observed 2 m temperature, where the
+        ! lowest level sits at ~350 m. Refreshed by aeros_surface_apply.
+        real(wp), allocatable :: t2m(:,:)
     end type aeros_surf_class
 
     public :: aeros_surface_init
@@ -154,6 +160,7 @@ contains
 
         surf%ch_v = 0.0_wp; surf%ce_v = 0.0_wp; surf%skin = 0.0_wp; surf%qs_skin = 0.0_wp
         allocate(surf%shf(grd%nlon, grd%nlat))
+        allocate(surf%t2m(grd%nlon, grd%nlat)); surf%t2m = 0.0_wp
         allocate(surf%lhf(grd%nlon, grd%nlat))
         allocate(surf%evap(grd%nlon, grd%nlat))
 
@@ -200,6 +207,7 @@ contains
         implicit none
         type(aeros_surf_class), intent(inout) :: surf
         if (allocated(surf%shf))  deallocate(surf%shf)
+        if (allocated(surf%t2m))  deallocate(surf%t2m)
         if (allocated(surf%cdrag)) deallocate(surf%cdrag)
 
         if (allocated(surf%ch_v))  deallocate(surf%ch_v)
@@ -249,7 +257,7 @@ contains
         logical,  intent(in), optional :: is_land(:,:)  ! (nlon,nlat) roughness selector
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: ps, t1, q1, wind, rho1, qs_s, dqs, beta
-        real(wp) :: z1, z0, cdb, chb, ri, ch, ce, tv1, tvs
+        real(wp) :: z1, z0, cdb, chb, ri, ch, ce, tv1, tvs, f2m
         logical  :: have_beta, have_land
         integer  :: i, j, ks
         if (.not. surf%enabled) return
@@ -257,7 +265,7 @@ contains
         have_land = present(is_land)
         ks = vg%nlev                              ! lowest (surface) layer
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,beta,z1,z0,cdb,chb,ri,ch,ce,tv1,tvs)
+        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,beta,z1,z0,cdb,chb,ri,ch,ce,tv1,tvs,f2m)
         do j = 1, surf%nlat
             do i = 1, surf%nlon
                 ps = exp(lnps_g(i,j))
@@ -285,7 +293,10 @@ contains
                 tvs = sst(i,j)*(1.0_wp + RV_OVER_RD_M1*(beta*qs_s + (1.0_wp - beta)*q1))
                 ri = real(grav,wp)*z1*(real(cp_d,wp)*(tv1 - tvs) + real(grav,wp)*z1) &
                      /(real(cp_d,wp)*tvs*wind*wind)
-                call bulk_coefficients(z1, z0, ri, surf%ri_crit, surf%cd_min, cdb, chb)
+                call bulk_coefficients(z1, z0, ri, surf%ri_crit, surf%cd_min, cdb, chb, f2m)
+                ! 2 m temperature: the potential-temperature profile scaled by f2m
+                surf%t2m(i,j) = sst(i,j) + (t1 + real(grav,wp)*z1/real(cp_d,wp) - sst(i,j))*f2m &
+                                - real(grav,wp)*2.0_wp/real(cp_d,wp)
                 ch = surf%c_h; if (ch <= 0.0_wp) ch = chb
                 ce = surf%c_e; if (ce <= 0.0_wp) ce = chb
                 surf%cdrag(i,j) = surf%c_d
@@ -300,7 +311,7 @@ contains
         return
     end subroutine aeros_surface_apply
 
-    pure subroutine bulk_coefficients(z1, z0, ri, ri_crit, cd_min, cd, ch)
+    pure subroutine bulk_coefficients(z1, z0, ri, ri_crit, cd_min, cd, ch, f2m)
         ! Surface-layer transfer coefficients for momentum (cd) and for heat and
         ! moisture (ch) at height z1 over roughness z0 from the bulk Richardson
         ! number ri of the layer (class header). Stable: Frierson (2006)'s
@@ -310,17 +321,22 @@ contains
         !   ri = zeta (ln(z1/z0) - psi_h(zeta)) / (ln(z1/z0) - psi_m(zeta))^2
         ! by fixed-point iteration (a contraction for the unstable branch; four
         ! sweeps converge to < 1 % in zeta). The same z0 serves momentum and
-        ! scalars. cd_min floors both.
+        ! scalars. cd_min floors both. f2m (optional) is the fraction of the
+        ! skin-to-level-1 potential-temperature difference reached at 2 m on
+        ! the same profile (neutral log law on the stable branch).
         implicit none
         real(wp), intent(in)  :: z1, z0, ri, ri_crit, cd_min
         real(wp), intent(out) :: cd, ch
-        real(wp) :: lnz, cneut, zeta, x, psim, psih
+        real(wp), intent(out), optional :: f2m
+        real(wp), parameter :: Z2M = 2.0_wp
+        real(wp) :: lnz, cneut, zeta, x, psim, psih, x2, psih2
         integer  :: it
         lnz   = log(z1/z0)
         cneut = (VON_KARMAN/lnz)**2
         if (ri >= 0.0_wp) then
             cd = max(cd_min, cneut*(1.0_wp - min(ri, ri_crit)/ri_crit)**2)
             ch = cd
+            if (present(f2m)) f2m = log(max(Z2M, z0*1.0001_wp)/z0)/lnz
         else
             zeta = ri*lnz
             do it = 1, 4
@@ -336,6 +352,11 @@ contains
             psih = 2.0_wp*log(0.5_wp*(1.0_wp + x*x))
             cd = max(cd_min, VON_KARMAN**2/(lnz - psim)**2)
             ch = max(cd_min, VON_KARMAN**2/((lnz - psim)*(lnz - psih)))
+            if (present(f2m)) then
+                x2    = (1.0_wp - 16.0_wp*zeta*Z2M/z1)**0.25_wp
+                psih2 = 2.0_wp*log(0.5_wp*(1.0_wp + x2*x2))
+                f2m   = (log(max(Z2M, z0*1.0001_wp)/z0) - psih2)/(lnz - psih)
+            end if
         end if
         return
     end subroutine bulk_coefficients
