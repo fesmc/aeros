@@ -56,7 +56,8 @@ for nm,ms in seas.items():
 if len(sys.argv)>2:
     Z=nc.Dataset(sys.argv[2]); latZ=Z["lat"][:]; o=np.argsort(latZ)
     print("\n== per-process heating [K/day], 2nd-half time mean, zonal mean (dump), plus omega [hPa/day]")
-    for v in ["q_cnv","q_cnd","q_rad","q_surf","q_net","omega","t","q","rh","pfull"]:
+    for v in ["q_cnv","q_cnd","q_rad","q_vdiff","q_net","q_vadv","q_dyn","omega","t","q","rh","pfull"]:
+        if v not in Z.variables: continue
         x=Z[v][:]; x = x if x.shape[0]==len(latZ) else x.T   # (lat,lev)
         x=x[o]; print(v); print("sigma   "+"".join(f"{b[0]:>11s}" for b in bands))
         for k in range(len(sig)):

@@ -1,6 +1,30 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION (written 2026-09-07): state, what changed, and what to do
+## ►► NEXT SESSION (written 2026-09-07, updated 2026-09-08): state, what changed, and what to do
+
+### Update 2026-09-08: deficit 0 (warm 300 hPa) half explained — two lid radiative effects
+
+Sensitivity runs (all 3 yr, `mwm/D_realearth/diag/`, `summary.sh`): the warm σ 0.365 band is robust
+to nlev (L12: +7–9 K at 200–310 hPa), ozone (1 K), `cond_rh_crit`, `conv_tau`, `conv_rh_ref` (0.45:
+W 25 → 21 mm, band unchanged), clouds, and the LW scheme (SESAM +9.3). Its budget (dump now carries
+`q_vadv`, `q_dyn`, `q_vdiff`) is a radiative–subsidence equilibrium: rad −1.14 K/day vs subsidence
++0.85, moist +0.5, eddies −0.2. The MMC is not the cause: Hadley ~half of ERA5, no Ferrel cell
+(`mmc_vs_era5.py`). Two lid effects are (each verified by a scratch test, then implemented):
+1. **Near-IR H2O absorption distributed on a pressure-scaled path** (bb6ac9c): the 2-exponential's
+   strong term was spent in the first ~1.6 kg/m² of vapour from the top (unscaled slant path) —
+   the lid in the tropics, ~350 hPa in the subtropics. Column totals unchanged (validate_era5
+   identical). Subtropical lid −4 K, σ 0.365 −1.3 K.
+2. **Lid cold trap** (b25f96e, `cond_lid_q_max = 1e-5` kg/kg in `&rce`, `lid_q_max` in
+   `aeros_moisture`): the top layer condenses whatever exceeds 0.01 g/kg (it held 10× ERA5's vapour
+   at its ~220 K layer-mean saturation and blanketed the layer below; σ 0.365 cooling −1.2 →
+   −1.5 K/day). Excess falls as precipitation; `test_condensation` check 5.
+Result (`docs/refs/realearth_metrics_2026-09-08_L6.md`): σ 0.365 at 30–45N +7.7 → +4.5 K, lid
++17 → +11, tropics +3.0; TOA −0.5 with the unchanged clouds (no re-balance needed), CRE −54/+19,
+P 3.2, W 24.7; jet 57 → 52 m/s, Z500* 85 m, t2m amplitude 32.7 (33.6). The remaining +4.5 / +3.0
+at σ 0.365 is unexplained: not moist physics, not the MMC, not the radiation scheme; candidates are
+the stratosphere/lid representation (polar lid −20 to −29 K, no Brewer–Dobson warming; the level-2
+subsidence warming uses the stability across the lid) and the eddy-driven circulation (missing Ferrel
+cell). 26/26 tests (`test_ecckd` SESAM guard loosened to 10 %, 4c173f8).
 
 ### Where the model is
 
@@ -81,9 +105,9 @@ reference, not the model.
 ### Known deficits, in the order to attack them (as of the evening; deficit 1 below is RESOLVED
 except for its 300 hPa part — see the evening update)
 
-0. **Warm σ 0.365 / cold 0.56–0.86 outside the tropics** (annual +7.7 at 30–45N over −3.5/−4.2 at
-   30–45S; tropics +3.6 at 0.365): the 360–560 hPa layer is too stable (dT/dlnp 33–38 vs ERA5
-   45–51). Static-stability structure; grew with the warming. Next.
+0. **Warm σ 0.365 outside the tropics** — half resolved 2026-09-08 (see the update above): now
+   +4.5 at 30–45N, +3.0 tropics, over −4 at 30–45S 0.56–0.73. Remaining candidates: lid /
+   stratosphere representation, eddy-driven circulation (no Ferrel cell).
 1. **~~Cold lower troposphere~~ / warm 300 hPa.** (Cold part resolved 2026-09-07 evening.) 700–850 hPa is 3–7 K cold at all latitudes and
    seasons, 300 hPa 5–8 K warm outside the tropics (annual, `docs/refs/..._2026-09-07_L6.md`).
    Not vertical resolution (L8/L12 identical at dt 1800), not the boundary layer, and only 1 K
