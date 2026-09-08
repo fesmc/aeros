@@ -114,6 +114,16 @@ module aeros_condensation
         ! adjustment. See the module header, "The time scale".
         real(wp) :: time_scale = 3.0_wp
 
+        ! Lid cold trap [kg kg-1]: the top layer's condensation threshold is
+        ! min(rh_crit*q_sat, lid_q_max). The top layer spans the upper
+        ! troposphere and the stratosphere (0-250 hPa at L6, 0-110 at L12) and
+        ! its layer-mean temperature (~220 K) saturates at ~0.5 g/kg, while the
+        ! water that actually passes the (unresolved) cold-point tropopause is
+        ! ~0.01 g/kg: the lid held 10x ERA5's vapour, blanketing the layer below
+        ! (350 hPa +2 K, 2026-09-08). The excess condenses out as precipitation
+        ! at the lid's latent heat (tiny); <= 0 disables the trap.
+        real(wp) :: lid_q_max = 1.0e-5_wp
+
         integer :: nlon = 0, nlat = 0
 
         ! Precipitation rate from the last apply, [kg m-2 s-1] = mm s-1 of
@@ -148,6 +158,7 @@ contains
         cnd%rh_crit = 0.95_wp
         cnd%reevap  = 30.0_wp
         cnd%time_scale = 3.0_wp
+        cnd%lid_q_max = 1.0e-5_wp
         cnd%nlon    = grd%nlon
         cnd%nlat    = grd%nlat
 
@@ -169,7 +180,7 @@ contains
         type(aeros_grid_class), intent(in)    :: grd
 
         logical  :: moist
-        real(wp) :: rh_crit, reevap, time_scale
+        real(wp) :: rh_crit, reevap, time_scale, lid_q_max
 
         moist      = .FALSE.
         rh_crit    = 0.95_wp
@@ -178,6 +189,9 @@ contains
         call nml_read(filename, "aeros_moisture", "moist",   moist, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "rh_crit", rh_crit, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "reevap",  reevap, defaults_file=defaults_file)
+        lid_q_max  = 1.0e-5_wp
+        call nml_read(filename, "aeros_moisture", "lid_q_max", lid_q_max, defaults_file=defaults_file)
+        cnd%lid_q_max = lid_q_max
         call nml_read(filename, "aeros_moisture", "cond_time_scale", time_scale, &
                       defaults_file=defaults_file)
 
@@ -298,6 +312,11 @@ contains
                         gam = hcp*dqsdt
                         dqc = dqc + (qv_g(i,j,k) - dqc - cnd%rh_crit*qs)/(1.0_wp + gam)
                     end do
+
+                    ! Lid cold trap (class header): the top layer also condenses
+                    ! whatever exceeds lid_q_max.
+                    if (k == 1 .and. cnd%lid_q_max > 0.0_wp) &
+                        dqc = max(dqc, qv_g(i,j,k) - cnd%lid_q_max)
 
                     ! Only condensation, and never more vapour than is present;
                     ! 1/time_scale of the adjustment per step ("The time scale").

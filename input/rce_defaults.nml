@@ -54,6 +54,11 @@
     ! Fraction 1/cond_time_scale of the saturation adjustment (and reevaporation)
     ! applied per step (SpeedyWeather ImplicitCondensation time_scale = 3).
     cond_time_scale  = 3.0
+    ! Lid cold trap: the top layer condenses whatever exceeds cond_lid_q_max
+    ! [kg/kg] (the water passing the unresolved cold-point tropopause, ~0.01
+    ! g/kg; the layer-mean saturation of the 0-250 hPa lid is ~0.5 g/kg and
+    ! held 10x ERA5's vapour, warming 350 hPa by 2 K). <= 0 disables it.
+    cond_lid_q_max   = 1.0e-5
     ! Land surface + land-sea mask (feat/land). l_land off = all-ocean
     ! aquaplanet, the bit-for-bit default. Files are ERA5 climatologies.
     l_land           = .false.

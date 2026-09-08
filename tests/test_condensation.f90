@@ -60,6 +60,7 @@ program test_condensation
     call aeros_vgrid_init(vg, nlev)
     call aeros_condensation_init(cnd, grd, .TRUE.)     ! enabled, rh_crit = 1
     cnd%time_scale = 1.0_wp    ! exact one-step adjustment: the budget checks below are equalities
+    cnd%lid_q_max  = 0.0_wp    ! lid cold trap off for the saturation tests; test_lid_trap turns it on
 
     nlon = grd%nlon; nlat = grd%nlat
 
@@ -75,6 +76,7 @@ program test_condensation
     call test_subsaturated_untouched(nfail)
     call test_budgets(nfail)
     call test_reevaporation(nfail)
+    call test_lid_trap(nfail)
 
     call aeros_condensation_end(cnd)
     call aeros_vgrid_end(vg)
@@ -323,6 +325,36 @@ contains
         call check(minval(qv) >= 0.0_wp, "q stays non-negative", nfail)
         return
     end subroutine test_reevaporation
+
+    ! === 5. Lid cold trap: the top layer is dried to lid_q_max, nothing else ==
+    subroutine test_lid_trap(nfail)
+        implicit none
+        integer, intent(inout) :: nfail
+        real(wp) :: dq_below, dpr, reevap0
+
+        write(*,*) ""
+        write(*,*) " -- lid cold trap: subsaturated column, top layer above lid_q_max"
+
+        call set_temperature(t_g)
+        qv  = 1.0e-4_wp
+        qv0 = qv
+        dt_phys = 0.0_wp
+        cnd%lid_q_max = 1.0e-5_wp
+        reevap0 = cnd%reevap; cnd%reevap = 0.0_wp   ! no re-evaporation of the lid's rain below
+        call aeros_condensation_apply(cnd, vg, t_g, qv, lnps, dt_phys, 1800.0_wp)
+        cnd%lid_q_max = 0.0_wp; cnd%reevap = reevap0
+
+        dq_below = maxval(abs(qv(:,:,2:nlev) - qv0(:,:,2:nlev)))
+        dpr = minval(cnd%precip)
+        write(*,"(a40,es12.3)") "   top-layer q after the step     ", maxval(qv(:,:,1))
+        write(*,"(a40,es12.3)") "   max |dq| below the lid          ", dq_below
+        write(*,"(a40,es12.3)") "   min precip                     ", dpr
+        call check(maxval(abs(qv(:,:,1) - 1.0e-5_wp)) < 1.0e-12_wp, "top layer dried to lid_q_max", nfail)
+        call check(dq_below == 0.0_wp, "layers below the lid untouched", nfail)
+        call check(dpr > 0.0_wp .and. minval(dt_phys(:,:,1)) > 0.0_wp, &
+                    "the excess falls as precipitation and heats the lid", nfail)
+        return
+    end subroutine test_lid_trap
 
     subroutine check(ok, label, nfail)
         implicit none
