@@ -1,6 +1,88 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION (written 2026-09-07, updated 2026-09-08): state, what changed, and what to do
+## ►► NEXT SESSION (written 2026-09-08 end): state, what changed, and what to do
+
+### Where the model is
+
+All on `main` through **11ddd15**, 27/27 tests (`test_bd` is new). Real-Earth T21L6, dt 3600,
+~2700 SYPD (95–105 s per 3-yr run). The harness namelist `mwm/D_realearth/aeros_realearth_T21L6.nml`
+is unchanged; every knob that moved is a default in `input/rce_defaults.nml`. Climatology:
+`docs/refs/realearth_metrics_2026-09-08_L6_ice.md` (the chain of the day: `..._2026-09-07_L6_surface`,
+`..._2026-09-08_L6`, `..._L6_bd`, `..._L6_land`, `..._L6_ice`). Figures `docs/figures/realearth_*.png`.
+
+Year-3 means vs ERA5: TOA +0.2 · OLR 236 (242) · clear-sky OLR 258 (264) · CRE −55/+22 (−46/+22) ·
+cover 0.50 (0.63) · P = E 2.95 (2.9) · LH 86 (84; ocean 102/land 47 vs 101/41) · SH 16 (17) · column
+water 24.9 mm (24.5) · max [u] 31.1 m/s (33.7) · [u] 200 hPa 29.1 (31.3) · DJF Z500* 73 m (76) ·
+NH-land 2 m amplitude 34.5–35.5 (33.6) · troposphere within ±3.5 K everywhere except σ 0.365 in the
+tropics/subtropics (+2.5 to +3) and 30–45S at 0.56–0.73 (−3.7); winter cap DJF RH 73–86 % (68–84),
+69N DJF −0.4 to −3.5 K; lid within 2–3 K of the ERA5 10–257 hPa layer mean everywhere.
+
+### What changed 2026-09-07 (evening) → 2026-09-08 (chronological; detail in the update blocks below)
+
+1. **Surface exchange** (6b8b55a): bulk Richardson number from the true skin→level-1 virtual
+   static-energy jump; Ri < 0 → Monin-Obukhov (Businger-Dyer). Tropical ocean C 7e-4 → 1.1e-3.
+   The 3–4 K cold troposphere (deficit 1) was this: the SBM's sub-cloud enthalpy shift pulls ~2 K/day
+   from the lowest layer and the neutral 360 m log law made the boundary layer 2.4 K / 1.4 g/kg too
+   cold/dry to supply it. Column water 20.6 → 24.5 mm.
+2. **Clouds re-balanced** (a2a66d7): `cld_rhc_top` 1.03 (high cloud back below the lid), `cld_lwc`.
+3. **`test_ecckd`** SESAM SW guard 3 → 10 % (4c173f8; the near-IR re-anchoring, not the model).
+4. **Near-IR H2O absorption distributed on a pressure-scaled path** (bb6ac9c; totals unchanged).
+5. **Lid cold trap** (b25f96e, `cond_lid_q_max` 1e-5): the lid held 10× ERA5's vapour.
+6. **Prescribed lid Brewer–Dobson circulation** (035ec69, `aeros_bd`, `input/bd_wstar_era5.nc`,
+   keys `bd_file/bd_scale/bd_per_K/bd_t_ref/bd_tau_mean_days`): the missing adiabatic term −w* S_ref on
+   the top layer; the lid's radiation stays interactive. Jet 52 → 31–33 m/s, warm 300 hPa band
+   +7.7 → +2.3. Design notes in its header and the 08 evening block (own-stability feedback,
+   nonlocal soft response, ×0.85 calibration). **For non-present climates set `bd_per_K`
+   (+0.02–0.03) and `bd_t_ref` (control run's global-mean lowest-level T, 285.6 K here) explicitly.**
+7. **Land winter** (2c7d59d): `surf_ri_crit` 1 (Frierson), `beta_frozen` 0.1 (frozen-ground
+   evaporation); monthly **`t2m` is a real 2 m diagnostic** now (`aeros_surface%t2m`; `tlow` = lowest
+   level); the harness amplitude metric is honest. SpeedyWeather's t2m is still its lowest level.
+8. **Ice-phase thresholds** (11ddd15): `cond_rh_crit_ice` 0.80, `cld_rhc_ice` 0.60, `cld_lwc`
+   0.034e-3 — the winter cap (deficit 2) at ERA5's humidity.
+
+### Known deficits, in the order to attack them
+
+1. **Summer NH land +3.2 K at 2 m** (July): SW net at the surface 217 vs ERA5 196 (cover over land
+   0.47 vs 0.57), LH 93 vs 73 W/m², skin 293.9 vs 291.5. Not a soil/albedo knob (seasonal ERA5
+   albedo is in): the summer continental cloud and the bucket's evaporation. `diag/land_budget.py`,
+   `land_cycle.py` give the monthly budget. The amplitude is now slightly LARGE (34.5–35.5 vs 33.6),
+   so fixing July also fixes that.
+2. **Tropical upper troposphere**: RH 66 % at σ 0.365 vs 37 (set by the SBM reference `conv_rh_ref`
+   0.6; 0.45 dried the column to 21 mm without moving T) and +2.5–3 K at σ 0.365 (a free-run lid
+   property the relaxation test pinned; not w*). Also 30–45S −3.7 at 0.56–0.73.
+3. **Cloud cover 0.50 vs 0.63 and clear-sky OLR 258 vs 264** (OLR 236 vs 242): the diagnostic scheme
+   trades cover for optical depth; the clear-sky gap is the remaining T/q structure.
+4. **Mean meridional circulation**: Hadley ~half of ERA5, no Ferrel cell (`diag/mmc_vs_era5.py`);
+   the annual polar ascent is a summer feature. Untouched.
+5. **Consistent FV mass flux** (r 0.4 %/step) — when the transport is next touched.
+6. **Stratosphere**: a resolved one (levels above 100 hPa, higher top, gravity-wave drag) is the
+   only route to an emergent Brewer–Dobson response; `aeros_bd` is the fast-model stand-in.
+
+### Tools that exist now (all in `mwm/D_realearth/diag/`, untracked run files there are disposable)
+
+- `tbias_vs_era5.py monthly.nc [zonal_dump.nc]` — zonal T/RH/q bias on the sigma levels, lapse
+  rates, and (with the `l_diag` dump) the per-process heating incl. `q_vadv`, `q_dyn`, `q_vdiff`, `q_bd`.
+- `summary.sh run1 run2 …` — one line per run (TOA, OLR, CRE, cover, P, W, LH, tropical bias).
+- `land_cycle.py`, `land_budget.py` — NH 40–70N land monthly cycle and surface budget vs ERA5.
+- `lidtab.py run …` — lid T vs the ERA5 10–257 hPa layer mean (`lid_target_era5.txt`) and the jet.
+- `wind_vs_era5.py`, `flux_split.py`, `mmc_vs_era5.py`.
+- Run pattern: copy the harness namelist, change `monthly_out`, add `&rce` overrides after `c_soil`
+  (keys already present in the harness file — `cond_rh_crit`, `conv_tau` — must be REPLACED, the
+  first occurrence wins). Under zsh, word-split loop variables explicitly.
+- A stale-module build error ("Mismatch in components of derived type") after adding a field to a
+  class needs `make clean` first.
+
+### First actions next session
+
+1. Deficit 1 (summer land): budget the July land column (cloud cover over land, LH), then the
+   cloud/evaporation lever; re-check the amplitude.
+2. Deficit 2: the tropical UT humidity/temperature together (the SBM reference and the lid).
+3. Keep `bd_per_K` in mind for any non-present-day experiment.
+
+---
+
+## Log 2026-09-07/08 — the day's update blocks (superseded above where they disagree)
+
 
 ### Update 2026-09-08: deficit 0 (warm 300 hPa) half explained — two lid radiative effects
 
