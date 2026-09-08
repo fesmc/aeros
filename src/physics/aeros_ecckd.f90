@@ -74,7 +74,8 @@ module aeros_ecckd
     !     0.28/0.72, 6.27/0.033 gives 78 W/m2 (bands within 5 of ERA5: the
     !     residual tilt, tropics +5 / poles -4, is not water vapour), surface
     !     down SW 241.5 (242.3), TOA net -2.5. No atmospheric scattering
-    !     (near-IR Rayleigh negligible).
+    !     (near-IR Rayleigh negligible). The layer heating is distributed on a
+    !     pressure-scaled path (2026-09-08; see the distribution block).
     !   - visible+UV band: SESAM's Rayleigh single-reflection scattering reused
     !     as-is, but the constant ozone transmission SW_C_ITF_O is replaced by a
     !     3-g-point ozone k-distribution (strong Hartley/Huggins UV, weak Chappuis,
@@ -442,6 +443,7 @@ contains
         real(wp), intent(out) :: sw_up_toa, sw_dw_sur, sw_net_sur
 
         real(wp) :: cosz, icos, uwv_cum(0:nlev), uo3_col, fdw_ir(0:nlev)
+        real(wp) :: uwv_ps(0:nlev), pcum_ps(0:nlev)   ! pressure-scaled path, cumulative p
         real(wp) :: cvis_o3, itf_ir_full, m_col, m_d1
         real(wp) :: alb_vu, alb_ir_p, alb_p, itf_atm_vu, itf_atm_ir
         real(wp) :: a_atm, a_o3, a_w, w(nlev), wo3(nlev), wsum, wo3sum, m
@@ -456,7 +458,7 @@ contains
         icos = 1.0_wp/cosz + 1.0_wp/SW_COSZ_O
 
         ! cumulative water-vapour path from TOA [g cm-2]
-        uwv_cum(0) = 0.0_wp
+        uwv_cum(0) = 0.0_wp; uwv_ps(0) = 0.0_wp; pcum_ps(0) = 0.0_wp
         do k = 1, nlev
             uwv_cum(k) = uwv_cum(k-1) + 0.1_wp*q(k)*dp_lev(k)/grav
         end do
@@ -499,8 +501,23 @@ contains
         end if
         a_w = a_atm - a_o3
 
+        ! Vertical distribution of the water-vapour absorption: the drop of the
+        ! band transmission across each layer, evaluated on the PRESSURE-SCALED
+        ! slant path u_ps = int q (p/p0) dp/g (Lacis & Hansen 1974's effective
+        ! path; p0 = 1000 hPa). The 2-exponential is a broadband fit to the
+        ! surface-pressure absorption; on the unscaled path its strong term
+        ! (e-folding ~1.6 kg m-2 of vapour) was spent in the first layer holding
+        ! that much water -- the lid in the tropics, ~350 hPa in the subtropics,
+        ! where the lines are 3-7x weaker -- and warmed the upper troposphere
+        ! (2026-09-08: -4 K on the subtropical lid, -1.3 K at 350 hPa). The
+        ! column totals above (TOA, surface) keep the anchored unscaled path.
+        do k = 1, nlev
+            uwv_ps(k) = uwv_ps(k-1) + 0.1_wp*q(k)*dp_lev(k)/grav &
+                        *((pcum_ps(k-1) + 0.5_wp*dp_lev(k))/1.0e5_wp)
+            pcum_ps(k) = pcum_ps(k-1) + dp_lev(k)
+        end do
         do i = 0, nlev
-            fdw_ir(i) = itf_w_ir(uwv_cum(i)/cosz)
+            fdw_ir(i) = itf_w_ir(uwv_ps(i)/cosz)
         end do
         wsum = 0.0_wp
         do k = 1, nlev
