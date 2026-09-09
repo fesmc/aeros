@@ -82,6 +82,14 @@ module aeros_surface
         real(wp) :: z0_ocean = 1.0e-4_wp   ! roughness length over sea [m]
         real(wp) :: z0_land  = 0.5_wp      ! roughness length over land [m]
         real(wp) :: ri_crit  = 10.0_wp     ! critical bulk Richardson number
+        ! Surface (canopy) resistance to evaporation over land [s m-1], in
+        ! series with the aerodynamic resistance 1/(C_E |U|), as CLIMBER-X's
+        ! r_s = 1/(1.6 g_can) (ebal_veg: f_le = L rho beta/(r_a + r_s)); the
+        ! sensible heat sees r_a alone. A constant stand-in for the canopy
+        ! conductance (CLIMBER-X: photosynthesis-driven, 40-120 s/m for a
+        ! daytime canopy); the bucket beta keeps the soil-moisture limit.
+        ! 0 = off (bit-unchanged: potential evaporation over a wet bucket).
+        real(wp) :: r_s_land = 0.0_wp
         real(wp) :: cd_min   = 1.0e-5_wp   ! floor of the diagnosed coefficient
         ! Surface wind the fluxes see (SpeedyWeather's SurfaceCondition):
         !   |V_0| = sqrt( (wind_slowdown |V_1|)^2 + gust_speed^2 )
@@ -179,11 +187,12 @@ contains
         type(aeros_grid_class), intent(in)    :: grd
 
         logical  :: enabled
-        real(wp) :: c_h, c_e, gust, slow, c_d, z0o, z0l, ric
+        real(wp) :: c_h, c_e, gust, slow, c_d, z0o, z0l, ric, rsl
 
         enabled = surf%enabled
         c_h = surf%c_h; c_e = surf%c_e; gust = surf%gust_speed; slow = surf%wind_slowdown
         c_d = surf%c_d; z0o = surf%z0_ocean; z0l = surf%z0_land; ric = surf%ri_crit
+        rsl = surf%r_s_land
 
         call nml_read(filename, "surface", "enabled", enabled, defaults_file=defaults_file)
         call nml_read(filename, "surface", "c_h",     c_h, defaults_file=defaults_file)
@@ -194,9 +203,11 @@ contains
         call nml_read(filename, "surface", "z0_ocean", z0o, defaults_file=defaults_file)
         call nml_read(filename, "surface", "z0_land",  z0l, defaults_file=defaults_file)
         call nml_read(filename, "surface", "ri_crit",  ric, defaults_file=defaults_file)
+        call nml_read(filename, "surface", "r_s_land", rsl, defaults_file=defaults_file)
 
         surf%c_h = c_h; surf%c_e = c_e; surf%gust_speed = gust; surf%wind_slowdown = slow
         surf%c_d = c_d; surf%z0_ocean = z0o; surf%z0_land = z0l; surf%ri_crit = ric
+        surf%r_s_land = rsl
 
         call aeros_surface_init(surf, grd, enabled)
 
@@ -257,7 +268,7 @@ contains
         logical,  intent(in), optional :: is_land(:,:)  ! (nlon,nlat) roughness selector
         real(wp) :: phalf(0:vg%nlev), pfull(vg%nlev), dpc(vg%nlev)
         real(wp) :: ps, t1, q1, wind, rho1, qs_s, dqs, beta
-        real(wp) :: z1, z0, cdb, chb, ri, ch, ce, tv1, tvs, f2m
+        real(wp) :: z1, z0, cdb, chb, ri, ch, ce, tv1, tvs, f2m, rs
         logical  :: have_beta, have_land
         integer  :: i, j, ks
         if (.not. surf%enabled) return
@@ -265,7 +276,7 @@ contains
         have_land = present(is_land)
         ks = vg%nlev                              ! lowest (surface) layer
         !$omp parallel do collapse(2) schedule(static) &
-        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,beta,z1,z0,cdb,chb,ri,ch,ce,tv1,tvs,f2m)
+        !$omp   private(i,j,phalf,pfull,dpc,ps,t1,q1,wind,rho1,qs_s,dqs,beta,z1,z0,cdb,chb,ri,ch,ce,tv1,tvs,f2m,rs)
         do j = 1, surf%nlat
             do i = 1, surf%nlon
                 ps = exp(lnps_g(i,j))
@@ -302,7 +313,13 @@ contains
                 surf%cdrag(i,j) = surf%c_d
                 if (surf%c_d < 0.0_wp) surf%cdrag(i,j) = cdb
                 surf%ch_v(i,j)    = rho1*ch*wind
-                surf%ce_v(i,j)    = beta*rho1*ce*wind
+                ! Land: the surface resistance in series with r_a = 1/(ce wind)
+                ! (CLIMBER-X f_le); the conductance ce wind/(1 + r_s ce wind).
+                rs = 0.0_wp
+                if (have_land) then
+                    if (is_land(i,j)) rs = surf%r_s_land
+                end if
+                surf%ce_v(i,j)    = beta*rho1*ce*wind/(1.0_wp + rs*ce*wind)
                 surf%skin(i,j)    = sst(i,j)
                 surf%qs_skin(i,j) = qs_s
             end do
@@ -383,6 +400,7 @@ contains
             "  (<= 0: bulk-Richardson log-law)"
         write(io_unit, '(a,es10.2,a,es10.2,a,f5.1)') "    z0 ocean/land = ", surf%z0_ocean, " / ", &
             surf%z0_land, "  Ri_c = ", surf%ri_crit
+        write(io_unit, '(a,f6.1,a)') "    r_s_land = ", surf%r_s_land, " s/m (surface resistance to evaporation)"
         write(io_unit, '(a,f6.2,a,f5.2)') "    gust_speed / wind_slowdown = ", surf%gust_speed, " / ", surf%wind_slowdown
         return
     end subroutine aeros_surface_report

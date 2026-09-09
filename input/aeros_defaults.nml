@@ -251,6 +251,7 @@
     z0_ocean = 1.0e-4
     z0_land  = 0.5
     ri_crit  = 10.0
+    r_s_land = 0.0        ! land surface resistance to evaporation [s/m]; 0 = off
     gust_speed    = 5.0
     wind_slowdown = 0.95
     ! Momentum drag coefficient. Bulk stress tau = rho c_d |u| u, imposed

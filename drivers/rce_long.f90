@@ -114,6 +114,7 @@ program rce_long
     logical  :: vdiff_richardson = .TRUE.    ! Ri-diagnosed BL depth (else fixed)
     real(wp) :: vdiff_ri_crit = 10.0_wp      ! critical bulk Richardson number
     real(wp) :: surf_ri_crit  = 10.0_wp      ! surface-layer critical bulk Richardson number (Frierson: 1)
+    real(wp) :: surf_r_s_land = 0.0_wp       ! land surface resistance to evaporation [s/m]
     ! Model-top sponge knobs (defaults match aeros_timestep_class). Exposed to
     ! test the top thermal-wind blow-up: a stronger/deeper sponge that delays or
     ! removes it confirms the terminal event is model-top dynamical.
@@ -427,6 +428,7 @@ program rce_long
     ts%vd%richardson = vdiff_richardson
     ts%vd%ri_crit    = vdiff_ri_crit
     ts%surf%ri_crit  = surf_ri_crit
+    ts%surf%r_s_land = surf_r_s_land
     ts%rad%albedo   = albedo
     ts%rad%co2_ppm  = co2_ppm
     ts%rad%interval = rad_interval
@@ -1439,6 +1441,8 @@ contains
         call nml_read(nmlfile, "rce", "vdiff_richardson", vdiff_richardson, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "surf_ri_crit", surf_ri_crit, &
+                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "surf_r_s_land", surf_r_s_land, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "vdiff_ri_crit", vdiff_ri_crit, &
                       defaults_file="input/rce_defaults.nml")

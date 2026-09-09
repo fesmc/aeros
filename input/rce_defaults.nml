@@ -53,6 +53,11 @@
     ! 1 since 2026-09-08: with 10 the winter NH land took 25 W/m2 of downward
     ! sensible heat (ERA5 8) through the 360 m log law over z0 = 0.5 m.
     surf_ri_crit     = 1.0
+    ! Land surface (canopy) resistance to evaporation [s/m], in series with the
+    ! aerodynamic resistance (CLIMBER-X r_s = 1/(1.6 g_can); ebal_veg f_le).
+    ! 0 = off. Set 2026-09-09 against the ERA5 April-June 40-70N land
+    ! evaporation (see hand-off).
+    surf_r_s_land    = 100.0
     ! Reevaporation efficiency of falling large-scale precip into sub-saturated
     ! layers (SpeedyWeather's ImplicitCondensation reevaporation; 0 disables it).
     cond_reevap      = 30.0

@@ -114,6 +114,15 @@ deficit is airmass-scaled and vapour-independent (tau ~0.019/airmass over the cl
    Europe clear-sky dn +18.0 -> +17.1. Coupled (SO4): TOA -0.21, July land SW net 222 -> 217,
    2 m July 293.9 -> 292.8, amplitude 34.6.
 
+3. **Land surface resistance** (`surf_r_s_land = 100` s/m, `&surface r_s_land`; aeros_surface):
+   CLIMBER-X's r_s = 1/(1.6 g_can) in series with r_a for the moisture flux only
+   (ebal_veg f_le = L rho beta/(r_a + r_s)); ce_v = beta rho ce U/(1 + r_s ce U) over land.
+   Sweep RS50/100/200: 100 puts April-June 40-70N land E (1.0/1.7/2.3 vs ERA5 1.0/1.65/2.4)
+   and P (1.4/1.8/2.3 vs 1.5/1.9/2.3 mm/day) on ERA5, global P 3.04 -> 2.86 (2.9), LH 88 -> 83
+   (84), TOA -0.13. Cost until the radiation is fixed: July land SH 78 (40), 2 m +3.3 K,
+   cover 0.39 (0.57), Jul-Aug land P 2.0/1.7 (2.5/2.4: the recycled half is gone). The land
+   energy residual is now radiative only: SW net +29, LW down +3.
+
 **Still open for deficit 1:** the NH continental clear-sky excess (+10 annual, ~+20 in
 summer at 40-70N land) is ERA5's Tegen aerosol (dust + carbonaceous), beyond the sulfate
 term; CLIMBER-X's remaining routes are the dust optical thickness (`fake_dust_*` deposition x
