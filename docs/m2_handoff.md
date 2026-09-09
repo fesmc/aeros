@@ -4,7 +4,10 @@
 
 ### Where the model is
 
-All on `main` through **11ddd15**, 27/27 tests (`test_bd` is new). Real-Earth T21L6, dt 3600,
+All on `main` through the 2026-09-09 aerosol/land commits (see the 2026-09-09 update block
+below: background aerosol ac75600, sulfate 9186c70, r_s_land 4edcfd0, dust e89a263, indirect
+effect + `cld_lwc 0.032e-3`; climatology `docs/refs/realearth_metrics_2026-09-09_L6_aerosol.md`;
+27/27 tests). The paragraph that follows describes the 11ddd15 state it was built on. Real-Earth T21L6, dt 3600,
 ~2700 SYPD (95–105 s per 3-yr run). The harness namelist `mwm/D_realearth/aeros_realearth_T21L6.nml`
 is unchanged; every knob that moved is a default in `input/rce_defaults.nml`. Climatology:
 `docs/refs/realearth_metrics_2026-09-08_L6_ice.md` (the chain of the day: `..._2026-09-07_L6_surface`,
@@ -134,6 +137,12 @@ deficit is airmass-scaled and vapour-independent (tau ~0.019/airmass over the cl
    layer (July 2 m +1.5 K, TOA +0.6); 0.3 / 0.01 closes the Sahara offline (surface SW -7,
    TOA +0.6), E Asia +15 -> +11, Europe/Siberia unchanged (not dust). Coupled (DUST3): neutral
    -- TOA -0.11, P 2.85, NH land within noise of RS100.
+
+5. **Sulfate indirect effect** (`so4_indirect`, CLIMBER-X `l_so4_ie`): liquid cloud water x
+   f_mod^(1/3) from the sulfate number at cloud base (clouds.f90 constants, in
+   `aeros_sw_so4_cloud_factor`), SW and LW both, in the coupled apply loop and validate_era5
+   (arg 13). Offline SW CRE −0.3 global (E Asia −4); coupled TOA −1.4 → **`cld_lwc 0.032e-3`**
+   (TOA +0.08). Land unchanged. Climatology `docs/refs/realearth_metrics_2026-09-09_L6_aerosol.md`.
 
 **Still open for deficit 1:** the NH continental clear-sky excess (+10 annual, ~+20 in
 summer at 40-70N land) is ERA5's Tegen aerosol (dust + carbonaceous), beyond the sulfate

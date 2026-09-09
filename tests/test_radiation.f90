@@ -37,7 +37,7 @@ program test_radiation
     use aeros_vertical
     use aeros_condensation, only : aeros_qsat
     use aeros_defs,         only : S0, pi
-    use aeros_sw_aerosol, only : aeros_sw_aerosol_configure
+    use aeros_sw_aerosol, only : aeros_sw_aerosol_configure, aeros_sw_so4_cloud_factor
     use aeros_radiation,    only : aeros_lw_clearsky_column, &
                                    aeros_lw_cloudy_column, &
                                    aeros_sw_clearsky_column, aeros_sw_cloudy_column, &
@@ -391,6 +391,11 @@ contains
             call aeros_sw_clearsky_column(nlev, q, o3, .FALSE., dp_lev, swdn, cz, &
                                           0.06_wp, 0.06_wp, heat_0, up_0, dw_0, net_0, so4=0.0_wp)
             call check(dw_0 == sw_dw .and. up_0 == sw_up, "so4 = 0 is bit-identical", nfail)
+            write(*,"(a,2f8.4)") "   so4 cloud factor at 0 / 1e-5 kg/m2 ", aeros_sw_so4_cloud_factor(0.0_wp), &
+                aeros_sw_so4_cloud_factor(1.0e-5_wp)
+            call check(aeros_sw_so4_cloud_factor(0.0_wp) == 1.0_wp, "indirect effect is exactly 1 at so4 = 0", nfail)
+            call check(aeros_sw_so4_cloud_factor(1.0e-5_wp) > 1.05_wp .and. aeros_sw_so4_cloud_factor(1.0e-5_wp) < 2.0_wp, &
+                       "indirect effect thickens polluted cloud by a plausible factor", nfail)
         end block
         return
     end subroutine test_shortwave

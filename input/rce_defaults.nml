@@ -151,7 +151,9 @@
     ! since 2026-09-08 with cond_rh_crit_ice 0.80 (ice cloud below water
     ! saturation; 0.40 gave LW CRE +33, 0.70 +14; ERA5 +22).
     cld_rhc_ice      = 0.60
-    cld_lwc          = 0.034e-3
+    ! 0.034e-3 -> 0.032e-3 (2026-09-09): the sulfate indirect effect thickens the
+    ! liquid cloud (TOA -1.4 W/m2 at 0.034e-3); re-balanced to TOA +0.1.
+    cld_lwc          = 0.032e-3
     cld_iwc          = 0.014e-3
     ! Background aerosol in the clear-sky SW (aeros_sw_aerosol: the SESAM
     ! aerosol branch, CLIMBER-X ars_ot/ars_im): uniform, constant optical
@@ -171,6 +173,9 @@
     so4_file         = "/Users/alrobi001/models/climber-x/input/so4_historical_CMIP6_ensmean_ann_5x5.nc"
     so4_year         = 2003
     so4_const        = 0.0
+    ! Sulfate indirect effect (CLIMBER-X l_so4_ie): liquid cloud water x
+    ! f_mod^(1/3) from the sulfate number at cloud base (clouds.f90 constants).
+    so4_indirect     = .true.
     ! Dust optical thickness maps (monthly, 5x5) added to the background aerosol:
     ! scripts/dust_ot_from_deposition.py on CLIMBER-X's fake_dust_* deposition
     ! (Lambert et al. 2015 present day here; the _lgm file for the LGM),

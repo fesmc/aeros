@@ -85,6 +85,7 @@ module aeros_radiation
                                aeros_ecckd_sw_cloudy_column
     use aeros_sw_aerosol, only : aeros_sw_aerosol_configure, aeros_sw_aerosol_scat, &
                                aeros_sw_aerosol_itf, aeros_sw_so4_albedo, aeros_sw_aerosol_mix, &
+                               aeros_sw_so4_cloud_factor, &
                                SW_AER_OT, SW_AER_IM
     use aeros_bcinput,  only : aeros_bcinput_read_field
     use nml,            only : nml_read
@@ -228,6 +229,7 @@ module aeros_radiation
         character(len=512) :: so4_file = ""
         integer  :: so4_year  = 2000
         real(wp) :: so4_const = 0.0_wp
+        logical  :: so4_indirect = .TRUE.    ! sulfate indirect effect on the liquid cloud water (CLIMBER-X l_so4_ie)
         real(wp), allocatable :: so4_map(:,:)
         ! Dust optical thickness, added to the background aerosol per column:
         ! monthly (lon,lat,12) maps from `dust_file` (scripts/dust_ot_from_
@@ -351,7 +353,7 @@ contains
         real(wp) :: co2_ppm, albedo, tsi, interval, doy0, aer_ot, aer_im, so4_const, dust_scale, dust_im
         character(len=512) :: dust_file
         real(dp) :: time_bp
-        logical  :: l_o3, clouds
+        logical  :: l_o3, clouds, so4_indirect
         integer  :: so4_year
         character(len=512) :: so4_file
 
@@ -360,6 +362,7 @@ contains
         so4_file  = rad%so4_file
         so4_year  = rad%so4_year
         so4_const = rad%so4_const
+        so4_indirect = rad%so4_indirect
         dust_file  = rad%dust_file
         dust_scale = rad%dust_scale
         dust_im    = rad%dust_im
@@ -386,6 +389,7 @@ contains
         call nml_read(filename, "radiation", "so4_file", so4_file, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "so4_year", so4_year, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "so4_const", so4_const, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "so4_indirect", so4_indirect, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "dust_file", dust_file, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "dust_scale", dust_scale, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "dust_im",   dust_im, defaults_file=defaults_file)
@@ -406,6 +410,7 @@ contains
         rad%so4_file  = so4_file
         rad%so4_year  = so4_year
         rad%so4_const = so4_const
+        rad%so4_indirect = so4_indirect
         rad%dust_file  = dust_file
         rad%dust_scale = dust_scale
         rad%dust_im    = dust_im
@@ -1335,6 +1340,8 @@ contains
                             call aeros_cloud_diagnose(nlev, t_g(i,j,:), qv_g(i,j,:), &
                                 pfull, exp(lnps_g(i,j)), cf, clwc, ciwc)
                         end if
+                        ! Sulfate indirect effect on the liquid water (CLIMBER-X l_so4_ie)
+                        if (rad%so4_indirect) clwc = clwc*aeros_sw_so4_cloud_factor(so4v)
 
                         ! All-sky: dispatch on the scheme selector (opt-in ecCKD
                         ! folds the same grey cloud optics into its g-points).
@@ -1424,6 +1431,7 @@ contains
         else
             write(io_unit, '(a,es10.3)') "    so4 const = ", rad%so4_const
         end if
+        write(io_unit, '(a,l1)') "    so4 indirect effect = ", rad%so4_indirect
         if (allocated(rad%dust_ot)) write(io_unit, '(a,f6.3,a)') "    dust ot map (annual mean ", &
             sum(rad%dust_clim)/real(size(rad%dust_clim),wp), ")"
         write(io_unit, '(a,l1)')     "    clouds   = ", rad%clouds

@@ -39,7 +39,8 @@ program validate_era5
                                 aeros_ecckd_sw_cloudy_column, &
                                 aeros_ecckd_sw_configure
     use aeros_cloud,     only : aeros_cloud_diagnose
-    use aeros_sw_aerosol, only : aeros_sw_aerosol_configure, aeros_sw_aerosol_mix, SW_AER_OT, SW_AER_IM
+    use aeros_sw_aerosol, only : aeros_sw_aerosol_configure, aeros_sw_aerosol_mix, &
+                                 aeros_sw_so4_cloud_factor, SW_AER_OT, SW_AER_IM
     use aeros_bcinput,   only : aeros_bcinput_read_field
     use ncio,            only : nc_create, nc_write_dim, nc_write, nc_read, nc_size
 
@@ -60,6 +61,7 @@ program validate_era5
     integer :: so4_year
     real(wp), allocatable :: so4_map(:,:), aot_map(:,:), aim_map(:,:)
     real(wp) :: dust_scale
+    logical  :: so4_indirect
     integer  :: nlon, nlat, nplev, ntime
     integer  :: i, j
 
@@ -154,6 +156,14 @@ program validate_era5
     ! arg 11: dust optical-thickness maps (annual mean of the 12 months)
     if (command_argument_count() >= 11) call get_command_argument(11, dust_file)
     if (trim(dust_file) == "none") dust_file = ""
+    ! arg 13: sulfate indirect effect on the liquid cloud water (T/F, default T)
+    so4_indirect = .TRUE.
+    if (command_argument_count() >= 13) then
+        block
+            character(len=32) :: arg
+            call get_command_argument(13, arg); read(arg, *) so4_indirect
+        end block
+    end if
     dust_scale = 1.0_wp
     if (command_argument_count() >= 12) then
         block
@@ -374,6 +384,8 @@ contains
                 heat(1:n), sw_up, sw_dw, sw_net, so4=so4_map(i,j), aer_ot=aot_map(i,j), aer_im=aim_map(i,j))
         end if
 
+        ! sulfate indirect effect on the liquid water (both cloud columns)
+        if (so4_indirect) lcol(1:n) = lcol(1:n)*aeros_sw_so4_cloud_factor(so4_map(i,j))
         ! all-sky: the same operators with ERA5's cloud column
         if (lw_ecckd) then
             call aeros_ecckd_lw_cloudy_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
@@ -414,6 +426,7 @@ contains
         ! the observed-cloud CRE above and ERA5's total cloud cover.
         call aeros_cloud_diagnose(n, tcol(1:n), qcol(1:n), pcol(1:n), ps, &
             cfd(1:n), lcd(1:n), icd(1:n))
+        if (so4_indirect) lcd(1:n) = lcd(1:n)*aeros_sw_so4_cloud_factor(so4_map(i,j))
         call aeros_lw_cloudy_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
             dpc(1:n), zhalf(0:n), ts, q_co2, .TRUE., &
             cfd(1:n), lcd(1:n), icd(1:n), fnet(0:n), heat(1:n), olr_d, fdw_d)

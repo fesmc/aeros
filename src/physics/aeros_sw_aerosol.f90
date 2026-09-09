@@ -60,6 +60,7 @@ module aeros_sw_aerosol
     public :: aeros_sw_aerosol_configure
     public :: aeros_sw_aerosol_mix
     public :: aeros_sw_so4_albedo
+    public :: aeros_sw_so4_cloud_factor
     public :: aeros_sw_aerosol_scat
     public :: aeros_sw_aerosol_itf
 
@@ -93,6 +94,33 @@ contains
         im = a**(1.0_wp/AER_GAM2)
         return
     end subroutine aeros_sw_aerosol_mix
+
+    pure real(wp) function aeros_sw_so4_cloud_factor(so4) result(f)
+        ! Sulfate indirect effect (CLIMBER-X `l_so4_ie`, clouds.f90): the
+        ! cloud optical thickness scales with the droplet number as
+        ! f_mod^(1/3), f_mod = (1 - exp(-alpha N))/(1 - exp(-alpha N_nat)),
+        ! N the sulfate number at cloud base = N_ant,0 e^-1 + N_nat, where
+        ! N_ant,0 = so4/(rho 4/3 pi r^3)/H is the anthropogenic surface number
+        ! from the column load (r 0.17 um, rho 1769 kg/m3, H 1.5 km) and
+        ! N_nat 75e6 m-3 the natural CCN. Applied to the liquid water content
+        ! (optical thickness at fixed droplet size), so SW and LW both see it,
+        ! as CLIMBER-X's clot does. so4 = 0 gives exactly 1.
+        implicit none
+        real(wp), intent(in) :: so4
+        real(wp), parameter :: PI_ = 3.14159265358979323846_wp
+        real(wp), parameter :: R_SO4 = 0.17e-6_wp, RHO_SO4 = 1.769e3_wp, H_SO4 = 1500.0_wp
+        real(wp), parameter :: N_SO4_NAT = 75.0e6_wp, ALPHA_C = 2.5e-9_wp
+        real(wp) :: n_ant0, n_so4, f_mod
+        if (so4 <= 0.0_wp) then
+            f = 1.0_wp
+            return
+        end if
+        n_ant0 = so4/(RHO_SO4*4.0_wp/3.0_wp*PI_*R_SO4**3)/H_SO4
+        n_so4  = n_ant0*exp(-1.0_wp) + N_SO4_NAT
+        f_mod  = (1.0_wp - exp(-ALPHA_C*n_so4))/(1.0_wp - exp(-ALPHA_C*N_SO4_NAT))
+        f = f_mod**0.33_wp
+        return
+    end function aeros_sw_so4_cloud_factor
 
     pure real(wp) function aeros_sw_so4_albedo(so4, cosz, alb_s) result(alb_sa)
         ! Combined surface + sulfate-layer albedo (Bauer et al. 2008 eq. 5-6).

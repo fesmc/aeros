@@ -207,6 +207,7 @@ program rce_long
     character(len=512) :: so4_file = ""                   ! sulfate load map (direct effect)
     integer  :: so4_year = 2000
     real(wp) :: so4_const = 0.0_wp
+    logical  :: so4_indirect = .TRUE.
     character(len=512) :: dust_file = ""                  ! dust optical-thickness maps
     real(wp) :: dust_scale = 1.0_wp, dust_im = 0.01_wp
     real(wp) :: cloud_rhc_sfc  = 0.40_wp    ! critical RH at the surface (calibrated)
@@ -441,6 +442,7 @@ program rce_long
     ts%rad%so4_file  = so4_file
     ts%rad%so4_year  = so4_year
     ts%rad%so4_const = so4_const
+    ts%rad%so4_indirect = so4_indirect
     call aeros_radiation_so4_load(ts%rad, grd)
     ts%rad%dust_file  = dust_file
     ts%rad%dust_scale = dust_scale
@@ -1437,6 +1439,7 @@ contains
         call nml_read(nmlfile, "rce", "so4_file", so4_file, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "so4_year", so4_year, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "so4_const", so4_const, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "so4_indirect", so4_indirect, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "dust_file", dust_file, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "dust_scale", dust_scale, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "dust_im", dust_im, defaults_file="input/rce_defaults.nml")
