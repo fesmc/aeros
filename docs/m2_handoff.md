@@ -144,6 +144,14 @@ deficit is airmass-scaled and vapour-independent (tau ~0.019/airmass over the cl
    (arg 13). Offline SW CRE −0.3 global (E Asia −4); coupled TOA −1.4 → **`cld_lwc 0.032e-3`**
    (TOA +0.08). Land unchanged. Climatology `docs/refs/realearth_metrics_2026-09-09_L6_aerosol.md`.
 
+**Cloud scheme (on hold, user 2026-09-09):** the cover deficit (0.48 vs 0.63; summer land 0.37
+vs 0.57; 40-70N JJA ocean 0.53 vs 0.76) is intermittency, not overlap -- ERA5's own monthly
+layer fractions overlapped give 0.21 (max) / 0.26 (max-random) vs its tcc 0.63. A port of
+CLIMBER-X's column cover (clouds.f90: cld_rh = (0.45 + 0.5 tanh(200 w_eff)) ram^1.5, the
+surface-inversion low-cloud term, freeze-dry; Sundqvist profile rescaled for the vertical
+placement) was designed but NOT implemented: new cloud schemes are under development in
+CLIMBER-X, wait for those.
+
 **Still open for deficit 1:** the NH continental clear-sky excess (+10 annual, ~+20 in
 summer at 40-70N land) is ERA5's Tegen aerosol (dust + carbonaceous), beyond the sulfate
 and dust terms (Europe +15, Siberia +11, 40-70N land +9 W/m2 annual clear-sky surface SW);
