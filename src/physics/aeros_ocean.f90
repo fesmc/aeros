@@ -188,13 +188,13 @@ contains
         type(aeros_grid_class),  intent(in)    :: grd
 
         integer  :: mode
-        real(wp) :: depth, sst_eq, sst_lat
+        real(wp) :: depth, sst_eq, sst_lat, sst_shape
         logical  :: freeze_floor
         logical  :: l_seaice
         real(wp) :: ice_albedo, ocn_albedo, k_ice, t_frz
 
         mode = ocn%mode; depth = ocn%depth; freeze_floor = ocn%freeze_floor
-        sst_eq = ocn%sst_eq; sst_lat = ocn%sst_lat
+        sst_eq = ocn%sst_eq; sst_lat = ocn%sst_lat; sst_shape = ocn%sst_shape
         l_seaice = ocn%l_seaice; ice_albedo = ocn%ice_albedo
         ocn_albedo = ocn%ocn_albedo; k_ice = ocn%k_ice; t_frz = ocn%t_frz
 
@@ -203,6 +203,7 @@ contains
         call nml_read(filename, "ocean", "freeze_floor", freeze_floor, defaults_file=defaults_file)
         call nml_read(filename, "ocean", "sst_eq",       sst_eq, defaults_file=defaults_file)
         call nml_read(filename, "ocean", "sst_lat",      sst_lat, defaults_file=defaults_file)
+        call nml_read(filename, "ocean", "sst_shape",    sst_shape, defaults_file=defaults_file)
         ! Sea-ice knobs (opt-in). Off by default -> exact freeze-floor behaviour.
         call nml_read(filename, "ocean", "l_seaice",     l_seaice, defaults_file=defaults_file)
         call nml_read(filename, "ocean", "ice_albedo",   ice_albedo, defaults_file=defaults_file)
@@ -211,7 +212,7 @@ contains
         call nml_read(filename, "ocean", "t_frz",        t_frz, defaults_file=defaults_file)
 
         ocn%mode = mode; ocn%depth = depth; ocn%freeze_floor = freeze_floor
-        ocn%sst_eq = sst_eq; ocn%sst_lat = sst_lat
+        ocn%sst_eq = sst_eq; ocn%sst_lat = sst_lat; ocn%sst_shape = sst_shape
         ocn%l_seaice = l_seaice; ocn%ice_albedo = ice_albedo
         ocn%ocn_albedo = ocn_albedo; ocn%k_ice = k_ice; ocn%t_frz = t_frz
 

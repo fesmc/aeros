@@ -189,14 +189,17 @@ contains
         type(aeros_grid_class), intent(in)    :: grd
 
         logical  :: moist
-        real(wp) :: rh_crit, reevap, time_scale, lid_q_max
+        real(wp) :: rh_crit, rh_crit_ice, reevap, time_scale, lid_q_max
 
         moist      = .FALSE.
         rh_crit    = 0.95_wp
         reevap     = 30.0_wp
         time_scale = 3.0_wp
+        rh_crit_ice = cnd%rh_crit_ice
         call nml_read(filename, "aeros_moisture", "moist",   moist, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "rh_crit", rh_crit, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "rh_crit_ice", rh_crit_ice, &
+                      defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "reevap",  reevap, defaults_file=defaults_file)
         lid_q_max  = 1.0e-5_wp
         call nml_read(filename, "aeros_moisture", "lid_q_max", lid_q_max, defaults_file=defaults_file)
@@ -222,8 +225,9 @@ contains
             write(io_unit_err,*) "aeros_condensation_load:: error: reevap must be >= 0, got ", reevap
             error stop 1
         end if
-        cnd%rh_crit = rh_crit
-        cnd%reevap  = reevap
+        cnd%rh_crit     = rh_crit
+        cnd%rh_crit_ice = rh_crit_ice
+        cnd%reevap      = reevap
 
         return
 

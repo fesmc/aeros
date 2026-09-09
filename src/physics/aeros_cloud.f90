@@ -42,6 +42,7 @@ module aeros_cloud
 
     use aeros_defs,         only : wp, R_d
     use aeros_condensation, only : aeros_qsat, aeros_liquid_fraction
+    use nml,                only : nml_read
 
     implicit none
     private
@@ -69,11 +70,52 @@ module aeros_cloud
 
     real(wp), parameter :: CLD_CF_MAX  = 0.999_wp      ! max diagnosed fraction
 
+    ! Loader-side config bag. The cloud scheme's tunables live as module state
+    ! (rhc_sfc/top/ice, lwc/iwc) reached through aeros_cloud_configure. Wave 1
+    ! adds aeros_cloud_load: a small config type holds the namelist values, then
+    ! forwards to the existing _configure so no behaviour changes.
+    type, public :: aeros_cloud_config_t
+        real(wp) :: rhc_sfc = 0.52_wp
+        real(wp) :: rhc_top = 0.35_wp
+        real(wp) :: rhc_ice = -1.0_wp
+        real(wp) :: lwc     = 0.017e-3_wp
+        real(wp) :: iwc     = 0.018e-3_wp
+    end type aeros_cloud_config_t
+
     public :: aeros_cloud_diagnose
     public :: aeros_cloud_water
     public :: aeros_cloud_configure
+    public :: aeros_cloud_load
 
 contains
+
+    subroutine aeros_cloud_load(cfg, filename, defaults_file)
+        ! Read the `clouds` namelist group and push the values into the cloud
+        ! module state via aeros_cloud_configure. The current defaults on cfg
+        ! seed the reads, so a missing key keeps the compile-time default.
+        ! No grid argument: the scheme is column-local.
+        implicit none
+        type(aeros_cloud_config_t), intent(inout) :: cfg
+        character(len=*),           intent(in)    :: filename
+        character(len=*), intent(in), optional    :: defaults_file
+
+        cfg%rhc_sfc = CLD_RHC_SFC
+        cfg%rhc_top = CLD_RHC_TOP
+        cfg%rhc_ice = CLD_RHC_ICE
+        cfg%lwc     = CLD_LWC
+        cfg%iwc     = CLD_IWC
+
+        call nml_read(filename, "clouds", "rhc_sfc", cfg%rhc_sfc, defaults_file=defaults_file)
+        call nml_read(filename, "clouds", "rhc_top", cfg%rhc_top, defaults_file=defaults_file)
+        call nml_read(filename, "clouds", "rhc_ice", cfg%rhc_ice, defaults_file=defaults_file)
+        call nml_read(filename, "clouds", "lwc",     cfg%lwc,     defaults_file=defaults_file)
+        call nml_read(filename, "clouds", "iwc",     cfg%iwc,     defaults_file=defaults_file)
+
+        call aeros_cloud_configure(rhc_sfc=cfg%rhc_sfc, rhc_top=cfg%rhc_top, &
+                                   lwc=cfg%lwc, iwc=cfg%iwc, rhc_ice=cfg%rhc_ice)
+
+        return
+    end subroutine aeros_cloud_load
 
     subroutine aeros_cloud_configure(rhc_sfc, rhc_top, lwc, iwc, rhc_ice)
         ! Override the calibrated constants (any subset). rhc in (0,1]; 1 at an

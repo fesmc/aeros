@@ -111,6 +111,8 @@ module aeros_transport
                                 aeros_grid_class
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_pressure
 
+    use nml,            only : nml_read
+
     implicit none
 
     private
@@ -158,12 +160,43 @@ module aeros_transport
 
     public :: aeros_transport_class
     public :: aeros_transport_init
+    public :: aeros_transport_load
     public :: aeros_transport_end
     public :: aeros_transport_transport
     public :: aeros_transport_water
     public :: aeros_transport_report
 
 contains
+
+    subroutine aeros_transport_load(mst, filename, grd, nlev, defaults_file)
+        ! Configure from the `moisture_transport` namelist group, then init.
+        ! Wave 1 of the coupling API: the moist transport engine's per-subsystem
+        ! loader. The only currently configurable knob is the vertical
+        ! reconstruction (donor cell vs van Leer). Init still needs the grid and
+        ! the level count; the caller supplies both.
+
+        implicit none
+
+        type(aeros_transport_class), intent(inout) :: mst
+        character(len=*),            intent(in)    :: filename
+        type(aeros_grid_class),      intent(in)    :: grd
+        integer,                     intent(in)    :: nlev
+        character(len=*), intent(in), optional :: defaults_file
+
+        logical :: vert_vanleer
+
+        vert_vanleer = mst%vert_vanleer
+
+        call nml_read(filename, "moisture_transport", "vert_vanleer", vert_vanleer, &
+                      defaults_file=defaults_file)
+
+        call aeros_transport_init(mst, grd, nlev)
+
+        mst%vert_vanleer = vert_vanleer
+
+        return
+
+    end subroutine aeros_transport_load
 
     subroutine aeros_transport_init(mst, grd, nlev)
         ! Precompute the grid metric and allocate the scratch.

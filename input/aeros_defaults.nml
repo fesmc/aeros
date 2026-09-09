@@ -205,6 +205,33 @@
     term_lcut    = -1, -1, -1, -1, -1, -1, -1, -1
 /
 
+&physics
+    ! Master on/off flags for the physics subsystems (Wave 1 of the coupling
+    ! API, docs/coupling_api.md sec. 5, 8). Consumed by aeros_physics_load;
+    ! nothing wires them onto the subsystems yet -- the driver refactor is
+    ! Wave 4. Defaults match today's real-Earth production configuration.
+    l_surf        = .TRUE.
+    l_cnv         = .TRUE.
+    l_cnd         = .TRUE.
+    l_rad         = .TRUE.
+    l_land        = .TRUE.
+    l_topography  = .TRUE.
+    l_seaice      = .FALSE.
+    l_cloud_prog  = .FALSE.
+    l_bd          = .FALSE.
+    l_vdiff       = .TRUE.
+    l_moist       = .TRUE.
+/
+
+&moisture_transport
+    ! Positive-definite finite-volume tracer transport on the grid
+    ! (src/dynamics/aeros_transport.f90). Reserved namelist group for the
+    ! coupling API's per-subsystem loader; only knob today is the vertical
+    ! reconstruction. Default off (donor-cell) is bit-for-bit; .TRUE. selects
+    ! the same van Leer monotone limiter the horizontal sweeps use.
+    vert_vanleer = .FALSE.
+/
+
 &aeros_moisture
     ! Large-scale condensation (src/physics/aeros_condensation.f90). The
     ! humidity transport itself is always on -- it costs nothing on a dry field
@@ -215,6 +242,9 @@
     ! Critical relative humidity for condensation. 1.0 is true saturation
     ! adjustment; a lower value stands in for sub-grid humidity variability.
     rh_crit = 1.0
+    ! Ice-phase threshold blended with rh_crit by the liquid fraction (ice at
+    ! T <= -23 C). < 0 = off (all-warm rh_crit everywhere).
+    rh_crit_ice = -1.0
     ! reevap: reevaporation efficiency [1/(kg/kg)] of falling precipitation into
     ! sub-saturated layers (SpeedyWeather ImplicitCondensation; 0 = off).
     ! cond_time_scale: 1/cond_time_scale of the saturation adjustment (and of
@@ -222,6 +252,9 @@
     ! 1 is the exact one-step adjustment (see aeros_condensation, "The time scale").
     reevap          = 30.0
     cond_time_scale = 3.0
+    ! Lid cold trap [kg/kg]: the top layer's condensation threshold is capped
+    ! at min(rh_crit*q_sat, lid_q_max). <= 0 = off.
+    lid_q_max       = 1.0e-5
 
     ! Moist convective adjustment (src/physics/aeros_convection.f90). OFF by
     ! default and in the dry Held-Suarez benchmark. `conv_scheme` selects the
@@ -232,6 +265,19 @@
     conv_scheme = "sbm"
     conv_tau    = 14400.0
     conv_rhref  = 0.7
+    ! Sub-cloud (mixed-layer) reference relative humidity for sbm_frierson.
+    conv_rh_ref_bl   = 0.85
+    ! CLIMBER-X RH-profile reference for the SBM cloud layer: conv_rhref up to
+    ! conv_rh_zpbl, exp(-(z - zpbl)/conv_rh_hscale) to conv_rh_ztop, constant
+    ! above. conv_rh_hscale <= 0 = the uniform conv_rhref (bit-for-bit).
+    conv_rh_hscale   = -1.0
+    conv_rh_zpbl     = 1000.0
+    conv_rh_ztop     = 3000.0
+    ! Shallow-branch depth as p/p_s (sbm_frierson). <= 0 = full layer.
+    conv_shallow_sig = -1.0
+    ! Dry convective adjustment run before the moist scheme (default off:
+    ! opt-in, bit-for-bit when off).
+    conv_dry_adjust  = .FALSE.
 /
 
 &surface
@@ -257,6 +303,9 @@
     ! Momentum drag coefficient. Bulk stress tau = rho c_d |u| u, imposed
     ! implicitly as the momentum bottom BC in vdiff. 0 = no surface drag.
     c_d     = -1.0
+    ! Floor of the diagnosed bulk transfer coefficient (heat, moisture and
+    ! momentum). Keeps calm-surface fluxes off zero.
+    cd_min  = 1.0e-5
 /
 
 &ocean
@@ -271,6 +320,10 @@
     freeze_floor = .TRUE.
     sst_eq       = 27.0
     sst_lat      = 60.0
+    ! Meridional-shape argument multiplier: 1.5 is the APE Control profile
+    ! (gradient steepest at 30 deg); 1.0 gives cos^2(phi), a smoother, more
+    ! poleward SpeedyWeather-like profile (use with sst_lat = 90).
+    sst_shape    = 1.5
     ! Thermodynamic sea ice (opt-in). l_seaice on REPLACES the freeze floor with a
     ! Semtner 0-layer ice model (needs a slab, mode=1): the mixed-layer deficit
     ! forms ice, ice grows/melts from the surface balance, and the surface albedo
@@ -316,14 +369,64 @@
     seasonal = .FALSE.
     interval = 10800.0
     doy0     = 0.0
+    ! ecCKD near-IR H2O band knobs (aeros_ecckd module state, folded into
+    ! aeros_radiation_load Wave 1). Defaults match the compile-time defaults;
+    ! overriding them is a calibration path, not production tuning.
+    ecckd_a1_w = 0.21
+    ecckd_b1_w = 6.27
+    ecckd_b2_w = 0.0267
+/
+
+&insolation
+    ! Insolation (src/physics/aeros_insolation.f90) via the LA2004 orbit. Wave 1
+    ! adds aeros_insol_load reading this group; the same time_bp / seasonal
+    ! keys still live in &radiation for backward compatibility and are read
+    ! there by aeros_radiation_load. Wave 4 will unify them here.
+    time_bp  = 0.0        ! orbital year before present (1950 CE); 0 = present-day
+    seasonal = .FALSE.    ! .FALSE. = annual-mean insolation
+    fldr     = "insol/input"
+/
+
+&clouds
+    ! Diagnostic RH-based cloud scheme (src/physics/aeros_cloud.f90). Wave 1
+    ! adds aeros_cloud_load reading this group; drivers that still call
+    ! aeros_cloud_configure directly with values from their own namelist group
+    ! (e.g. rce_long's &rce cld_*) keep working unchanged.
+    rhc_sfc = 0.52    ! critical RH at the surface (sigma = 1)
+    rhc_top = 0.35    ! critical RH at the top (sigma = 0)
+    rhc_ice = -1.0    ! ice-phase critical RH; < 0 = off (single warm threshold)
+    lwc     = 0.017e-3  ! in-cloud liquid water content [kg m-3]
+    iwc     = 0.018e-3  ! in-cloud ice water content    [kg m-3]
 /
 
 &vdiff
     ! Boundary-layer vertical diffusion (src/physics/aeros_vdiff.f90): mixes the
     ! surface source up the column (implicit on the n+1 state). OFF by default.
-    ! k0 is the eddy diffusivity [m2/s]; sigma the boundary-layer top, K tapering
-    ! linearly from its full value at the surface to zero at sigma.
-    enabled = .FALSE.
-    k0      = 25.0
-    sigma   = 0.7
+    ! richardson = .TRUE. uses the Frierson (2006) bulk-Ri diagnosed depth and
+    ! K-profile (ri_crit, z0, von_karman, surf_frac apply); .FALSE. is the
+    ! legacy fixed-depth scheme (k0 is the eddy diffusivity [m2/s], sigma the
+    ! boundary-layer top).
+    enabled    = .FALSE.
+    richardson = .TRUE.
+    k0         = 25.0
+    sigma      = 0.7
+    ri_crit    = 10.0
+    z0         = 3.21e-5
+    von_karman = 0.4
+    surf_frac  = 0.1
+/
+
+&bd
+    ! Prescribed Brewer-Dobson residual circulation in the lid layer
+    ! (src/physics/aeros_bd.f90). OFF by default (empty `file` forces off).
+    ! `file` is the netCDF climatology of w*(lat,month) and its reference
+    ! stability; `scale` a global amplitude factor; `per_k` a fractional change
+    ! of w* per K of running annual global-mean lowest-level T anomaly from
+    ! `t_ref`; `tau_mean_days` the running-mean time scale [days].
+    enabled       = .FALSE.
+    file          = ""
+    scale         = 1.0
+    per_k         = 0.0
+    t_ref         = 285.0
+    tau_mean_days = 365.0
 /

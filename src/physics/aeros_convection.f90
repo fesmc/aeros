@@ -233,18 +233,32 @@ contains
         character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class), intent(in)    :: grd
 
-        logical            :: convect
+        logical            :: convect, dry_adjust
         character(len=32)  :: conv_scheme
-        real(wp)           :: conv_tau, conv_rhref
+        real(wp)           :: conv_tau, conv_rhref, conv_rh_ref_bl
+        real(wp)           :: conv_rh_hscale, conv_rh_zpbl, conv_rh_ztop
+        real(wp)           :: conv_shallow_sig
 
-        convect     = .FALSE.
-        conv_scheme = "sbm_frierson"
-        conv_tau    = 14400.0_wp
-        conv_rhref  = 0.7_wp
+        convect        = .FALSE.
+        conv_scheme    = "sbm_frierson"
+        conv_tau       = 14400.0_wp
+        conv_rhref     = 0.7_wp
+        conv_rh_ref_bl = cnv%rh_ref_bl
+        conv_rh_hscale = cnv%rh_hscale
+        conv_rh_zpbl   = cnv%rh_z_pbl
+        conv_rh_ztop   = cnv%rh_z_top
+        conv_shallow_sig = cnv%shallow_sig
+        dry_adjust     = cnv%dry_adjust
         call nml_read(filename, "aeros_moisture", "convect",     convect, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "conv_scheme", conv_scheme, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "conv_tau",    conv_tau, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "conv_rhref",  conv_rhref, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "conv_rh_ref_bl",   conv_rh_ref_bl,   defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "conv_rh_hscale",   conv_rh_hscale,   defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "conv_rh_zpbl",     conv_rh_zpbl,     defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "conv_rh_ztop",     conv_rh_ztop,     defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "conv_shallow_sig", conv_shallow_sig, defaults_file=defaults_file)
+        call nml_read(filename, "aeros_moisture", "conv_dry_adjust",  dry_adjust,       defaults_file=defaults_file)
 
         call aeros_convection_init(cnv, grd, convect)
 
@@ -269,8 +283,14 @@ contains
             write(io_unit_err,*) "aeros_convection_load:: error: conv_rhref must be in (0,1], got ", conv_rhref
             error stop 1
         end if
-        cnv%tau    = conv_tau
-        cnv%rh_ref = conv_rhref
+        cnv%tau         = conv_tau
+        cnv%rh_ref      = conv_rhref
+        cnv%rh_ref_bl   = conv_rh_ref_bl
+        cnv%rh_hscale   = conv_rh_hscale
+        cnv%rh_z_pbl    = conv_rh_zpbl
+        cnv%rh_z_top    = conv_rh_ztop
+        cnv%shallow_sig = conv_shallow_sig
+        cnv%dry_adjust  = dry_adjust
 
         return
 

@@ -129,6 +129,13 @@ $(objdir)/aeros_held_suarez.o: $(physdir)/aeros_held_suarez.f90 \
 							$(objdir)/aeros_vertical.o $(objdir)/aeros_tendency.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# Master on/off flags for physics subsystems (Wave 1 of the coupling API,
+# docs/coupling_api.md sec. 8). A leaf module: reserves the `&physics`
+# namelist group; nothing else in the tree consumes it yet.
+$(objdir)/aeros_physics.o: $(physdir)/aeros_physics.f90 \
+							$(objdir)/aeros_defs.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 # M2.3b: large-scale condensation. A column process -- it needs the vertical
 # coordinate for the layer pressures and nothing spectral -- applied at the
 # grid seam like the Held-Suarez forcing.
@@ -281,7 +288,8 @@ aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_transport.o \
                  $(objdir)/aeros_semiimp.o
 
-aeros_physics =  $(objdir)/aeros_held_suarez.o \
+aeros_physics =  $(objdir)/aeros_physics.o \
+                 $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_condensation.o \
                  $(objdir)/aeros_bd.o \
                  $(objdir)/aeros_convection.o \

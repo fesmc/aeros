@@ -82,7 +82,8 @@ module aeros_radiation
                                aeros_ecckd_lw_clearsky_column, &
                                aeros_ecckd_sw_clearsky_column, &
                                aeros_ecckd_lw_cloudy_column, &
-                               aeros_ecckd_sw_cloudy_column
+                               aeros_ecckd_sw_cloudy_column, &
+                               aeros_ecckd_sw_configure
     use aeros_sw_aerosol, only : aeros_sw_aerosol_configure, aeros_sw_aerosol_scat, &
                                aeros_sw_aerosol_itf, aeros_sw_so4_albedo, aeros_sw_aerosol_mix, &
                                aeros_sw_so4_cloud_factor, &
@@ -356,6 +357,11 @@ contains
         logical  :: l_o3, clouds, so4_indirect
         integer  :: so4_year
         character(len=512) :: so4_file
+        ! ecCKD near-IR H2O band knobs (module state in aeros_ecckd, folded in here
+        ! so aeros_radiation_load owns the full radiation module-scope config).
+        ! Defaults match the compile-time defaults; overriding them is a
+        ! calibration path (validate_era5), not production tuning.
+        real(wp) :: ecckd_a1_w, ecckd_b1_w, ecckd_b2_w
 
         aer_ot    = rad%aer_ot
         aer_im    = rad%aer_im
@@ -377,6 +383,11 @@ contains
         interval = rad%interval
         doy0     = rad%doy0
         time_bp  = rad%time_bp
+        ! ecCKD SW near-IR band defaults (must match aeros_ecckd module state so
+        ! omitting the keys is a no-op vs the compile-time defaults).
+        ecckd_a1_w = 0.21_wp
+        ecckd_b1_w = 6.27_wp
+        ecckd_b2_w = 0.0267_wp
 
         call nml_read(filename, "radiation", "enabled",  enabled, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "scheme",   scheme, defaults_file=defaults_file)
@@ -398,6 +409,9 @@ contains
         call nml_read(filename, "radiation", "interval", interval, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "doy0",     doy0, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "time_bp",  time_bp, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "ecckd_a1_w", ecckd_a1_w, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "ecckd_b1_w", ecckd_b1_w, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "ecckd_b2_w", ecckd_b2_w, defaults_file=defaults_file)
 
         rad%scheme   = scheme
         rad%co2_ppm  = co2_ppm
@@ -406,7 +420,12 @@ contains
         rad%albedo   = albedo
         rad%aer_ot   = aer_ot
         rad%aer_im   = aer_im
+        ! Fold module-scope configures for the SW aerosol and ecCKD SW band into
+        ! the loader so a coupled host reaches the full radiation config through
+        ! one entry point. The _configure routines stay public for the offline
+        ! calibration drivers (validate_era5, rce_long).
         call aeros_sw_aerosol_configure(ot=aer_ot, im=aer_im)
+        call aeros_ecckd_sw_configure(a1_w=ecckd_a1_w, b1_w=ecckd_b1_w, b2_w=ecckd_b2_w)
         rad%so4_file  = so4_file
         rad%so4_year  = so4_year
         rad%so4_const = so4_const

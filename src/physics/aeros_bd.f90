@@ -40,6 +40,7 @@ module aeros_bd
     use aeros_defs,     only : wp, io_unit_err, aeros_grid_class
     use aeros_vertical, only : aeros_vgrid_class
     use ncio,           only : nc_read, nc_size
+    use nml,            only : nml_read
 
     implicit none
 
@@ -59,6 +60,7 @@ module aeros_bd
     end type aeros_bd_class
 
     public :: aeros_bd_init
+    public :: aeros_bd_load
     public :: aeros_bd_read
     public :: aeros_bd_end
     public :: aeros_bd_apply
@@ -79,6 +81,49 @@ contains
         bd%tmean = bd%t_ref
         return
     end subroutine aeros_bd_init
+
+    subroutine aeros_bd_load(bd, filename, grd, defaults_file)
+        ! Read the `bd` namelist group, then init. Mirrors aeros_land_load.
+        ! If `file` is non-empty and `enabled`, also reads the w*(lat,month)
+        ! climatology from that netCDF file.
+        implicit none
+        type(aeros_bd_class),   intent(inout) :: bd
+        character(len=*),       intent(in)    :: filename
+        type(aeros_grid_class), intent(in)    :: grd
+        character(len=*), intent(in), optional :: defaults_file
+
+        logical            :: enabled
+        character(len=512) :: file
+        real(wp)           :: scale, per_k, t_ref, tau_mean_days
+
+        enabled       = bd%enabled
+        file          = ""
+        scale         = bd%scale
+        per_k         = bd%per_k
+        t_ref         = bd%t_ref
+        tau_mean_days = bd%tau_mean/86400.0_wp
+
+        call nml_read(filename, "bd", "enabled",       enabled,       defaults_file=defaults_file)
+        call nml_read(filename, "bd", "file",          file,          defaults_file=defaults_file)
+        call nml_read(filename, "bd", "scale",         scale,         defaults_file=defaults_file)
+        call nml_read(filename, "bd", "per_k",         per_k,         defaults_file=defaults_file)
+        call nml_read(filename, "bd", "t_ref",         t_ref,         defaults_file=defaults_file)
+        call nml_read(filename, "bd", "tau_mean_days", tau_mean_days, defaults_file=defaults_file)
+
+        ! An empty file forces the module off (no climatology to apply).
+        if (len_trim(file) == 0) enabled = .FALSE.
+
+        call aeros_bd_init(bd, grd, enabled)
+        bd%scale    = scale
+        bd%per_k    = per_k
+        bd%t_ref    = t_ref
+        bd%tau_mean = tau_mean_days*86400.0_wp
+        bd%tmean    = t_ref
+
+        if (enabled) call aeros_bd_read(bd, trim(file), grd)
+
+        return
+    end subroutine aeros_bd_load
 
     subroutine aeros_bd_read(bd, filename, grd)
         ! Read wstar and stab (month, lat) from a netCDF file with a "lat" axis

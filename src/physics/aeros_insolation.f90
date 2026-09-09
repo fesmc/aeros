@@ -17,6 +17,7 @@ module aeros_insolation
     use aeros_defs,  only : wp, dp, S0, aeros_grid_class
     use insolation,  only : insol_class, insol_init, insol_end, &
                             calc_insol_day, calc_insol_ave
+    use nml,         only : nml_read
 
     implicit none
 
@@ -29,12 +30,19 @@ module aeros_insolation
 
     type, public :: aeros_insol_class
         type(insol_class) :: is
-        logical  :: ready   = .FALSE.
-        real(dp) :: time_bp = 0.0_dp        ! orbital year before present (1950 CE)
-        integer  :: nlat    = 0
+        logical  :: ready    = .FALSE.
+        real(dp) :: time_bp  = 0.0_dp        ! orbital year before present (1950 CE)
+        integer  :: nlat     = 0
+        ! Wave 1 (aeros_insol_load): configuration carried on the struct so the
+        ! coupled host reaches the full insolation config through one entry
+        ! point. `seasonal` is stored here for the caller (radiation) to query;
+        ! aeros_insol_init/day/annual still work exactly as before.
+        logical            :: seasonal = .FALSE.
+        character(len=512) :: fldr     = "insol/input"
     end type aeros_insol_class
 
     public :: aeros_insol_init
+    public :: aeros_insol_load
     public :: aeros_insol_end
     public :: aeros_insol_annual
     public :: aeros_insol_day
@@ -68,9 +76,39 @@ contains
         ins%time_bp = time_bp
         ins%nlat    = grd%nlat
         ins%ready   = .TRUE.
+        ins%fldr    = trim(dir)
 
         return
     end subroutine aeros_insol_init
+
+    subroutine aeros_insol_load(ins, filename, grd, defaults_file)
+        ! Read the `insolation` namelist group and init the insol state. Uniform
+        ! loader shape (Wave 1). The existing radiation loader still reads
+        ! `time_bp` and `seasonal` from `&radiation`, so drivers keep working;
+        ! Wave 4 will migrate them to `&insolation` exclusively.
+        implicit none
+        type(aeros_insol_class), intent(inout) :: ins
+        character(len=*),        intent(in)    :: filename
+        type(aeros_grid_class),  intent(in)    :: grd
+        character(len=*), intent(in), optional :: defaults_file
+
+        real(dp)           :: time_bp
+        logical            :: seasonal
+        character(len=512) :: fldr
+
+        time_bp  = ins%time_bp
+        seasonal = ins%seasonal
+        fldr     = ins%fldr
+
+        call nml_read(filename, "insolation", "time_bp",  time_bp,  defaults_file=defaults_file)
+        call nml_read(filename, "insolation", "seasonal", seasonal, defaults_file=defaults_file)
+        call nml_read(filename, "insolation", "fldr",     fldr,     defaults_file=defaults_file)
+
+        call aeros_insol_init(ins, grd, time_bp, fldr=trim(fldr))
+        ins%seasonal = seasonal
+
+        return
+    end subroutine aeros_insol_load
 
     subroutine aeros_insol_end(ins)
         type(aeros_insol_class), intent(inout) :: ins

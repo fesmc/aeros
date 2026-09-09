@@ -129,20 +129,25 @@ contains
         type(aeros_grid_class),  intent(in)    :: grd
 
         logical  :: enabled, richardson
-        real(wp) :: k0, sigma, ri_crit
+        real(wp) :: k0, sigma, ri_crit, z0, von_karman, surf_frac
 
         enabled = vd%enabled
         k0 = vd%k0; sigma = vd%sigma
         richardson = vd%richardson; ri_crit = vd%ri_crit
+        z0 = vd%z0; von_karman = vd%von_karman; surf_frac = vd%surf_frac
 
         call nml_read(filename, "vdiff", "enabled",    enabled, defaults_file=defaults_file)
         call nml_read(filename, "vdiff", "k0",         k0, defaults_file=defaults_file)
         call nml_read(filename, "vdiff", "sigma",      sigma, defaults_file=defaults_file)
         call nml_read(filename, "vdiff", "richardson", richardson, defaults_file=defaults_file)
         call nml_read(filename, "vdiff", "ri_crit",    ri_crit, defaults_file=defaults_file)
+        call nml_read(filename, "vdiff", "z0",         z0, defaults_file=defaults_file)
+        call nml_read(filename, "vdiff", "von_karman", von_karman, defaults_file=defaults_file)
+        call nml_read(filename, "vdiff", "surf_frac",  surf_frac, defaults_file=defaults_file)
 
         vd%k0 = k0; vd%sigma = sigma
         vd%richardson = richardson; vd%ri_crit = ri_crit
+        vd%z0 = z0; vd%von_karman = von_karman; vd%surf_frac = surf_frac
 
         call aeros_vdiff_init(vd, grd, enabled)
         return
