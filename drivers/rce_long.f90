@@ -266,7 +266,7 @@ program rce_long
     ! (primes = departures from the sample's zonal mean; stationary + transient),
     ! plus the monthly-mean 3D u,v,T,q from which the stationary part
     ! ([v*][T*] of the time-mean fields) is computed at dump time.
-    real(wp), allocatable :: mon_vt(:,:,:), mon_vq(:,:,:), mon_eke(:,:,:)
+    real(wp), allocatable :: mon_vt(:,:,:), mon_vq(:,:,:), mon_eke(:,:,:), mon_uv(:,:,:)
     ! Tracer mass-rescaling term r = dp_FV/dp_spec - 1 of the last transport
     ! call: zonal mean, and its eddy covariances with T and q (the drying of the
     ! warm sector by the FV/spectral mass gap, if that is what it does).
@@ -744,6 +744,7 @@ program rce_long
                  mon_u3(grd%nlon,grd%nlat,nlev,NMON), mon_v3(grd%nlon,grd%nlat,nlev,NMON), &
                  mon_t3(grd%nlon,grd%nlat,nlev,NMON), mon_q3(grd%nlon,grd%nlat,nlev,NMON))
         mon_vt = 0.0_wp; mon_vq = 0.0_wp; mon_eke = 0.0_wp
+        allocate(mon_uv(grd%nlat,nlev,NMON)); mon_uv = 0.0_wp
         allocate(mon_mr(grd%nlat,nlev,NMON), mon_mrt(grd%nlat,nlev,NMON), mon_mrq(grd%nlat,nlev,NMON))
         mon_mr = 0.0_wp; mon_mrt = 0.0_wp; mon_mrq = 0.0_wp
         allocate(mon_mr2(grd%nlon,grd%nlat,NMON)); mon_mr2 = 0.0_wp
@@ -1089,7 +1090,7 @@ contains
         real(wp) :: sstz(grd%nlat), prz(grd%nlat)
         real(wp) :: phif(nlev), phih, alph, pr_ij, wgt
         real(wp) :: cfz(grd%nlat,nlev), cfc(nlev), clwc(nlev), ciwc(nlev)
-        real(wp) :: qzm(grd%nlat,nlev), vtzm(grd%nlat,nlev), vqzm(grd%nlat,nlev)
+        real(wp) :: qzm(grd%nlat,nlev), vtzm(grd%nlat,nlev), vqzm(grd%nlat,nlev), uvzm(grd%nlat,nlev)
         real(wp) :: u2zm(grd%nlat,nlev), v2zm(grd%nlat,nlev)
         real(wp) :: mrzm(grd%nlat,nlev), mrtzm(grd%nlat,nlev), mrqzm(grd%nlat,nlev), mr
         logical  :: have_pr
@@ -1102,7 +1103,7 @@ contains
         rnlon = real(grd%nlon, wp)
         tzm = 0.0_wp; uzm = 0.0_wp; vzm = 0.0_wp; rzm = 0.0_wp
         sstz = 0.0_wp; prz = 0.0_wp; cfz = 0.0_wp
-        qzm = 0.0_wp; vtzm = 0.0_wp; vqzm = 0.0_wp; u2zm = 0.0_wp; v2zm = 0.0_wp
+        qzm = 0.0_wp; vtzm = 0.0_wp; vqzm = 0.0_wp; u2zm = 0.0_wp; v2zm = 0.0_wp; uvzm = 0.0_wp
         mrzm = 0.0_wp; mrtzm = 0.0_wp; mrqzm = 0.0_wp
         do jj = 1, grd%nlat
             do ii = 1, grd%nlon
@@ -1124,6 +1125,7 @@ contains
                         now%qv_g(ii,jj,kk)/max(qsl,1.0e-12_wp)*100.0_wp
                     qzm(jj,kk)  = qzm(jj,kk)  + now%qv_g(ii,jj,kk)
                     vtzm(jj,kk) = vtzm(jj,kk) + now%v(ii,jj,kk)*now%temp_g(ii,jj,kk)
+                    uvzm(jj,kk) = uvzm(jj,kk) + now%u(ii,jj,kk)*now%v(ii,jj,kk)
                     vqzm(jj,kk) = vqzm(jj,kk) + now%v(ii,jj,kk)*now%qv_g(ii,jj,kk)
                     u2zm(jj,kk) = u2zm(jj,kk) + now%u(ii,jj,kk)**2
                     v2zm(jj,kk) = v2zm(jj,kk) + now%v(ii,jj,kk)**2
@@ -1171,6 +1173,7 @@ contains
         mon_cf(:,:,imon) = mon_cf(:,:,imon) + cfz/rnlon
         ! eddy covariances of this sample: [vT] - [v][T] etc.
         mon_vt(:,:,imon)  = mon_vt(:,:,imon)  + (vtzm - vzm*tzm/rnlon)/rnlon
+        mon_uv(:,:,imon)  = mon_uv(:,:,imon)  + (uvzm - uzm*vzm/rnlon)/rnlon
         mon_vq(:,:,imon)  = mon_vq(:,:,imon)  + (vqzm - vzm*qzm/rnlon)/rnlon
         mon_eke(:,:,imon) = mon_eke(:,:,imon) + 0.5_wp*(u2zm + v2zm - (uzm**2 + vzm**2)/rnlon)/rnlon
         mon_mr(:,:,imon)  = mon_mr(:,:,imon)  + mrzm/rnlon
@@ -1221,7 +1224,7 @@ contains
         real(wp), allocatable :: cf_o(:,:,:), skin_o(:,:,:), lwd_o(:,:,:), olr_o(:,:,:), &
                                  olrcs_o(:,:,:), cover_o(:,:,:)
         real(wp), allocatable :: vt_o(:,:,:), vq_o(:,:,:), eke_o(:,:,:), &
-                                 vts_o(:,:,:), vqs_o(:,:,:), ekes_o(:,:,:)
+                                 vts_o(:,:,:), vqs_o(:,:,:), ekes_o(:,:,:), uv_o(:,:,:), uvs_o(:,:,:)
         real(wp), allocatable :: mr_o(:,:,:), mrt_o(:,:,:), mrq_o(:,:,:), mr2_o(:,:,:)
         real(wp), allocatable :: swn_o(:,:,:), swup_o(:,:,:)
         real(wp) :: ub(grd%nlon), vb(grd%nlon), tb(grd%nlon), qb(grd%nlon), rn
@@ -1237,7 +1240,8 @@ contains
         allocate(mr2_o(grd%nlon,grd%nlat,NMON))
         allocate(swn_o(grd%nlon,grd%nlat,NMON), swup_o(grd%nlon,grd%nlat,NMON))
         allocate(vt_o(grd%nlat,nlev,NMON), vq_o(grd%nlat,nlev,NMON), eke_o(grd%nlat,nlev,NMON), &
-                 vts_o(grd%nlat,nlev,NMON), vqs_o(grd%nlat,nlev,NMON), ekes_o(grd%nlat,nlev,NMON))
+                 vts_o(grd%nlat,nlev,NMON), vqs_o(grd%nlat,nlev,NMON), ekes_o(grd%nlat,nlev,NMON), &
+                 uv_o(grd%nlat,nlev,NMON), uvs_o(grd%nlat,nlev,NMON))
         allocate(cf_o(grd%nlat,nlev,NMON), skin_o(grd%nlon,grd%nlat,NMON), &
                  lwd_o(grd%nlon,grd%nlat,NMON), olr_o(grd%nlon,grd%nlat,NMON), &
                  olrcs_o(grd%nlon,grd%nlat,NMON), cover_o(grd%nlon,grd%nlat,NMON))
@@ -1268,6 +1272,7 @@ contains
                 cover_o(:,:,m) = mon_cover(:,:,m)/real(mon_cnt(m),wp)
                 rn = real(mon_cnt(m),wp)
                 vt_o(:,:,m)  = mon_vt(:,:,m) /rn
+                uv_o(:,:,m)  = mon_uv(:,:,m) /rn
                 vq_o(:,:,m)  = mon_vq(:,:,m) /rn*1000.0_wp
                 eke_o(:,:,m) = mon_eke(:,:,m)/rn
                 mr_o(:,:,m)  = mon_mr(:,:,m) /rn
@@ -1283,6 +1288,7 @@ contains
                         ub = ub - sum(ub)/real(grd%nlon,wp); vb = vb - sum(vb)/real(grd%nlon,wp)
                         tb = tb - sum(tb)/real(grd%nlon,wp); qb = qb - sum(qb)/real(grd%nlon,wp)
                         vts_o(jj,kk,m)  = sum(vb*tb)/real(grd%nlon,wp)
+                        uvs_o(jj,kk,m)  = sum(ub*vb)/real(grd%nlon,wp)
                         vqs_o(jj,kk,m)  = sum(vb*qb)/real(grd%nlon,wp)*1000.0_wp
                         ekes_o(jj,kk,m) = 0.5_wp*sum(ub*ub + vb*vb)/real(grd%nlon,wp)
                     end do
@@ -1292,6 +1298,7 @@ contains
                 mr_o(:,:,m) = MISS; mrt_o(:,:,m) = MISS; mrq_o(:,:,m) = MISS; mr2_o(:,:,m) = MISS
                 swn_o(:,:,m) = MISS; swup_o(:,:,m) = MISS
                 vts_o(:,:,m) = MISS; vqs_o(:,:,m) = MISS; ekes_o(:,:,m) = MISS
+                uv_o(:,:,m) = MISS; uvs_o(:,:,m) = MISS
                 vlow_o(:,:,m) = MISS; evap_o(:,:,m) = MISS; shf_o(:,:,m) = MISS
                 cf_o(:,:,m) = MISS; skin_o(:,:,m) = MISS; lwd_o(:,:,m) = MISS
                 olr_o(:,:,m) = MISS; olrcs_o(:,:,m) = MISS; cover_o(:,:,m) = MISS
@@ -1349,6 +1356,10 @@ contains
             units="g/kg m/s", long_name="monthly zonal-mean eddy moisture flux [v'q'] (stationary + transient)")
         call nc_write(fname, "eke", eke_o, dim1="lat", dim2="lev", dim3="month", &
             units="m2/s2", long_name="monthly zonal-mean eddy kinetic energy (stationary + transient)")
+        call nc_write(fname, "uv", uv_o, dim1="lat", dim2="lev", dim3="month", &
+                      units="m2 s-2", long_name="eddy momentum flux [u'v'] (transient+stationary), zonal mean")
+        call nc_write(fname, "uv_stat", uvs_o, dim1="lat", dim2="lev", dim3="month", &
+                      units="m2 s-2", long_name="stationary eddy momentum flux [u*v*] of the monthly means")
         call nc_write(fname, "vt_stat", vts_o, dim1="lat", dim2="lev", dim3="month", &
             units="K m/s", long_name="monthly stationary eddy heat flux [v*T*] of the monthly-mean fields")
         call nc_write(fname, "vq_stat", vqs_o, dim1="lat", dim2="lev", dim3="month", &
@@ -1371,7 +1382,8 @@ contains
             count(mon_cnt>0), " months populated) -> ", trim(fname)
         deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o, tlow_o, &
                    pr2d_o, z500_o, vlow_o, evap_o, shf_o, cf_o, skin_o, lwd_o, olr_o, &
-                   olrcs_o, cover_o, vt_o, vq_o, eke_o, vts_o, vqs_o, ekes_o, mr_o, mrt_o, mrq_o, mr2_o, swn_o, swup_o)
+                   olrcs_o, cover_o, vt_o, vq_o, eke_o, vts_o, vqs_o, ekes_o, mr_o, mrt_o, mrq_o, mr2_o, swn_o, swup_o, &
+                   uv_o, uvs_o)
     end subroutine dump_monthly
 
     subroutine read_config()

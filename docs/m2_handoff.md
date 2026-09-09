@@ -170,6 +170,32 @@ in every variant: the surface-anchored moist adiabat (no entrainment) is the lev
 parameterised lapse rates (vesta gams/gamb/gamt). 30–45S mid-troposphere −4.4/−4.0 (was
 −4.1/−3.7). Climatology `docs/refs/realearth_metrics_2026-09-09_L6_rhprof.md`.
 
+### Update 2026-09-09 (late): deficit 2 temperature (not CLIMBER-X lapse rates) and the 30-45S cold
+
+**σ 0.365 tropics +2.7 K:** on the tropical-mean column the SBM's own hb-anchored moist adiabat
+is 253.3 K at 364 hPa (ERA5 252.5, model 255.2); CLIMBER-X's `vesta` t_prof parabola is 255.5
+with its 5 K/km surface layer and 263 without -- warmer aloft, a 2-D fit, NOT ported (user rule:
+port CLIMBER-X only where relevant; new physics consistent with the 3-D model otherwise). The
+bias is the scheme: the warmest (convecting) columns set the UT by WTG and the undilute parcel
+has no entrainment, plus the deep-closure shift (L Pq - Pt)/(cp sum dp). Lever if wanted: an
+entraining plume reference (`conv_entrain`, ~0.1-0.2 /km). Accepted for now.
+
+**30-45S mid-troposphere -4.4/-4.0 K (σ 0.56/0.73), moist (RH 42/49 vs 33/38):** the MMC.
+`diag/mmc_vs_era5.py`: descent at 30-45S 3.9/5.0/5.8 hPa/day vs ERA5 8.6/10.0/9.8 (half),
+Hadley ascent 70 %, 30-45N a third, 45-60S ascent half. Surface westerlies match ERA5 (surface
+torque fine); [u'v'] (new dump fields `uv`, `uv_stat`) -40 m2/s2 at σ 0.365 30-45S, +26 at
+30-45N (Peixoto-Oort peak 30-40 at 200 hPa), EKE 90-100 at 0.365 (P&O 100-150 at 300 hPa):
+eddies ~75-100 %. Hyperdiffusion is not it (`tau_diff` 2 h and 8 h: MMC and bias unchanged).
+Process budget at 30-45S σ 0.563: rad -1.35, **convection +1.33** (the Frierson SBM's
+always-active shallow/deep relaxation heats the subtropical mid-troposphere, cancelling the
+radiative cooling so that little subsidence is required), dyn +0.14, vadv +0.40. Vertical
+resolution: an L12 run with the current (L6-calibrated) physics is badly unbalanced (TOA +27,
+lid -17 K, jet 57: the lid trap / BD file / cloud thresholds are L6-specific) but its MMC is
+65-70 % of ERA5 at 30-45S and the cold there -2.5 to -3.2 K. So: roughly half resolution,
+half the SBM's subtropical heating. Candidate physics: confine the SBM's non-precipitating
+(shallow) branch to the cloud layer instead of the LZB, so the mid-troposphere is left to
+subsidence; or the L8/L12 production route with a recalibration.
+
 **Still open for deficit 1:** the NH continental clear-sky excess (+10 annual, ~+20 in
 summer at 40-70N land) is ERA5's Tegen aerosol (dust + carbonaceous), beyond the sulfate
 and dust terms (Europe +15, Siberia +11, 40-70N land +9 W/m2 annual clear-sky surface SW);
