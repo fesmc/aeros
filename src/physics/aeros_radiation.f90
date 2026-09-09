@@ -83,6 +83,8 @@ module aeros_radiation
                                aeros_ecckd_sw_clearsky_column, &
                                aeros_ecckd_lw_cloudy_column, &
                                aeros_ecckd_sw_cloudy_column
+    use aeros_sw_aerosol, only : aeros_sw_aerosol_configure, aeros_sw_aerosol_scat, &
+                               aeros_sw_aerosol_itf, SW_AER_OT, SW_AER_IM
     use nml,            only : nml_read
 
     implicit none
@@ -213,6 +215,10 @@ module aeros_radiation
         ! Insolation / shortwave.
         real(wp) :: tsi      = S0            ! total solar irradiance [W m-2]
         real(wp) :: albedo   = 0.06_wp       ! surface broadband albedo (ocean)
+        ! Background aerosol (aeros_sw_aerosol, CLIMBER-X ars_ot/ars_im): a
+        ! uniform, constant optical thickness and imaginary index. 0 = off.
+        real(wp) :: aer_ot   = 0.0_wp
+        real(wp) :: aer_im   = 0.01_wp
         logical  :: seasonal = .FALSE.       ! .FALSE. = annual-mean insolation
         real(wp) :: doy0     = 0.0_wp        ! start day-of-year (seasonal mode)
         real(dp) :: time_bp  = 0.0_dp        ! orbital year before present (Laskar); 0 = present-day
@@ -319,10 +325,12 @@ contains
 
         logical  :: enabled, seasonal
         integer  :: scheme
-        real(wp) :: co2_ppm, albedo, tsi, interval, doy0
+        real(wp) :: co2_ppm, albedo, tsi, interval, doy0, aer_ot, aer_im
         real(dp) :: time_bp
         logical  :: l_o3, clouds
 
+        aer_ot   = rad%aer_ot
+        aer_im   = rad%aer_im
         enabled  = rad%enabled
         scheme   = rad%scheme
         co2_ppm  = rad%co2_ppm
@@ -341,6 +349,8 @@ contains
         call nml_read(filename, "radiation", "l_o3",     l_o3, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "clouds",   clouds, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "albedo",   albedo, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "aer_ot",   aer_ot, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "aer_im",   aer_im, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "tsi",      tsi, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "seasonal", seasonal, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "interval", interval, defaults_file=defaults_file)
@@ -352,6 +362,9 @@ contains
         rad%l_o3     = l_o3
         rad%clouds   = clouds
         rad%albedo   = albedo
+        rad%aer_ot   = aer_ot
+        rad%aer_im   = aer_im
+        call aeros_sw_aerosol_configure(ot=aer_ot, im=aer_im)
         rad%tsi      = tsi
         rad%seasonal = seasonal
         rad%interval = interval
@@ -819,6 +832,8 @@ contains
         real(wp) :: m_col, itf_ir_full, alb_vu, alb_ir_p, alb_p
         real(wp) :: m_d1, m_d2, itf_d1, itf_d2, itf_atm_vu, itf_atm_ir
         real(wp) :: a_atm, a_o3, a_w, wsum, wo3sum, m
+        real(wp) :: s_vu, s_ir, itf_a_col, itf_a_d1, itf_a_d2, a_aer
+        real(wp) :: waer(nlev), waersum, pc
         integer  :: k, i
 
         heat = 0.0_wp
@@ -836,44 +851,74 @@ contains
             uwv_cum(k) = uwv_cum(k-1) + 0.1_wp*q(k)*dp_lev(k)/grav
         end do
 
-        ! --- planetary albedo (SESAM clear-sky, aerosol off) ---------------
+        ! --- planetary albedo (SESAM clear-sky with the CLIMBER-X aerosol) --
+        ! Scattering albedo of the atmosphere (Rayleigh + aerosol; the visible
+        ! Rayleigh SW_RSCAT alone when the aerosol is off) and the aerosol
+        ! absorption on the TOA round trip (icos), both bands.
+        call aeros_sw_aerosol_scat(cosz, SW_RSCAT, s_vu, s_ir)
+        itf_a_col = aeros_sw_aerosol_itf(icos)
         m_col = uwv_cum(nlev)*icos
         itf_ir_full = itf_w_ir(m_col)
-        alb_vu   = (SW_RSCAT + (1.0_wp-SW_RSCAT)**2*alb_vis &
-                    /(1.0_wp - SW_RSCAT*alb_vis))*SW_C_ITF_O
-        alb_ir_p = alb_ir*itf_ir_full
+        alb_vu   = (s_vu + (1.0_wp-s_vu)**2*alb_vis/(1.0_wp - s_vu*alb_vis)) &
+                   *itf_a_col*SW_C_ITF_O
+        alb_ir_p = (s_ir + (1.0_wp-s_ir)**2*alb_ir/(1.0_wp - s_ir*alb_ir)) &
+                   *itf_ir_full*itf_a_col
         alb_p    = SW_FRAC_VU*alb_vu + (1.0_wp-SW_FRAC_VU)*alb_ir_p
         sw_up_toa = swdown_toa*alb_p
 
         ! --- surface net and downward (SESAM two-path clear-sky) -----------
+        ! Path 1: the direct beam. Path 2: one surface<->atmosphere reflection
+        ! (the diffuse round trip, SESAM's (1-e^-0.25) 2/cosz_o path).
         m_d1 = uwv_cum(nlev)/cosz
         m_d2 = m_d1 + uwv_cum(nlev)*(1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O
         itf_d1 = itf_w_ir(m_d1)
         itf_d2 = itf_w_ir(m_d2)
-        ! visible: direct + one surface<->Rayleigh reflection, times ozone
-        itf_atm_vu = (1.0_wp-SW_RSCAT)*(1.0_wp-alb_vis)*SW_C_ITF_O &
-                   + (1.0_wp-SW_RSCAT)*alb_vis*SW_RSCAT*(1.0_wp-alb_vis) &
-                     /(1.0_wp - SW_RSCAT*alb_vis)*SW_C_ITF_O
-        ! near-IR: no atmospheric scattering, so only the direct absorbed beam
-        itf_atm_ir = (1.0_wp-alb_ir)*itf_d1
+        itf_a_d1 = aeros_sw_aerosol_itf(1.0_wp/cosz)
+        itf_a_d2 = aeros_sw_aerosol_itf(1.0_wp/cosz + (1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O)
+        ! visible: direct + one surface<->scatterer reflection, times ozone
+        itf_atm_vu = (1.0_wp-s_vu)*(1.0_wp-alb_vis)*itf_a_d1*SW_C_ITF_O &
+                   + (1.0_wp-s_vu)*alb_vis*s_vu*(1.0_wp-alb_vis) &
+                     /(1.0_wp - s_vu*alb_vis)*itf_a_d2*SW_C_ITF_O
+        ! near-IR: the same two paths; the reflection term vanishes without
+        ! aerosol (no near-IR Rayleigh scattering)
+        itf_atm_ir = (1.0_wp-s_ir)*(1.0_wp-alb_ir)*itf_d1*itf_a_d1 &
+                   + (1.0_wp-s_ir)*alb_ir*s_ir*(1.0_wp-alb_ir) &
+                     /(1.0_wp - s_ir*alb_ir)*itf_d2*itf_a_d2
         sw_net_sur = swdown_toa*(SW_FRAC_VU*itf_atm_vu + (1.0_wp-SW_FRAC_VU)*itf_atm_ir)
         sw_dw_sur  = swdown_toa*(SW_FRAC_VU*itf_atm_vu/(1.0_wp-alb_vis) &
                                + (1.0_wp-SW_FRAC_VU)*itf_atm_ir/(1.0_wp-alb_ir))
 
         ! --- distribute column absorption over layers ----------------------
         a_atm = max(0.0_wp, swdown_toa - sw_up_toa - sw_net_sur)
+        ! Aerosol absorption: the direct beam below the scatterer on path 1 and
+        ! the surface-reflected beam on its way back up, both bands; deposited
+        ! near the surface (sigma^2 mass weight, SPEEDY's aerosol profile).
+        a_aer = swdown_toa*(SW_FRAC_VU*(1.0_wp-s_vu)*SW_C_ITF_O*(1.0_wp - itf_a_d1) &
+                          + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_d1*(1.0_wp - itf_a_d1)) &
+              + swdown_toa*(SW_FRAC_VU*(1.0_wp-s_vu)*SW_C_ITF_O*itf_a_d1*alb_vis &
+                          + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_d1*itf_a_d1*alb_ir) &
+                *(1.0_wp - aeros_sw_aerosol_itf(1.0_wp/SW_COSZ_O))
+        a_aer = min(a_aer, a_atm)
 
         ! Split off the visible ozone absorption (the post-Rayleigh visible beam
         ! that ozone takes) so it can be deposited where the ozone is. The
         ! remainder is the near-IR water absorption. When ozone is not resolved,
         ! a_o3 = 0 and everything rides the water weight, as before.
         if (l_o3) then
-            a_o3 = swdown_toa*SW_FRAC_VU*(1.0_wp - SW_RSCAT)*(1.0_wp - SW_C_ITF_O)
-            a_o3 = min(a_o3, a_atm)
+            a_o3 = swdown_toa*SW_FRAC_VU*(1.0_wp - s_vu)*(1.0_wp - SW_C_ITF_O)
+            a_o3 = min(a_o3, a_atm - a_aer)
         else
             a_o3 = 0.0_wp
         end if
-        a_w = a_atm - a_o3
+        a_w = a_atm - a_o3 - a_aer
+
+        ! aerosol weight: sigma^2 x mass (near-surface), on the layer midpoints
+        waersum = 0.0_wp; pc = 0.0_wp
+        do k = 1, nlev
+            pc = pc + dp_lev(k)
+            waer(k) = dp_lev(k)*((pc - 0.5_wp*dp_lev(k))/sum(dp_lev(1:nlev)))**2
+            waersum = waersum + waer(k)
+        end do
 
         ! near-IR water weight: the drop in direct-beam transmission per layer
         do i = 0, nlev
@@ -902,7 +947,8 @@ contains
         end if
 
         do k = 1, nlev
-            heat(k) = (grav/cp_d)*(a_w*(w(k)/wsum) + a_o3*(wo3(k)/wo3sum))/dp_lev(k)
+            heat(k) = (grav/cp_d)*(a_w*(w(k)/wsum) + a_o3*(wo3(k)/wo3sum) &
+                                   + a_aer*(waer(k)/waersum))/dp_lev(k)
         end do
 
         return
@@ -1237,6 +1283,7 @@ contains
         write(io_unit, '(a,i0)')     "    scheme   = ", rad%scheme
         write(io_unit, '(a,f8.2)')   "    co2_ppm  = ", rad%co2_ppm
         write(io_unit, '(a,l1)')     "    l_o3     = ", rad%l_o3
+        write(io_unit, '(a,f6.3,a,f6.3)') "    aerosol ot/im = ", SW_AER_OT, " / ", SW_AER_IM
         write(io_unit, '(a,l1)')     "    clouds   = ", rad%clouds
         return
     end subroutine aeros_radiation_report

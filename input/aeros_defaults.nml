@@ -298,6 +298,10 @@
     l_o3     = .TRUE.
     clouds   = .FALSE.
     albedo   = 0.06
+    ! background aerosol optical thickness / imaginary index (aeros_sw_aerosol,
+    ! CLIMBER-X ars_ot/ars_im; calibrated on validate_era5, see rce_defaults)
+    aer_ot   = 0.12
+    aer_im   = 0.02
     tsi      = 1361.0
     seasonal = .FALSE.
     interval = 10800.0

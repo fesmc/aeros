@@ -167,8 +167,14 @@ $(objdir)/aeros_cloud_prog.o: $(physdir)/aeros_cloud_prog.f90 \
 # radiation scheme behind SCHEME_ECCKD; self-contained gas physics on the
 # resolved column, so it needs only aeros_defs. aeros_radiation dispatches to it,
 # so it is archived before aeros_radiation.
-$(objdir)/aeros_ecckd.o: $(physdir)/aeros_ecckd.f90 \
+# Background aerosol optics for the clear-sky SW (CLIMBER-X swr.f90 port);
+# shared by the SESAM and ecCKD SW columns, so archived before both.
+$(objdir)/aeros_sw_aerosol.o: $(physdir)/aeros_sw_aerosol.f90 \
 							$(objdir)/aeros_defs.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
+$(objdir)/aeros_ecckd.o: $(physdir)/aeros_ecckd.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_sw_aerosol.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 # M2.4: radiation (section 5). Ported SESAM broadband LW band kernel on the
@@ -185,7 +191,8 @@ $(objdir)/aeros_insolation.o: $(physdir)/aeros_insolation.f90 \
 $(objdir)/aeros_radiation.o: $(physdir)/aeros_radiation.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o \
 							$(objdir)/aeros_grid.o $(objdir)/aeros_cloud.o \
-							$(objdir)/aeros_insolation.o $(objdir)/aeros_ecckd.o
+							$(objdir)/aeros_insolation.o $(objdir)/aeros_ecckd.o \
+							$(objdir)/aeros_sw_aerosol.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 # M2.4c: surface energy/moisture budget (section 6.1). Prescribed-SST
@@ -281,6 +288,7 @@ aeros_physics =  $(objdir)/aeros_held_suarez.o \
                  $(objdir)/aeros_cloud.o \
                  $(objdir)/aeros_cloud_prog.o \
                  $(objdir)/aeros_insolation.o \
+                 $(objdir)/aeros_sw_aerosol.o \
                  $(objdir)/aeros_ecckd.o \
                  $(objdir)/aeros_radiation.o \
                  $(objdir)/aeros_surface.o \

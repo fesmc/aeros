@@ -30,6 +30,7 @@ program rce_long
     use aeros_vertical
     use aeros_condensation, only : aeros_qsat, aeros_latent
     use aeros_cloud,    only : aeros_cloud_diagnose, aeros_cloud_configure
+    use aeros_sw_aerosol, only : aeros_sw_aerosol_configure
     use aeros_convection, only : SCHEME_SBM, SCHEME_SBM_FRIERSON, SCHEME_MANABE
     use aeros_timestep
     use aeros_radiation, only : SCHEME_ECCKD
@@ -201,6 +202,7 @@ program rce_long
     ! in-cloud water contents [kg m-3]; the coupled calibration (rce_defaults.nml).
     real(wp) :: cld_rhc_sfc = 0.52_wp, cld_rhc_top = 1.07_wp, cld_rhc_ice = -1.0_wp
     real(wp) :: cld_lwc = 0.020e-3_wp, cld_iwc = 0.014e-3_wp
+    real(wp) :: sw_aer_ot = 0.0_wp, sw_aer_im = 0.02_wp   ! background aerosol (aeros_sw_aerosol)
     real(wp) :: cloud_rhc_sfc  = 0.40_wp    ! critical RH at the surface (calibrated)
     real(wp) :: cloud_rhc_top  = 0.60_wp    ! critical RH at the model top (higher aloft)
     real(wp) :: cloud_tau_form = 10800.0_wp ! formation timescale [s] (~3 h; de-patchifies)
@@ -426,6 +428,9 @@ program rce_long
     ts%rad%co2_ppm  = co2_ppm
     ts%rad%interval = rad_interval
     ts%rad%scheme   = rad_scheme
+    ts%rad%aer_ot   = sw_aer_ot
+    ts%rad%aer_im   = sw_aer_im
+    call aeros_sw_aerosol_configure(ot=sw_aer_ot, im=sw_aer_im)
     ts%ocn%mode     = ocean_mode
     ts%ocn%depth    = ocean_depth
     ts%ocn%sst_eq    = sst_eq
@@ -1412,6 +1417,8 @@ contains
         call nml_read(nmlfile, "rce", "cld_rhc_ice", cld_rhc_ice, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "cld_lwc", cld_lwc, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "cld_iwc", cld_iwc, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "sw_aer_ot", sw_aer_ot, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "sw_aer_im", sw_aer_im, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_sponge", l_sponge, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_vdiff", l_vdiff)

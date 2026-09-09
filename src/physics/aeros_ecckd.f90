@@ -66,16 +66,22 @@ module aeros_ecckd
     ! explicit g-point sum and upgrades ozone from a constant band transmission to
     ! a real correlated-k absorber:
     !   - near-IR H2O band: SESAM's 2-exponential as its two g-points (weights
-    !     SW_A1/A2, exponents SW_B1/B2). Re-anchored 2026-09-07: SESAM's values
-    !     (0.21/0.79, 6.27/0.0267) reproduced the TOA net but absorbed only 63
-    !     W/m2 in the ERA5 clear-sky column against ERA5's 76.5, the 14 W/m2
-    !     landing on the surface instead; in the coupled model that was a 24 W/m2
-    !     deficit in atmospheric solar heating and a 3-8 K cold free troposphere.
-    !     0.28/0.72, 6.27/0.033 gives 78 W/m2 (bands within 5 of ERA5: the
-    !     residual tilt, tropics +5 / poles -4, is not water vapour), surface
-    !     down SW 241.5 (242.3), TOA net -2.5. No atmospheric scattering
-    !     (near-IR Rayleigh negligible). The layer heating is distributed on a
-    !     pressure-scaled path (2026-09-08; see the distribution block).
+    !     SW_A1/A2, exponents SW_B1/B2), SESAM's / CLIMBER-X's values
+    !     (0.21/0.79, 6.27/0.0267). History: on their own they absorbed only 63
+    !     W/m2 in the ERA5 clear-sky column against ERA5's 76.5 (the 14 W/m2
+    !     landing on the surface; in the coupled model a 3-8 K cold free
+    !     troposphere), and 2026-09-07 re-anchored them to 0.28/0.033 (78 W/m2).
+    !     That put the missing absorption into water vapour: the moist tropics
+    !     over-absorbed (surface down SW -11 W/m2) while the dry continents kept
+    !     +11 to +18. 2026-09-09: the deficit is airmass-scaled and
+    !     vapour-independent -- it is the SESAM aerosol branch the port dropped.
+    !     Restored as CLIMBER-X's constant background aerosol (aeros_sw_aerosol,
+    !     ot 0.12 / im 0.02, calibrated on the clean 40-60S ocean: surface down
+    !     SW +0.2, TOA net -0.2; global +3.2 / -4.3) with the H2O fit back at
+    !     SESAM's. The continental residual (+8 to +19) is present-day dust and
+    !     pollution, left to a dust/SO4 field as in CLIMBER-X. No atmospheric
+    !     scattering in the near-IR beyond the aerosol. The layer heating is
+    !     distributed on a pressure-scaled path (2026-09-08; see below).
     !   - visible+UV band: SESAM's Rayleigh single-reflection scattering reused
     !     as-is, but the constant ozone transmission SW_C_ITF_O is replaced by a
     !     3-g-point ozone k-distribution (strong Hartley/Huggins UV, weak Chappuis,
@@ -105,6 +111,7 @@ module aeros_ecckd
     !   TOA net CRE -23.1 W/m2 (bias +1.1)
 
     use aeros_defs, only : wp, sigma_sb, grav, cp_d, p0, pi
+    use aeros_sw_aerosol, only : aeros_sw_aerosol_scat, aeros_sw_aerosol_itf
 
     implicit none
 
@@ -178,8 +185,12 @@ module aeros_ecckd
     real(wp), parameter :: SW_FRAC_VU = 0.45_wp        ! visible+UV fraction of TSI
     real(wp), parameter :: SW_RSCAT   = 0.17_wp        ! Rayleigh visible reflectance
     real(wp), parameter :: SW_COSZ_O  = 1.0_wp/1.66_wp ! diffuse-beam cosine
-    real(wp), parameter :: SW_A1_W = 0.28_wp, SW_A2_W = 0.72_wp   ! near-IR H2O weights
-    real(wp), parameter :: SW_B1_W = 6.27_wp, SW_B2_W = 0.033_wp ! near-IR H2O exponents
+    ! Near-IR H2O 2-exponential (weights a1/a2 = 1-a1, exponents b1/b2). Module
+    ! state (aeros_ecckd_sw_configure) so the offline calibration can sweep it
+    ! together with the background aerosol; the production values are the
+    ! calibrated defaults below.
+    real(wp), protected :: SW_A1_W = 0.21_wp, SW_A2_W = 0.79_wp   ! near-IR H2O weights
+    real(wp), protected :: SW_B1_W = 6.27_wp, SW_B2_W = 0.0267_wp ! near-IR H2O exponents
 
     ! Visible ozone k-distribution (3 g-points): the a-priori SHAPE is the ozone
     ! SW cross-section spread (strong Hartley/Huggins UV, weak Chappuis, transparent
@@ -223,10 +234,23 @@ module aeros_ecckd
     public :: aeros_ecckd_init
     public :: aeros_ecckd_lw_clearsky_column
     public :: aeros_ecckd_sw_clearsky_column
+    public :: aeros_ecckd_sw_configure
     public :: aeros_ecckd_lw_cloudy_column
     public :: aeros_ecckd_sw_cloudy_column
 
 contains
+
+    subroutine aeros_ecckd_sw_configure(a1_w, b1_w, b2_w)
+        ! Override the near-IR H2O band fit (any subset); a2 = 1 - a1.
+        implicit none
+        real(wp), intent(in), optional :: a1_w, b1_w, b2_w
+        if (present(a1_w)) then
+            SW_A1_W = a1_w; SW_A2_W = 1.0_wp - a1_w
+        end if
+        if (present(b1_w)) SW_B1_W = b1_w
+        if (present(b2_w)) SW_B2_W = b2_w
+        return
+    end subroutine aeros_ecckd_sw_configure
 
     subroutine aeros_ecckd_init()
         ! Build the cached reference k-table once, serially. Safe to call more
@@ -447,6 +471,8 @@ contains
         real(wp) :: cvis_o3, itf_ir_full, m_col, m_d1
         real(wp) :: alb_vu, alb_ir_p, alb_p, itf_atm_vu, itf_atm_ir
         real(wp) :: a_atm, a_o3, a_w, w(nlev), wo3(nlev), wsum, wo3sum, m
+        real(wp) :: s_vu, s_ir, itf_a_col, itf_a_d1, itf_a_d2, m_d2, a_aer
+        real(wp) :: waer(nlev), waersum, pc
         integer  :: k, i
 
         heat = 0.0_wp
@@ -473,33 +499,58 @@ contains
         cvis_o3 = o3_vis_trans(uo3_col/cosz)
 
         ! --- planetary albedo (SESAM; constant O3 transmission -> cvis_o3) ------
+        ! Scattering albedo s (Rayleigh + the CLIMBER-X background aerosol) and
+        ! the aerosol absorption on the TOA round trip, both bands -- the same
+        ! algebra as aeros_sw_clearsky_column.
+        call aeros_sw_aerosol_scat(cosz, SW_RSCAT, s_vu, s_ir)
+        itf_a_col = aeros_sw_aerosol_itf(icos)
         m_col = uwv_cum(nlev)*icos
         itf_ir_full = itf_w_ir(m_col)
-        alb_vu   = (SW_RSCAT + (1.0_wp-SW_RSCAT)**2*alb_vis &
-                    /(1.0_wp - SW_RSCAT*alb_vis))*cvis_o3
-        alb_ir_p = alb_ir*itf_ir_full
+        alb_vu   = (s_vu + (1.0_wp-s_vu)**2*alb_vis/(1.0_wp - s_vu*alb_vis)) &
+                   *itf_a_col*cvis_o3
+        alb_ir_p = (s_ir + (1.0_wp-s_ir)**2*alb_ir/(1.0_wp - s_ir*alb_ir)) &
+                   *itf_ir_full*itf_a_col
         alb_p    = SW_FRAC_VU*alb_vu + (1.0_wp-SW_FRAC_VU)*alb_ir_p
         sw_up_toa = swdown_toa*alb_p
 
         ! --- surface net and downward (SESAM two-path) -------------------------
         m_d1 = uwv_cum(nlev)/cosz
-        itf_atm_vu = (1.0_wp-SW_RSCAT)*(1.0_wp-alb_vis)*cvis_o3 &
-                   + (1.0_wp-SW_RSCAT)*alb_vis*SW_RSCAT*(1.0_wp-alb_vis) &
-                     /(1.0_wp - SW_RSCAT*alb_vis)*cvis_o3
-        itf_atm_ir = (1.0_wp-alb_ir)*itf_w_ir(m_d1)
+        m_d2 = m_d1 + uwv_cum(nlev)*(1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O
+        itf_a_d1 = aeros_sw_aerosol_itf(1.0_wp/cosz)
+        itf_a_d2 = aeros_sw_aerosol_itf(1.0_wp/cosz + (1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O)
+        itf_atm_vu = (1.0_wp-s_vu)*(1.0_wp-alb_vis)*itf_a_d1*cvis_o3 &
+                   + (1.0_wp-s_vu)*alb_vis*s_vu*(1.0_wp-alb_vis) &
+                     /(1.0_wp - s_vu*alb_vis)*itf_a_d2*cvis_o3
+        itf_atm_ir = (1.0_wp-s_ir)*(1.0_wp-alb_ir)*itf_w_ir(m_d1)*itf_a_d1 &
+                   + (1.0_wp-s_ir)*alb_ir*s_ir*(1.0_wp-alb_ir) &
+                     /(1.0_wp - s_ir*alb_ir)*itf_w_ir(m_d2)*itf_a_d2
         sw_net_sur = swdown_toa*(SW_FRAC_VU*itf_atm_vu + (1.0_wp-SW_FRAC_VU)*itf_atm_ir)
         sw_dw_sur  = swdown_toa*(SW_FRAC_VU*itf_atm_vu/(1.0_wp-alb_vis) &
                                + (1.0_wp-SW_FRAC_VU)*itf_atm_ir/(1.0_wp-alb_ir))
 
         ! --- distribute the column absorption residual over layers -------------
         a_atm = max(0.0_wp, swdown_toa - sw_up_toa - sw_net_sur)
+        ! aerosol: direct beam below the scatterer + the surface-reflected beam
+        ! on its way up; deposited sigma^2-weighted near the surface
+        a_aer = swdown_toa*(SW_FRAC_VU*(1.0_wp-s_vu)*cvis_o3*(1.0_wp - itf_a_d1) &
+                          + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_w_ir(m_d1)*(1.0_wp - itf_a_d1)) &
+              + swdown_toa*(SW_FRAC_VU*(1.0_wp-s_vu)*cvis_o3*itf_a_d1*alb_vis &
+                          + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_w_ir(m_d1)*itf_a_d1*alb_ir) &
+                *(1.0_wp - aeros_sw_aerosol_itf(1.0_wp/SW_COSZ_O))
+        a_aer = min(a_aer, a_atm)
         if (l_o3) then
-            a_o3 = swdown_toa*SW_FRAC_VU*(1.0_wp - SW_RSCAT)*(1.0_wp - cvis_o3)
-            a_o3 = min(a_o3, a_atm)
+            a_o3 = swdown_toa*SW_FRAC_VU*(1.0_wp - s_vu)*(1.0_wp - cvis_o3)
+            a_o3 = min(a_o3, a_atm - a_aer)
         else
             a_o3 = 0.0_wp
         end if
-        a_w = a_atm - a_o3
+        a_w = a_atm - a_o3 - a_aer
+        waersum = 0.0_wp; pc = 0.0_wp
+        do k = 1, nlev
+            pc = pc + dp_lev(k)
+            waer(k) = dp_lev(k)*((pc - 0.5_wp*dp_lev(k))/sum(dp_lev(1:nlev)))**2
+            waersum = waersum + waer(k)
+        end do
 
         ! Vertical distribution of the water-vapour absorption: the drop of the
         ! band transmission across each layer, evaluated on the PRESSURE-SCALED
@@ -534,7 +585,8 @@ contains
             wo3 = w; wo3sum = wsum
         end if
         do k = 1, nlev
-            heat(k) = (grav/cp_d)*(a_w*(w(k)/wsum) + a_o3*(wo3(k)/wo3sum))/dp_lev(k)
+            heat(k) = (grav/cp_d)*(a_w*(w(k)/wsum) + a_o3*(wo3(k)/wo3sum) &
+                                   + a_aer*(waer(k)/waersum))/dp_lev(k)
         end do
         return
 

@@ -148,6 +148,17 @@
     cld_rhc_ice      = 0.60
     cld_lwc          = 0.034e-3
     cld_iwc          = 0.014e-3
+    ! Background aerosol in the clear-sky SW (aeros_sw_aerosol: the SESAM
+    ! aerosol branch, CLIMBER-X ars_ot/ars_im): uniform, constant optical
+    ! thickness and imaginary refractive index -- climate-independent, so valid
+    ! for present day, climate change and paleo alike. Calibrated 2026-09-09 on
+    ! validate_era5 to close the clean 40-60S ocean clear-sky surface SW (+0.2
+    ! W/m2, TOA -0.2) with the ecCKD near-IR H2O fit back at SESAM's values;
+    ! global surface down SW +3.2, net -0.5. The remaining continental excess
+    ! (+8 to +19, Europe/E Asia/Sahara) is present-day dust/pollution for a
+    ! dust or SO4 field, as in CLIMBER-X. 0 = off (bit-for-bit clean sky).
+    sw_aer_ot        = 0.12
+    sw_aer_im        = 0.02
     l_cloud_prog     = .false.
     cloud_rhc_sfc    = 0.40
     cloud_rhc_top    = 0.60

@@ -36,8 +36,10 @@ program validate_era5
     use aeros_ecckd,     only : aeros_ecckd_lw_clearsky_column, &
                                 aeros_ecckd_sw_clearsky_column, &
                                 aeros_ecckd_lw_cloudy_column, &
-                                aeros_ecckd_sw_cloudy_column
+                                aeros_ecckd_sw_cloudy_column, &
+                                aeros_ecckd_sw_configure
     use aeros_cloud,     only : aeros_cloud_diagnose
+    use aeros_sw_aerosol, only : aeros_sw_aerosol_configure, SW_AER_OT, SW_AER_IM
     use ncio,            only : nc_create, nc_write_dim, nc_write, nc_read, nc_size
 
     implicit none
@@ -113,8 +115,30 @@ program validate_era5
             read(carg, *) co2_ppm_run
         end block
     end if
-    write(*,"(a,l1,a,f7.1)") " validate_era5:: ecCKD LW = ", lw_ecckd, &
-                             "   CO2 ppm = ", co2_ppm_run
+    ! args 5-8: background aerosol ot / im (aeros_sw_aerosol) and the ecCKD
+    ! near-IR H2O fit a1 / b2 (aeros_ecckd_sw_configure), for the calibration sweep
+    block
+        character(len=32) :: arg
+        real(wp) :: v
+        if (command_argument_count() >= 5) then
+            call get_command_argument(5, arg); read(arg, *) v
+            call aeros_sw_aerosol_configure(ot=v)
+        end if
+        if (command_argument_count() >= 6) then
+            call get_command_argument(6, arg); read(arg, *) v
+            call aeros_sw_aerosol_configure(im=v)
+        end if
+        if (command_argument_count() >= 7) then
+            call get_command_argument(7, arg); read(arg, *) v
+            call aeros_ecckd_sw_configure(a1_w=v)
+        end if
+        if (command_argument_count() >= 8) then
+            call get_command_argument(8, arg); read(arg, *) v
+            call aeros_ecckd_sw_configure(b2_w=v)
+        end if
+    end block
+    write(*,"(a,l1,a,f7.1,a,f6.3,a,f6.3)") " validate_era5:: ecCKD LW = ", lw_ecckd, &
+                             "   CO2 ppm = ", co2_ppm_run, "   aerosol ot/im = ", SW_AER_OT, " / ", SW_AER_IM
     dpl = trim(base)//"/monthly-pressure-levels/"
     dsl = trim(base)//"/monthly-single-levels/"
 
@@ -505,6 +529,7 @@ contains
         call wmap("swnet_sfc_mod", swn_m); call wmap("swnet_sfc_era", swn_e)
         call wbias("swnet_sfc", swn_m, swn_e)
         call wmap("insol", insol)
+        call nc_write(trim(fout), "coszen", coszen, dim1="lat")
         ! all-sky and cloud radiative effect
         call wmap("olr_allsky_mod", olra_m); call wmap("olr_allsky_era", olra_e)
         call wbias("olr_allsky", olra_m, olra_e)

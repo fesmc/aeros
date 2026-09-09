@@ -37,6 +37,7 @@ program test_radiation
     use aeros_vertical
     use aeros_condensation, only : aeros_qsat
     use aeros_defs,         only : S0, pi
+    use aeros_sw_aerosol, only : aeros_sw_aerosol_configure
     use aeros_radiation,    only : aeros_lw_clearsky_column, &
                                    aeros_lw_cloudy_column, &
                                    aeros_sw_clearsky_column, aeros_sw_cloudy_column, &
@@ -353,6 +354,32 @@ contains
                    "shortwave warms the column at a fraction of a K/day", nfail)
         call check(abs(col_heat - a_atm)/a_atm < 1.0e-12_wp, &
                    "column SW heating equals the absorbed flux", nfail)
+
+        ! --- background aerosol (aeros_sw_aerosol, CLIMBER-X ot/im) ----------
+        ! With the calibrated constant on: less SW reaches the surface, the
+        ! column absorbs more, energy still closes, the extra heating sits in
+        ! the lowest layer; switched back off the column is bit-identical.
+        block
+            real(wp) :: heat_a(nlev), up_a, dw_a, net_a, a_a, col_a, heat_0(nlev), up_0, dw_0, net_0
+            call aeros_sw_aerosol_configure(ot=0.12_wp, im=0.02_wp)
+            call aeros_sw_clearsky_column(nlev, q, o3, .FALSE., dp_lev, swdn, cz, &
+                                          0.06_wp, 0.06_wp, heat_a, up_a, dw_a, net_a)
+            call aeros_sw_aerosol_configure(ot=0.0_wp)
+            call aeros_sw_clearsky_column(nlev, q, o3, .FALSE., dp_lev, swdn, cz, &
+                                          0.06_wp, 0.06_wp, heat_0, up_0, dw_0, net_0)
+            a_a = swdn - up_a - net_a
+            col_a = 0.0_wp
+            do kk = 1, nlev
+                col_a = col_a + (real(cp_d, wp)/real(grav, wp))*heat_a(kk)*dp_lev(kk)
+            end do
+            write(*,"(a,3f8.2)") "   aerosol ot 0.12: surface down / absorbed / TOA up ", dw_a, a_a, up_a
+            call check(dw_a < sw_dw - 5.0_wp, "aerosol reduces the surface down SW", nfail)
+            call check(a_a > a_atm + 5.0_wp, "aerosol adds atmospheric SW absorption", nfail)
+            call check(abs(col_a - a_a)/a_a < 1.0e-12_wp, "column SW heating closes with aerosol", nfail)
+            call check(heat_a(nlev) > heat(nlev), "aerosol heating lands in the lowest layer", nfail)
+            call check(dw_0 == sw_dw .and. up_0 == sw_up .and. all(heat_0 == heat), &
+                       "aerosol off is bit-identical to the clean sky", nfail)
+        end block
         return
     end subroutine test_shortwave
 
