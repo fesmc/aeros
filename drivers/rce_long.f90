@@ -81,6 +81,8 @@ program rce_long
     character(len=32) :: conv_scheme = "sbm_frierson" ! "sbm" | "sbm_frierson" | "manabe"
     real(wp) :: conv_rh_ref = 0.7_wp        ! SBM reference RH the moist adiabat is dried toward
     real(wp) :: conv_rh_ref_bl = 0.85_wp    ! SBM sub-cloud (mixed-layer) reference RH
+    real(wp) :: conv_rh_hscale = -1.0_wp    ! CLIMBER-X RH-profile reference: scale height [m], <= 0 off
+    real(wp) :: conv_rh_zpbl = 1000.0_wp, conv_rh_ztop = 3000.0_wp
     real(wp) :: c_d = -1.0_wp         ! surface momentum drag (0 = off; <= 0 log-law; brakes the low-level jet)
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
     logical  :: l_rad = .TRUE., l_sponge = .FALSE., l_vdiff = .FALSE.
@@ -379,6 +381,9 @@ program rce_long
     ts%cnv%tau = conv_tau
     ts%cnv%rh_ref = conv_rh_ref
     ts%cnv%rh_ref_bl = conv_rh_ref_bl
+    ts%cnv%rh_hscale = conv_rh_hscale
+    ts%cnv%rh_z_pbl  = conv_rh_zpbl
+    ts%cnv%rh_z_top  = conv_rh_ztop
     ts%cnv%dry_adjust = l_dry_adjust
     select case (trim(conv_scheme))
     case ("sbm");          ts%cnv%scheme = SCHEME_SBM
@@ -1395,6 +1400,9 @@ contains
         call nml_read(nmlfile, "rce", "conv_tau", conv_tau)
         call nml_read(nmlfile, "rce", "conv_rh_ref", conv_rh_ref, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "conv_rh_ref_bl", conv_rh_ref_bl, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "conv_rh_hscale", conv_rh_hscale, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "conv_rh_zpbl", conv_rh_zpbl, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "conv_rh_ztop", conv_rh_ztop, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "c_h", c_h, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "c_e", c_e, &

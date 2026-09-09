@@ -6,8 +6,8 @@
 
 All on `main` through the 2026-09-09 aerosol/land commits (see the 2026-09-09 update block
 below: background aerosol ac75600, sulfate 9186c70, r_s_land 4edcfd0, dust e89a263, indirect
-effect + `cld_lwc 0.032e-3`; climatology `docs/refs/realearth_metrics_2026-09-09_L6_aerosol.md`;
-27/27 tests). The paragraph that follows describes the 11ddd15 state it was built on. Real-Earth T21L6, dt 3600,
+effect; then the SBM RH-profile reference for deficit 2 with `cld_rhc_ice 0.40`, `cld_lwc
+0.022e-3`; climatology `docs/refs/realearth_metrics_2026-09-09_L6_rhprof.md`; 27/27 tests). The paragraph that follows describes the 11ddd15 state it was built on. Real-Earth T21L6, dt 3600,
 ~2700 SYPD (95–105 s per 3-yr run). The harness namelist `mwm/D_realearth/aeros_realearth_T21L6.nml`
 is unchanged; every knob that moved is a default in `input/rce_defaults.nml`. Climatology:
 `docs/refs/realearth_metrics_2026-09-08_L6_ice.md` (the chain of the day: `..._2026-09-07_L6_surface`,
@@ -151,6 +151,24 @@ CLIMBER-X's column cover (clouds.f90: cld_rh = (0.45 + 0.5 tanh(200 w_eff)) ram^
 surface-inversion low-cloud term, freeze-dry; Sundqvist profile rescaled for the vertical
 placement) was designed but NOT implemented: new cloud schemes are under development in
 CLIMBER-X, wait for those.
+
+### Update 2026-09-09 (late): deficit 2 humidity -- CLIMBER-X RH profile as the SBM reference
+
+Tropical σ 0.365 budget (dump D2): convection +2.5 K/day, radiation −2.3, dynamics −0.7. The
+uniform `conv_rh_ref` 0.6 held the UT at RH 67 (ERA5 37) and the mid-troposphere moist. CLIMBER-X's
+humidity profile (vesta.f90 `rh_prof`: ram to 1 km, exp(−(z−z_pbl)/2500 m) to 3 km, constant
+above) is now the SBM cloud-layer reference (`aeros_convection` `rh_ref_profile`; keys
+`conv_rh_hscale` (<= 0 = uniform, bit-for-bit) / `conv_rh_zpbl` / `conv_rh_ztop`; `conv_rh_ref`
+plays ram, `conv_rh_ref_bl` stays for the sub-cloud layer). Sweep P1–P8: CLIMBER-X's values with
+the 0.85 anchor dried the UT to 44 but (i) the diagnostic high cloud vanished (LW CRE 22 → 13,
+TOA −21, troposphere −2 to −5 K, 850 hPa RH 85 %) and (ii) 850 hPa follows the profile's
+boundary-layer leg. Adopted (P6 = FINAL4): **`conv_rh_ref 0.80`, `conv_rh_zpbl 500`,
+`conv_rh_hscale 3000`, `conv_rh_ztop 3000`, `cld_rhc_ice 0.40`, `cld_lwc 0.022e-3`**: tropics RH
+40/34/44/71/86 (ERA5 37/45/56/70/84), clear-sky OLR 258 → 262.5 (264), OLR 243.9 (242), CRE
+−45/+18.6, TOA −0.08, P 3.02, W 21.6 (24.5: mid-troposphere ~10 % dry). σ 0.365 T bias +2.7
+in every variant: the surface-anchored moist adiabat (no entrainment) is the lever, cf. CLIMBER-X's
+parameterised lapse rates (vesta gams/gamb/gamt). 30–45S mid-troposphere −4.4/−4.0 (was
+−4.1/−3.7). Climatology `docs/refs/realearth_metrics_2026-09-09_L6_rhprof.md`.
 
 **Still open for deficit 1:** the NH continental clear-sky excess (+10 annual, ~+20 in
 summer at 40-70N land) is ERA5's Tegen aerosol (dust + carbonaceous), beyond the sulfate

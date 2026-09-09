@@ -40,8 +40,19 @@
     ! surface-to-LZB depth + integrated Pt/Pq trigger (stays active at RCE, dries
     ! the free troposphere); "manabe" = the reference pairwise scheme.
     conv_scheme      = "sbm_frierson"
-    conv_rh_ref      = 0.6
+    conv_rh_ref      = 0.80
     conv_rh_ref_bl   = 0.85
+    ! CLIMBER-X RH-profile reference for the SBM cloud layer (vesta rh_prof):
+    ! conv_rh_ref (CLIMBER-X's ram) to conv_rh_zpbl, exp(-(z - zpbl)/hscale) to conv_rh_ztop,
+    ! constant above. hscale <= 0 = the uniform conv_rh_ref (off). Adopted
+    ! 2026-09-09 (run P6): CLIMBER-X's 1000/2500/3000 m with the anchor at
+    ! 0.85 dried the tropical UT to ERA5 but moistened 850 hPa to 85 %; anchor
+    ! 0.80, z_pbl 500, h 3000 gives the tropical RH 40/34/44/71/86 % at sigma
+    ! 0.36-0.96 (ERA5 37/45/56/70/84; before 67/55/57/61/85), clear-sky OLR
+    ! 258 -> 262.5 (264). Needs cld_rhc_ice 0.40 and cld_lwc 0.022e-3.
+    conv_rh_hscale   = 3000.0
+    conv_rh_zpbl     = 500.0
+    conv_rh_ztop     = 3000.0
     ! Boundary-layer vertical diffusion. richardson = .true. diagnoses the mixed-
     ! layer depth from the bulk Richardson number (Frierson 2006 / SpeedyWeather);
     ! .false. uses the legacy fixed vdiff_sigma depth. Both diffuse dry static
@@ -150,10 +161,14 @@
     ! fraction of a layer (blended by the liquid fraction); < 0 = off. 0.60
     ! since 2026-09-08 with cond_rh_crit_ice 0.80 (ice cloud below water
     ! saturation; 0.40 gave LW CRE +33, 0.70 +14; ERA5 +22).
-    cld_rhc_ice      = 0.60
+    ! 0.60 -> 0.40 (2026-09-09): with the SBM reference profile the tropical
+    ! UT sits at RH 40 % and the diagnostic high cloud vanished (LW CRE 22 -> 13).
+    cld_rhc_ice      = 0.40
     ! 0.034e-3 -> 0.032e-3 (2026-09-09): the sulfate indirect effect thickens the
     ! liquid cloud (TOA -1.4 W/m2 at 0.034e-3); re-balanced to TOA +0.1.
-    cld_lwc          = 0.032e-3
+    ! 0.032e-3 -> 0.022e-3 (2026-09-09, with the SBM reference profile): SW CRE
+    ! -63 -> -45 (ERA5 -46), TOA -0.1.
+    cld_lwc          = 0.022e-3
     cld_iwc          = 0.014e-3
     ! Background aerosol in the clear-sky SW (aeros_sw_aerosol: the SESAM
     ! aerosol branch, CLIMBER-X ars_ot/ars_im): uniform, constant optical

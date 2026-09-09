@@ -147,6 +147,15 @@ module aeros_convection
         ! dried to rh_ref. Keeps the boundary layer near its observed humidity
         ! (tropical ocean 85 %) while the cloud layer is dried to rh_ref.
         real(wp) :: rh_ref_bl = 0.85_wp  ! [-]
+        ! Height-dependent cloud-layer reference (CLIMBER-X vesta.f90 rh_prof):
+        ! rh_ref (CLIMBER-X's ram, the column-representative RH) up to rh_z_pbl
+        ! above the surface, decaying exponentially with scale height rh_hscale
+        ! up to rh_z_top, constant above (CLIMBER-X: c_hrs_5 1000 m, c_hrs_1
+        ! 2500 m, c_hrs_4 3000 m => 0.45 rh_ref in the free troposphere).
+        ! rh_hscale <= 0 = off: the uniform rh_ref (bit-for-bit).
+        real(wp) :: rh_hscale = -1.0_wp  ! [m]
+        real(wp) :: rh_z_pbl  = 1000.0_wp
+        real(wp) :: rh_z_top  = 3000.0_wp
 
         ! Dry convective adjustment, run BEFORE the moist scheme. A moist scheme
         ! (SBM here) will not touch a hot, dry, super-adiabatic layer: once the
@@ -319,7 +328,8 @@ contains
                     call dry_adjust_column(tcol, pfull, dpc, nlev, cnv%tau, dt)
 
                 call adjust_column(cnv%scheme, tcol, qcol, pfull, dpc, nlev, &
-                                        cnv%tau, cnv%rh_ref, cnv%rh_ref_bl, dt)
+                                        cnv%tau, cnv%rh_ref, cnv%rh_ref_bl, dt, &
+                                        cnv%rh_hscale, cnv%rh_z_pbl, cnv%rh_z_top)
 
                 ! Temperature change as a forward increment [K]; humidity set to
                 ! the adjusted profile; precip is the column water removed.
@@ -338,7 +348,8 @@ contains
 
     end subroutine aeros_convection_apply
 
-    subroutine adjust_column(scheme, t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt)
+    subroutine adjust_column(scheme, t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt, &
+                             rh_hscale, rh_z_pbl, rh_z_top)
         ! Dispatch to the convective scheme. tau/rh_ref/dt are the Simplified
         ! Betts-Miller parameters and are ignored by Manabe.
 
@@ -349,12 +360,14 @@ contains
         real(wp), intent(in)    :: pfull(:), dp(:)
         integer,  intent(in)    :: nlev
         real(wp), intent(in)    :: tau, rh_ref, rh_ref_bl, dt
+        real(wp), intent(in)    :: rh_hscale, rh_z_pbl, rh_z_top
 
         select case (scheme)
         case (SCHEME_SBM)
             call sbm_adjust(t, q, pfull, dp, nlev, tau, rh_ref, dt)
         case (SCHEME_SBM_FRIERSON)
-            call sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt)
+            call sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt, &
+                                     rh_hscale, rh_z_pbl, rh_z_top)
         case (SCHEME_MANABE)
             call manabe_adjust(t, q, pfull, dp, nlev)
         case default
@@ -509,7 +522,8 @@ contains
 
     end subroutine sbm_adjust
 
-    subroutine sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt)
+    subroutine sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt, &
+                                   rh_hscale, rh_z_pbl, rh_z_top)
         ! Simplified Betts-Miller with the Frierson (2007) / SpeedyWeather trigger
         ! and convecting depth -- the variant that stays active at RCE. It differs
         ! from sbm_adjust (above) in exactly two places; the reference profiles,
@@ -551,6 +565,7 @@ contains
         real(wp), intent(in)    :: pfull(:), dp(:)
         integer,  intent(in)    :: nlev
         real(wp), intent(in)    :: tau, rh_ref, rh_ref_bl, dt
+        real(wp), intent(in)    :: rh_hscale, rh_z_pbl, rh_z_top
 
         real(wp) :: phi(nlev), tref(nlev), qref(nlev)
         real(wp) :: hb, hstar, qs, dqs, cp, a, lvk(nlev), lpq
@@ -611,7 +626,7 @@ contains
             if (k <= kbase) then
                 tref(k) = moist_adiabat_temp(hb - phi(k), pfull(k), t(k))
                 call aeros_qsat(tref(k), pfull(k), qs, dqs)
-                qref(k) = rh_ref*qs
+                qref(k) = rh_ref_profile(phi(k)/real(grav, wp))*qs
             else
                 tref(k) = t(nlev)*(pfull(k)/pfull(nlev))**real(kappa, wp)
                 call aeros_qsat(tref(k), pfull(k), qs, dqs)
@@ -661,6 +676,22 @@ contains
         end if
 
         return
+
+    contains
+
+        pure real(wp) function rh_ref_profile(z) result(rh)
+            ! Cloud-layer reference RH at height z above the surface: the
+            ! uniform rh_ref, or CLIMBER-X's profile anchored on rh_ref_bl.
+            real(wp), intent(in) :: z
+            ! rh_ref plays CLIMBER-X's ram (the column-representative RH); the
+            ! sub-cloud mixed layer keeps its own rh_ref_bl.
+            if (rh_hscale <= 0.0_wp .or. z <= rh_z_pbl) then
+                rh = rh_ref
+            else
+                rh = rh_ref*exp(-(min(z, rh_z_top) - rh_z_pbl)/rh_hscale)
+            end if
+        end function rh_ref_profile
+
 
     end subroutine sbm_frierson_adjust
 
