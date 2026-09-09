@@ -53,6 +53,9 @@
     conv_rh_hscale   = 3000.0
     conv_rh_zpbl     = 500.0
     conv_rh_ztop     = 3000.0
+    ! Depth of the SBM's non-precipitating (shallow) relaxation as p/p_s: the
+    ! cloud layer only, instead of up to the level of zero buoyancy. <= 0 = off.
+    conv_shallow_sig = -1.0
     ! Boundary-layer vertical diffusion. richardson = .true. diagnoses the mixed-
     ! layer depth from the bulk Richardson number (Frierson 2006 / SpeedyWeather);
     ! .false. uses the legacy fixed vdiff_sigma depth. Both diffuse dry static

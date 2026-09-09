@@ -83,6 +83,7 @@ program rce_long
     real(wp) :: conv_rh_ref_bl = 0.85_wp    ! SBM sub-cloud (mixed-layer) reference RH
     real(wp) :: conv_rh_hscale = -1.0_wp    ! CLIMBER-X RH-profile reference: scale height [m], <= 0 off
     real(wp) :: conv_rh_zpbl = 1000.0_wp, conv_rh_ztop = 3000.0_wp
+    real(wp) :: conv_shallow_sig = -1.0_wp  ! shallow-branch depth as p/p_s; <= 0 = full layer
     real(wp) :: c_d = -1.0_wp         ! surface momentum drag (0 = off; <= 0 log-law; brakes the low-level jet)
     logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
     logical  :: l_rad = .TRUE., l_sponge = .FALSE., l_vdiff = .FALSE.
@@ -384,6 +385,7 @@ program rce_long
     ts%cnv%rh_hscale = conv_rh_hscale
     ts%cnv%rh_z_pbl  = conv_rh_zpbl
     ts%cnv%rh_z_top  = conv_rh_ztop
+    ts%cnv%shallow_sig = conv_shallow_sig
     ts%cnv%dry_adjust = l_dry_adjust
     select case (trim(conv_scheme))
     case ("sbm");          ts%cnv%scheme = SCHEME_SBM
@@ -1415,6 +1417,7 @@ contains
         call nml_read(nmlfile, "rce", "conv_rh_hscale", conv_rh_hscale, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "conv_rh_zpbl", conv_rh_zpbl, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "conv_rh_ztop", conv_rh_ztop, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "conv_shallow_sig", conv_shallow_sig, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "c_h", c_h, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "c_e", c_e, &

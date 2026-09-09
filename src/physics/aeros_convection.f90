@@ -156,6 +156,13 @@ module aeros_convection
         real(wp) :: rh_hscale = -1.0_wp  ! [m]
         real(wp) :: rh_z_pbl  = 1000.0_wp
         real(wp) :: rh_z_top  = 3000.0_wp
+        ! Shallow (non-precipitating) branch depth (sbm_frierson): the shallow
+        ! relaxation is confined to levels with p >= shallow_sig * p_s (the
+        ! cloud layer) instead of the whole layer up to the level of zero
+        ! buoyancy, which over the subtropical oceans heated the mid-troposphere
+        ! at +1.3 K/day in place of subsidence (2026-09-09: 30-45S -4 K at
+        ! 500-700 hPa, MMC half of ERA5). <= 0 = the full layer (bit-for-bit).
+        real(wp) :: shallow_sig = -1.0_wp
 
         ! Dry convective adjustment, run BEFORE the moist scheme. A moist scheme
         ! (SBM here) will not touch a hot, dry, super-adiabatic layer: once the
@@ -329,7 +336,7 @@ contains
 
                 call adjust_column(cnv%scheme, tcol, qcol, pfull, dpc, nlev, &
                                         cnv%tau, cnv%rh_ref, cnv%rh_ref_bl, dt, &
-                                        cnv%rh_hscale, cnv%rh_z_pbl, cnv%rh_z_top)
+                                        cnv%rh_hscale, cnv%rh_z_pbl, cnv%rh_z_top, cnv%shallow_sig)
 
                 ! Temperature change as a forward increment [K]; humidity set to
                 ! the adjusted profile; precip is the column water removed.
@@ -349,7 +356,7 @@ contains
     end subroutine aeros_convection_apply
 
     subroutine adjust_column(scheme, t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt, &
-                             rh_hscale, rh_z_pbl, rh_z_top)
+                             rh_hscale, rh_z_pbl, rh_z_top, shallow_sig)
         ! Dispatch to the convective scheme. tau/rh_ref/dt are the Simplified
         ! Betts-Miller parameters and are ignored by Manabe.
 
@@ -360,14 +367,14 @@ contains
         real(wp), intent(in)    :: pfull(:), dp(:)
         integer,  intent(in)    :: nlev
         real(wp), intent(in)    :: tau, rh_ref, rh_ref_bl, dt
-        real(wp), intent(in)    :: rh_hscale, rh_z_pbl, rh_z_top
+        real(wp), intent(in)    :: rh_hscale, rh_z_pbl, rh_z_top, shallow_sig
 
         select case (scheme)
         case (SCHEME_SBM)
             call sbm_adjust(t, q, pfull, dp, nlev, tau, rh_ref, dt)
         case (SCHEME_SBM_FRIERSON)
             call sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt, &
-                                     rh_hscale, rh_z_pbl, rh_z_top)
+                                     rh_hscale, rh_z_pbl, rh_z_top, shallow_sig)
         case (SCHEME_MANABE)
             call manabe_adjust(t, q, pfull, dp, nlev)
         case default
@@ -523,7 +530,7 @@ contains
     end subroutine sbm_adjust
 
     subroutine sbm_frierson_adjust(t, q, pfull, dp, nlev, tau, rh_ref, rh_ref_bl, dt, &
-                                   rh_hscale, rh_z_pbl, rh_z_top)
+                                   rh_hscale, rh_z_pbl, rh_z_top, shallow_sig)
         ! Simplified Betts-Miller with the Frierson (2007) / SpeedyWeather trigger
         ! and convecting depth -- the variant that stays active at RCE. It differs
         ! from sbm_adjust (above) in exactly two places; the reference profiles,
@@ -565,12 +572,12 @@ contains
         real(wp), intent(in)    :: pfull(:), dp(:)
         integer,  intent(in)    :: nlev
         real(wp), intent(in)    :: tau, rh_ref, rh_ref_bl, dt
-        real(wp), intent(in)    :: rh_hscale, rh_z_pbl, rh_z_top
+        real(wp), intent(in)    :: rh_hscale, rh_z_pbl, rh_z_top, shallow_sig
 
         real(wp) :: phi(nlev), tref(nlev), qref(nlev)
         real(wp) :: hb, hstar, qs, dqs, cp, a, lvk(nlev), lpq
-        real(wp) :: sumdp, sumqref, pq, pt, shift, ct, fq, tdry
-        integer  :: k, ktop, kbase
+        real(wp) :: sumdp, sumqref, pq, pt, shift, ct, fq, tdry, ps
+        integer  :: k, ktop, kbase, ks
 
         cp = real(cp_d, wp)
         do k = 1, nlev
@@ -663,13 +670,34 @@ contains
             ! (zero when L is uniform; with the mixed-phase L it is the
             ! phase-change energy of moving vapour between warm and cold layers),
             ! relax both. No precipitation, column water and MSE both conserved.
+            ! Depth of the shallow relaxation: the cloud layer (p >= shallow_sig
+            ! p_s) when shallow_sig > 0, else the whole [ktop, nlev] layer. The
+            ! column integrals are redone over the sub-layer so the closure
+            ! (zero net moisture, zero net heating) holds on it.
+            ks = ktop
+            if (shallow_sig > 0.0_wp) then
+                ps = pfull(nlev) + 0.5_wp*dp(nlev)
+                ks = nlev
+                do k = nlev - 1, ktop, -1
+                    if (pfull(k) >= shallow_sig*ps) ks = k
+                end do
+                if (ks > ktop) then
+                    sumdp = 0.0_wp; sumqref = 0.0_wp; pq = 0.0_wp; pt = 0.0_wp
+                    do k = ks, nlev
+                        sumdp   = sumdp   + dp(k)
+                        sumqref = sumqref + qref(k)*dp(k)
+                        pq      = pq  + (q(k) - qref(k))*dp(k)
+                        pt      = pt  + cp*(tref(k) - t(k))*dp(k)
+                    end do
+                end if
+            end if
             fq = 1.0_wp + pq/max(sumqref, 1.0e-30_wp)
             lpq = 0.0_wp
-            do k = ktop, nlev
+            do k = ks, nlev
                 lpq = lpq + lvk(k)*(fq*qref(k) - q(k))*dp(k)
             end do
             ct = (pt + lpq)/(cp*sumdp)
-            do k = ktop, nlev
+            do k = ks, nlev
                 t(k) = t(k) + a*(tref(k) - ct - t(k))
                 q(k) = q(k) + a*(fq*qref(k) - q(k))
             end do

@@ -1,6 +1,102 @@
 # M2 handoff — where to pick up
 
-## ►► NEXT SESSION (written 2026-09-08 end): state, what changed, and what to do
+## ►► NEXT SESSION (written 2026-09-09 end): state, what changed, and what to do
+
+### Where the model is
+
+All on `main` (last code commit: the SBM shallow-depth key; before it 8ea4fad, e543151, e56e375,
+e89a263, 4edcfd0, 9186c70, ac75600), 27/27 tests. Same production configuration (real-Earth
+T21L6, dt 3600, ~2700 SYPD, harness namelist `mwm/D_realearth/aeros_realearth_T21L6.nml`
+unchanged; every knob is a default in `input/rce_defaults.nml`). Climatology of the current
+defaults: `docs/refs/realearth_metrics_2026-09-09_L6_rhprof.md` (run FINAL4/FINAL5 = P6).
+
+Year-3 means vs ERA5: TOA −0.08 · OLR 243.9 (242) · clear-sky OLR 262.5 (264; was 258) · CRE
+−45.0/+18.6 (−46/+22) · cover 0.49 (0.63) · P = E 3.02 (2.9) · LH 87 (84) · column water 21.6
+(24.5) · max [u] 31.4 (33.7) · tropical RH 40/34/44/71/86 % at σ 0.36–0.96 (37/45/56/70/84) ·
+tropical T +2.7 K at σ 0.365 · 30–45S −4.4/−4.0 at σ 0.56/0.73 · NH-land 2 m amplitude 35.0
+(33.6), July +4.4 K.
+
+### Design rule (user, 2026-09-09)
+
+Physics beyond the dynamical core: look at CLIMBER-X (`~/models/climber-x`) first and port what is
+relevant and appropriate to a 3-D model; where a CLIMBER-X construct is a 2-D fit for its own
+column, use new physics consistent with the new atmosphere instead. Constants over ERA5-fitted
+maps (paleo-valid). The CLIMBER-X cloud scheme is on hold (new schemes under development there).
+
+### What changed 2026-09-09 (chronological; detail in the update blocks below)
+
+1. **Deficit 1 diagnosed** (summer NH land +3 to +4.5 K): clear-sky SW (the SESAM aerosol branch
+   had been dropped; ERA5's continental aerosol) plus the bucket's spring over-evaporation; not
+   cloud (JJA TOA reflection over land matched ERA5), not overlap.
+2. **CLIMBER-X aerosol suite** (`src/physics/aeros_sw_aerosol.f90`, both SW columns): background
+   `sw_aer_ot 0.12 / sw_aer_im 0.02` calibrated on the clean 40–60S ocean in `validate_era5`
+   (ac75600; ecCKD H2O fit back at SESAM's); sulfate direct effect from CLIMBER-X's CMIP6 SO4
+   file, `so4_year 2003` (9186c70); dust optical thickness from CLIMBER-X's fake_dust deposition
+   inverted with its dust.f90 balance, `input/dust_ot_lambert2015_{present,lgm}.nc`,
+   `dust_scale 0.3 / dust_im 0.01` (e89a263); sulfate indirect effect `so4_indirect` (e56e375).
+   All off at 0/"" (paleo), all in `validate_era5` (args 5–13). Offline clear sky: clean ocean
+   and Sahara closed; Europe/Siberia +11–15 W/m² remain (carbonaceous, no CLIMBER-X term).
+3. **Land surface resistance** `surf_r_s_land 100` s/m (4edcfd0; CLIMBER-X r_s in series with
+   r_a, moisture only): April–June land E and P on ERA5, global P 2.86, LH 83 — at the cost of
+   a warmer July (SH 75 vs 40) while the radiation is short.
+4. **Deficit 2 humidity** (e543151): the SBM cloud-layer reference humidity is CLIMBER-X's
+   `vesta rh_prof` (`conv_rh_ref 0.80` = ram, `conv_rh_zpbl 500`, `conv_rh_hscale 3000`,
+   `conv_rh_ztop 3000`; <= 0 = the old uniform reference), with `cld_rhc_ice 0.40` and
+   `cld_lwc 0.022e-3`: tropical UT RH 67 → 40 (37), clear-sky OLR +4.5.
+5. **Deficit 2 temperature** (σ 0.365 +2.7 K): NOT CLIMBER-X's lapse rates (its `vesta`
+   parabola is warmer aloft than the moist adiabat on our column); it is the SBM's undilute,
+   surface-anchored reference + WTG from the warmest columns + the deep-closure shift.
+   Accepted; lever = entraining reference (`conv_entrain`, ~0.1–0.2 /km), not implemented.
+6. **30–45S mid-troposphere cold** = the MMC (half of ERA5 at L6; `diag/mmc_vs_era5.py`).
+   Eddies 75–100 % of Peixoto–Oort ([u'v'] now in the dump: `uv`, `uv_stat`), surface
+   westerlies right, hyperdiffusion irrelevant. Budget: convection +1.3 K/day at 500 hPa cancels
+   radiation; the rain at 30–45S matches ERA5 (2.75/2.74) but 45–60S is short (2.05/2.93) and
+   the subtropics long (2.79/2.12) — the SBM delivers the frontal rain with a moist-adiabatic
+   heating profile and the rain belt sits equatorward. Confining the SHALLOW branch
+   (`conv_shallow_sig`, tested 0.70/0.80) changed nothing: the heating is the DEEP branch. An
+   L12 run with the current physics is unbalanced (L6-specific lid trap / BD file / cloud
+   thresholds: TOA +27, lid −17 K) but has 65–70 % of the MMC and −2.5 to −3 K there: roughly
+   half resolution, half the convection scheme.
+
+### Known deficits, in the order to attack them
+
+1. **Summer NH land +4.4 K (July)** — radiative: the diagnostic cloud's summer-land deficit
+   (cover 0.37 vs 0.57; ON HOLD for CLIMBER-X's new cloud scheme) and Europe/Siberia clear-sky
+   aerosol (+11–15 W/m²) with no CLIMBER-X representation. Water budget is on ERA5.
+2. **MMC half of ERA5 / 30–45S −4 K / storm-track rain equatorward** — resolution (L6) plus
+   the SBM producing frontal rain. Routes: (a) L8/L12 production with a recalibration of the
+   lid trap (`cond_lid_q_max`), the BD w* file (`aeros_bd`, L6-derived) and the cloud
+   thresholds; (b) a large-scale/convective partition (the SBM firing over 30–45S ocean where
+   ERA5's rain is frontal). The dump budgets (`tbias_vs_era5.py X.nc X_zm.nc`, `q_cnv`) show it.
+3. **Tropical UT +2.7 K at σ 0.365** — entraining SBM reference (design question).
+4. **Cover 0.49 vs 0.63, LW CRE 18.6 vs 22, column water 21.6 vs 24.5** — the cover deficit is
+   intermittency (ERA5's monthly layer fractions overlapped give 0.21–0.26 vs tcc 0.63); waits
+   for the cloud scheme. The mid-troposphere is ~10 % dry (the constant 0.35 leg of the
+   reference profile above 3 km).
+5. **Stratosphere/lid**: a resolved stratosphere (levels above 100 hPa, higher top) remains the
+   only route to an emergent Brewer–Dobson response; `aeros_bd` is the L6 stand-in.
+
+### Tools (all in `mwm/D_realearth/diag/`)
+
+`summary.sh`, `tbias_vs_era5.py monthly.nc [zonal_dump.nc]` (per-process budgets need
+`l_diag = .true.` in the namelist AND the dump as the 2nd command-line argument of
+`rce_long.x`), `land_budget.py`, `land_cycle.py`, `land_water.py`, `land_summer.py`,
+`lidtab.py`, `wind_vs_era5.py`, `flux_split.py`, `mmc_vs_era5.py`; `validate_era5.x base out
+ecckd co2 aer_ot aer_im a1 b2 so4_file so4_year dust_file dust_scale so4_indirect` for the
+offline clear-sky/CRE checks; `scripts/dust_ot_from_deposition.py`. Run pattern: copy the
+harness namelist, change `monthly_out`, insert `&rce` overrides after `c_soil = 5.0e6`; under zsh
+word-split loop variables with `${=var}`; a derived-type change needs `make clean`.
+
+### First actions next session
+
+1. Decide the MMC route (deficit 2 above): the L8/L12 recalibration is the structural fix for
+   two deficits (MMC, lid); the convective/large-scale partition is the cheaper physics test.
+2. Check `~/models/climber-x/src/atm/clouds.f90` for the new cloud scheme before any cloud work.
+3. Keep `bd_per_K`, `so4_file = ""`, `dust_file` (LGM file) in mind for non-present climates.
+
+---
+
+## ►► PREVIOUS (written 2026-09-08 end): state, what changed, and what to do
 
 ### Where the model is
 
