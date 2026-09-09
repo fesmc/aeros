@@ -308,6 +308,9 @@
     so4_file  = ""
     so4_year  = 2000
     so4_const = 0.0
+    dust_file  = ""       ! monthly dust optical-thickness maps (scripts/dust_ot_from_deposition.py); "" = none
+    dust_scale = 1.0
+    dust_im    = 0.01     ! dust imaginary refractive index (CLIMBER-X ars_im)
     tsi      = 1361.0
     seasonal = .FALSE.
     interval = 10800.0

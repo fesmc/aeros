@@ -84,7 +84,8 @@ module aeros_radiation
                                aeros_ecckd_lw_cloudy_column, &
                                aeros_ecckd_sw_cloudy_column
     use aeros_sw_aerosol, only : aeros_sw_aerosol_configure, aeros_sw_aerosol_scat, &
-                               aeros_sw_aerosol_itf, aeros_sw_so4_albedo, SW_AER_OT, SW_AER_IM
+                               aeros_sw_aerosol_itf, aeros_sw_so4_albedo, aeros_sw_aerosol_mix, &
+                               SW_AER_OT, SW_AER_IM
     use aeros_bcinput,  only : aeros_bcinput_read_field
     use nml,            only : nml_read
 
@@ -228,6 +229,16 @@ module aeros_radiation
         integer  :: so4_year  = 2000
         real(wp) :: so4_const = 0.0_wp
         real(wp), allocatable :: so4_map(:,:)
+        ! Dust optical thickness, added to the background aerosol per column:
+        ! monthly (lon,lat,12) maps from `dust_file` (scripts/dust_ot_from_
+        ! deposition.py on CLIMBER-X's fake_dust_* deposition), scaled by
+        ! `dust_scale`; interpolated to the day in seasonal mode, else the
+        ! annual mean. "" = none.
+        character(len=512) :: dust_file  = ""
+        real(wp) :: dust_scale = 1.0_wp
+        real(wp) :: dust_im    = 0.01_wp     ! dust imaginary index (CLIMBER-X ars_im)
+        real(wp), allocatable :: dust_clim(:,:,:)
+        real(wp), allocatable :: dust_ot(:,:)
         logical  :: seasonal = .FALSE.       ! .FALSE. = annual-mean insolation
         real(wp) :: doy0     = 0.0_wp        ! start day-of-year (seasonal mode)
         real(dp) :: time_bp  = 0.0_dp        ! orbital year before present (Laskar); 0 = present-day
@@ -272,6 +283,8 @@ module aeros_radiation
     public :: aeros_radiation_load
     public :: aeros_radiation_end
     public :: aeros_radiation_so4_load
+    public :: aeros_radiation_dust_load
+    public :: aeros_radiation_set_dust
     public :: aeros_radiation_apply
     public :: aeros_radiation_report
     public :: aeros_lw_clearsky_column
@@ -335,7 +348,8 @@ contains
 
         logical  :: enabled, seasonal
         integer  :: scheme
-        real(wp) :: co2_ppm, albedo, tsi, interval, doy0, aer_ot, aer_im, so4_const
+        real(wp) :: co2_ppm, albedo, tsi, interval, doy0, aer_ot, aer_im, so4_const, dust_scale, dust_im
+        character(len=512) :: dust_file
         real(dp) :: time_bp
         logical  :: l_o3, clouds
         integer  :: so4_year
@@ -346,6 +360,9 @@ contains
         so4_file  = rad%so4_file
         so4_year  = rad%so4_year
         so4_const = rad%so4_const
+        dust_file  = rad%dust_file
+        dust_scale = rad%dust_scale
+        dust_im    = rad%dust_im
         enabled  = rad%enabled
         scheme   = rad%scheme
         co2_ppm  = rad%co2_ppm
@@ -369,6 +386,9 @@ contains
         call nml_read(filename, "radiation", "so4_file", so4_file, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "so4_year", so4_year, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "so4_const", so4_const, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "dust_file", dust_file, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "dust_scale", dust_scale, defaults_file=defaults_file)
+        call nml_read(filename, "radiation", "dust_im",   dust_im, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "tsi",      tsi, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "seasonal", seasonal, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "interval", interval, defaults_file=defaults_file)
@@ -386,6 +406,9 @@ contains
         rad%so4_file  = so4_file
         rad%so4_year  = so4_year
         rad%so4_const = so4_const
+        rad%dust_file  = dust_file
+        rad%dust_scale = dust_scale
+        rad%dust_im    = dust_im
         rad%tsi      = tsi
         rad%seasonal = seasonal
         rad%interval = interval
@@ -393,6 +416,8 @@ contains
         rad%time_bp  = time_bp
 
         call aeros_radiation_init(rad, grd, enabled)
+        call aeros_radiation_so4_load(rad, grd)
+        call aeros_radiation_dust_load(rad, grd)
 
         return
     end subroutine aeros_radiation_load
@@ -416,6 +441,46 @@ contains
         return
     end subroutine aeros_radiation_so4_load
 
+    subroutine aeros_radiation_dust_load(rad, grd)
+        ! Regrid the 12 monthly dust optical-thickness maps of rad%dust_file
+        ! onto the model grid; rad%dust_ot starts at the annual mean (the
+        ! non-seasonal value) until aeros_radiation_set_dust picks the day.
+        implicit none
+        type(aeros_rad_class),  intent(inout) :: rad
+        type(aeros_grid_class), intent(in)    :: grd
+        integer :: mm
+        if (allocated(rad%dust_clim)) deallocate(rad%dust_clim)
+        if (allocated(rad%dust_ot))   deallocate(rad%dust_ot)
+        if (len_trim(rad%dust_file) == 0) return
+        allocate(rad%dust_clim(grd%nlon, grd%nlat, 12), rad%dust_ot(grd%nlon, grd%nlat))
+        do mm = 1, 12
+            call aeros_bcinput_read_field(trim(rad%dust_file), "dust_ot", grd%lon, grd%lat, &
+                                          rad%dust_clim(:,:,mm), lon_name="lon", lat_name="lat", itime=mm)
+        end do
+        rad%dust_clim = max(0.0_wp, rad%dust_clim)*rad%dust_scale
+        rad%dust_ot   = sum(rad%dust_clim, dim=3)/12.0_wp
+        return
+    end subroutine aeros_radiation_dust_load
+
+    subroutine aeros_radiation_set_dust(rad, day)
+        ! Dust optical thickness at day-of-year `day`: mid-month centres,
+        ! linear cyclic interpolation (the land-albedo rule). No-op without maps.
+        implicit none
+        type(aeros_rad_class), intent(inout) :: rad
+        real(wp),              intent(in)    :: day
+        real(wp), parameter :: DAYS_YR = 365.0_wp
+        real(wp) :: x, w
+        integer  :: im0, m0, m1
+        if (.not. allocated(rad%dust_clim)) return
+        x   = modulo(day, DAYS_YR)/DAYS_YR*12.0_wp - 0.5_wp
+        im0 = floor(x)
+        w   = x - real(im0, wp)
+        m0  = modulo(im0,     12) + 1
+        m1  = modulo(im0 + 1, 12) + 1
+        rad%dust_ot = (1.0_wp - w)*rad%dust_clim(:,:,m0) + w*rad%dust_clim(:,:,m1)
+        return
+    end subroutine aeros_radiation_set_dust
+
     subroutine aeros_radiation_end(rad)
         implicit none
         type(aeros_rad_class), intent(inout) :: rad
@@ -430,6 +495,8 @@ contains
         if (allocated(rad%olr_cs))    deallocate(rad%olr_cs)
         if (allocated(rad%sw_up_toa_cs)) deallocate(rad%sw_up_toa_cs)
         if (allocated(rad%so4_map))      deallocate(rad%so4_map)
+        if (allocated(rad%dust_clim))    deallocate(rad%dust_clim)
+        if (allocated(rad%dust_ot))      deallocate(rad%dust_ot)
         if (allocated(rad%cover))     deallocate(rad%cover)
         if (allocated(rad%alb_map))   deallocate(rad%alb_map)   ! feat/land
         call aeros_insol_end(rad%ins)
@@ -834,7 +901,7 @@ contains
 
     subroutine aeros_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
                                         coszen, alb_vis, alb_ir, heat, &
-                                        sw_up_toa, sw_dw_sur, sw_net_sur, so4)
+                                        sw_up_toa, sw_dw_sur, sw_net_sur, so4, aer_ot, aer_im)
         ! Clear-sky shortwave for one column, model ordering (k=1 top ..
         ! k=nlev surface). Two bands; near-IR water-vapour absorption and
         ! visible ozone absorption are the atmospheric heating, Rayleigh acts
@@ -868,8 +935,10 @@ contains
         real(wp), intent(out) :: sw_dw_sur   ! surface downward SW [W m-2]
         real(wp), intent(out) :: sw_net_sur  ! surface net absorbed SW [W m-2]
         real(wp), intent(in), optional :: so4 ! sulfate load [kg m-2] (direct effect)
+        real(wp), intent(in), optional :: aer_ot ! aerosol optical thickness; default the background
+        real(wp), intent(in), optional :: aer_im ! aerosol imaginary index; default the background
 
-        real(wp) :: cosz, icos, av, ai
+        real(wp) :: cosz, icos, av, ai, ot, im
         real(wp) :: uwv_cum(0:nlev), fdw_ir(0:nlev), w(nlev), wo3(nlev)
         real(wp) :: m_col, itf_ir_full, alb_vu, alb_ir_p, alb_p
         real(wp) :: m_d1, m_d2, itf_d1, itf_d2, itf_atm_vu, itf_atm_ir
@@ -893,6 +962,9 @@ contains
             av = aeros_sw_so4_albedo(so4, cosz, alb_vis)
             ai = aeros_sw_so4_albedo(so4, cosz, alb_ir)
         end if
+        ot = SW_AER_OT; im = SW_AER_IM
+        if (present(aer_ot)) ot = aer_ot
+        if (present(aer_im)) im = aer_im
 
         ! cumulative water-vapour path from TOA to each interface [g cm-2]
         uwv_cum(0) = 0.0_wp
@@ -904,8 +976,8 @@ contains
         ! Scattering albedo of the atmosphere (Rayleigh + aerosol; the visible
         ! Rayleigh SW_RSCAT alone when the aerosol is off) and the aerosol
         ! absorption on the TOA round trip (icos), both bands.
-        call aeros_sw_aerosol_scat(cosz, SW_RSCAT, s_vu, s_ir)
-        itf_a_col = aeros_sw_aerosol_itf(icos)
+        call aeros_sw_aerosol_scat(ot, im, cosz, SW_RSCAT, s_vu, s_ir)
+        itf_a_col = aeros_sw_aerosol_itf(ot, im, icos)
         m_col = uwv_cum(nlev)*icos
         itf_ir_full = itf_w_ir(m_col)
         alb_vu   = (s_vu + (1.0_wp-s_vu)**2*av/(1.0_wp - s_vu*av)) &
@@ -922,8 +994,8 @@ contains
         m_d2 = m_d1 + uwv_cum(nlev)*(1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O
         itf_d1 = itf_w_ir(m_d1)
         itf_d2 = itf_w_ir(m_d2)
-        itf_a_d1 = aeros_sw_aerosol_itf(1.0_wp/cosz)
-        itf_a_d2 = aeros_sw_aerosol_itf(1.0_wp/cosz + (1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O)
+        itf_a_d1 = aeros_sw_aerosol_itf(ot, im, 1.0_wp/cosz)
+        itf_a_d2 = aeros_sw_aerosol_itf(ot, im, 1.0_wp/cosz + (1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O)
         ! visible: direct + one surface<->scatterer reflection, times ozone
         itf_atm_vu = (1.0_wp-s_vu)*(1.0_wp-av)*itf_a_d1*SW_C_ITF_O &
                    + (1.0_wp-s_vu)*av*s_vu*(1.0_wp-av) &
@@ -946,7 +1018,7 @@ contains
                           + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_d1*(1.0_wp - itf_a_d1)) &
               + swdown_toa*(SW_FRAC_VU*(1.0_wp-s_vu)*SW_C_ITF_O*itf_a_d1*av &
                           + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_d1*itf_a_d1*ai) &
-                *(1.0_wp - aeros_sw_aerosol_itf(1.0_wp/SW_COSZ_O))
+                *(1.0_wp - aeros_sw_aerosol_itf(ot, im, 1.0_wp/SW_COSZ_O))
         a_aer = min(a_aer, a_atm)
 
         ! Split off the visible ozone absorption (the post-Rayleigh visible beam
@@ -1015,7 +1087,7 @@ contains
 
     subroutine aeros_sw_cloudy_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
                                       coszen, alb_vis, alb_ir, cf, clwc, ciwc, &
-                                      heat, sw_up_toa, sw_dw_sur, sw_net_sur, sw_up_clear, so4)
+                                      heat, sw_up_toa, sw_dw_sur, sw_net_sur, sw_up_clear, so4, aer_ot, aer_im)
         ! All-sky shortwave for one column. Shortwave is scattering, not grey
         ! absorption, so -- unlike the longwave -- the cloud cannot fold into a
         ! per-layer transmission. Instead the tuned clear-sky column
@@ -1061,6 +1133,8 @@ contains
         real(wp), intent(out) :: sw_net_sur  ! surface net absorbed SW [W m-2]
         real(wp), intent(out), optional :: sw_up_clear  ! clear-sky reflected SW [W m-2]
         real(wp), intent(in),  optional :: so4          ! sulfate load [kg m-2]
+        real(wp), intent(in),  optional :: aer_ot       ! aerosol optical thickness
+        real(wp), intent(in),  optional :: aer_im       ! aerosol imaginary index
 
         real(wp) :: heat_cs(nlev), up_cs, dw_cs, net_cs
         real(wp) :: tau_c(nlev), cldw(nlev)
@@ -1071,7 +1145,7 @@ contains
 
         ! clear-sky column (the tuned reference; also the polar-night guard)
         call aeros_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
-            coszen, alb_vis, alb_ir, heat_cs, up_cs, dw_cs, net_cs, so4=so4)
+            coszen, alb_vis, alb_ir, heat_cs, up_cs, dw_cs, net_cs, so4=so4, aer_ot=aer_ot, aer_im=aer_im)
         if (present(sw_up_clear)) sw_up_clear = up_cs
 
         ! column cloud fraction: maximum overlap
@@ -1184,9 +1258,9 @@ contains
         real(wp) :: o3col(vg%nlev)
         real(wp) :: cf(vg%nlev), clwc(vg%nlev), ciwc(vg%nlev)
         real(wp) :: fnet(0:vg%nlev), heat_lw(vg%nlev), heat_sw(vg%nlev)
-        real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net, doy, cz, sw, alb, so4v
+        real(wp) :: olr, fdw_lw, sw_up, sw_dw, sw_net, doy, cz, sw, alb, so4v, otv, imv
         real(wp) :: olr_c, sw_up_c, cover_c   ! clear-sky TOA and column cover
-        logical  :: have_alb_map, have_so4_map
+        logical  :: have_alb_map, have_so4_map, have_dust
         integer  :: i, j, k, nlev, nrad
         logical  :: use_cf_prog
 
@@ -1205,6 +1279,7 @@ contains
         ! column uses the scalar ocean albedo, bit-for-bit as before.
         have_alb_map = allocated(rad%alb_map)
         have_so4_map = allocated(rad%so4_map)
+        have_dust    = allocated(rad%dust_ot)
 
         ! --- recompute the transfer on the cadence -------------------------
         if (mod(nstep, nrad) == 0) then
@@ -1215,12 +1290,13 @@ contains
                 ! year (DAY_YEAR), so pass the raw elapsed day-of-year.
                 doy = rad%doy0 + real(nstep, wp)*dt/86400.0_wp
                 call aeros_insol_day(rad%ins, rad%sw_toa, rad%coszen, doy)
+                call aeros_radiation_set_dust(rad, doy)
             end if
 
             !$omp parallel do collapse(2) schedule(static) &
             !$omp   private(i,j,phalf,pfull,dpc,phi_full,phi_half,z_half,o3col, &
             !$omp           cf,clwc,ciwc,fnet,heat_lw,heat_sw,olr,fdw_lw,sw_up,sw_dw,sw_net,alb, &
-            !$omp           olr_c,sw_up_c,cover_c,so4v)
+            !$omp           olr_c,sw_up_c,cover_c,so4v,otv,imv)
             do j = 1, rad%nlat
                 do i = 1, rad%nlon
                     call aeros_vgrid_pressure(vg, exp(lnps_g(i,j)), phalf, pfull, dpc)
@@ -1231,6 +1307,10 @@ contains
                     ! Sulfate load: the map if loaded, else the constant.
                     so4v = rad%so4_const
                     if (have_so4_map) so4v = rad%so4_map(i,j)
+                    ! Aerosol optical thickness: the background plus the dust map.
+                    otv = SW_AER_OT; imv = SW_AER_IM
+                    if (have_dust) call aeros_sw_aerosol_mix(SW_AER_OT, SW_AER_IM, rad%dust_ot(i,j), &
+                                                             rad%dust_im, otv, imv)
 
                     if (rad%l_o3) then
                         call aeros_ozone_profile(pfull, o3col)
@@ -1266,7 +1346,7 @@ contains
                             call aeros_ecckd_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
                                 rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb, &
                                 alb, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net, &
-                                sw_up_clear=sw_up_c, so4=so4v)
+                                sw_up_clear=sw_up_c, so4=so4v, aer_ot=otv, aer_im=imv)
                         else
                             call aeros_lw_cloudy_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
                                 o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
@@ -1274,7 +1354,7 @@ contains
                             call aeros_sw_cloudy_column(nlev, qv_g(i,j,:), o3col, &
                                 rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb, &
                                 alb, cf, clwc, ciwc, heat_sw, sw_up, sw_dw, sw_net, &
-                                sw_up_clear=sw_up_c, so4=so4v)
+                                sw_up_clear=sw_up_c, so4=so4v, aer_ot=otv, aer_im=imv)
                         end if
                         cover_c = min(1.0_wp, max(0.0_wp, maxval(cf)))
                     else
@@ -1288,14 +1368,14 @@ contains
                                 rad%q_co2, rad%l_o3, fnet, heat_lw, olr, fdw_lw)
                             call aeros_ecckd_sw_clearsky_column(nlev, qv_g(i,j,:), &
                                 o3col, rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), &
-                                alb, alb, heat_sw, sw_up, sw_dw, sw_net, so4=so4v)
+                                alb, alb, heat_sw, sw_up, sw_dw, sw_net, so4=so4v, aer_ot=otv, aer_im=imv)
                         else
                             call aeros_lw_clearsky_column(nlev, t_g(i,j,:), qv_g(i,j,:), &
                                 o3col, dpc, z_half, t_s(i,j), rad%q_co2, rad%l_o3, &
                                 fnet, heat_lw, olr, fdw_lw)
                             call aeros_sw_clearsky_column(nlev, qv_g(i,j,:), o3col, &
                                 rad%l_o3, dpc, rad%sw_toa(j), rad%coszen(j), alb, &
-                                alb, heat_sw, sw_up, sw_dw, sw_net, so4=so4v)
+                                alb, heat_sw, sw_up, sw_dw, sw_net, so4=so4v, aer_ot=otv, aer_im=imv)
                         end if
                         olr_c = olr; sw_up_c = sw_up; cover_c = 0.0_wp
                     end if
@@ -1344,6 +1424,8 @@ contains
         else
             write(io_unit, '(a,es10.3)') "    so4 const = ", rad%so4_const
         end if
+        if (allocated(rad%dust_ot)) write(io_unit, '(a,f6.3,a)') "    dust ot map (annual mean ", &
+            sum(rad%dust_clim)/real(size(rad%dust_clim),wp), ")"
         write(io_unit, '(a,l1)')     "    clouds   = ", rad%clouds
         return
     end subroutine aeros_radiation_report

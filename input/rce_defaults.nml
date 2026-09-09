@@ -171,6 +171,17 @@
     so4_file         = "/Users/alrobi001/models/climber-x/input/so4_historical_CMIP6_ensmean_ann_5x5.nc"
     so4_year         = 2003
     so4_const        = 0.0
+    ! Dust optical thickness maps (monthly, 5x5) added to the background aerosol:
+    ! scripts/dust_ot_from_deposition.py on CLIMBER-X's fake_dust_* deposition
+    ! (Lambert et al. 2015 present day here; the _lgm file for the LGM),
+    ! inverted with CLIMBER-X's dust.f90 deposition balance and x c_dust_mec.
+    ! "" = none. dust_scale 0.3 (2026-09-09): the inversion assumes the fine,
+    ! transported mode everywhere, but source-region deposition is coarse
+    ! fall-out, so the unscaled map is ~3x ERA5's Saharan clear-sky effect;
+    ! 0.3 closes the Sahara (surface SW -7, TOA +0.6) and E Asia +15 -> +11.
+    dust_file        = "input/dust_ot_lambert2015_present.nc"
+    dust_scale       = 0.3
+    dust_im          = 0.01            ! dust imaginary refractive index (CLIMBER-X ars_im)
     l_cloud_prog     = .false.
     cloud_rhc_sfc    = 0.40
     cloud_rhc_top    = 0.60

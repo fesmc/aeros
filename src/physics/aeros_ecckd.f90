@@ -111,7 +111,7 @@ module aeros_ecckd
     !   TOA net CRE -23.1 W/m2 (bias +1.1)
 
     use aeros_defs, only : wp, sigma_sb, grav, cp_d, p0, pi
-    use aeros_sw_aerosol, only : aeros_sw_aerosol_scat, aeros_sw_aerosol_itf, aeros_sw_so4_albedo
+    use aeros_sw_aerosol, only : aeros_sw_aerosol_scat, aeros_sw_aerosol_itf, aeros_sw_so4_albedo, SW_AER_OT, SW_AER_IM
 
     implicit none
 
@@ -443,7 +443,7 @@ contains
 
     subroutine aeros_ecckd_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
                                               coszen, alb_vis, alb_ir, heat, &
-                                              sw_up_toa, sw_dw_sur, sw_net_sur, so4)
+                                              sw_up_toa, sw_dw_sur, sw_net_sur, so4, aer_ot, aer_im)
         ! Clear-sky shortwave for one column. Signature identical to
         ! aeros_sw_clearsky_column (SESAM), so the two are interchangeable behind
         ! the scheme selector. Model ordering (k=1 top .. k=nlev surface).
@@ -466,8 +466,10 @@ contains
         real(wp), intent(out) :: heat(:)     ! (nlev) SW heating rate [K s-1]
         real(wp), intent(out) :: sw_up_toa, sw_dw_sur, sw_net_sur
         real(wp), intent(in), optional :: so4   ! sulfate load [kg m-2] (direct effect)
+        real(wp), intent(in), optional :: aer_ot ! aerosol optical thickness; default the background
+        real(wp), intent(in), optional :: aer_im ! aerosol imaginary index; default the background
 
-        real(wp) :: cosz, icos, av, ai, uwv_cum(0:nlev), uo3_col, fdw_ir(0:nlev)
+        real(wp) :: cosz, icos, av, ai, ot, im, uwv_cum(0:nlev), uo3_col, fdw_ir(0:nlev)
         real(wp) :: uwv_ps(0:nlev), pcum_ps(0:nlev)   ! pressure-scaled path, cumulative p
         real(wp) :: cvis_o3, itf_ir_full, m_col, m_d1
         real(wp) :: alb_vu, alb_ir_p, alb_p, itf_atm_vu, itf_atm_ir
@@ -489,6 +491,9 @@ contains
             av = aeros_sw_so4_albedo(so4, cosz, alb_vis)
             ai = aeros_sw_so4_albedo(so4, cosz, alb_ir)
         end if
+        ot = SW_AER_OT; im = SW_AER_IM
+        if (present(aer_ot)) ot = aer_ot
+        if (present(aer_im)) im = aer_im
 
         ! cumulative water-vapour path from TOA [g cm-2]
         uwv_cum(0) = 0.0_wp; uwv_ps(0) = 0.0_wp; pcum_ps(0) = 0.0_wp
@@ -509,8 +514,8 @@ contains
         ! Scattering albedo s (Rayleigh + the CLIMBER-X background aerosol) and
         ! the aerosol absorption on the TOA round trip, both bands -- the same
         ! algebra as aeros_sw_clearsky_column.
-        call aeros_sw_aerosol_scat(cosz, SW_RSCAT, s_vu, s_ir)
-        itf_a_col = aeros_sw_aerosol_itf(icos)
+        call aeros_sw_aerosol_scat(ot, im, cosz, SW_RSCAT, s_vu, s_ir)
+        itf_a_col = aeros_sw_aerosol_itf(ot, im, icos)
         m_col = uwv_cum(nlev)*icos
         itf_ir_full = itf_w_ir(m_col)
         alb_vu   = (s_vu + (1.0_wp-s_vu)**2*av/(1.0_wp - s_vu*av)) &
@@ -523,8 +528,8 @@ contains
         ! --- surface net and downward (SESAM two-path) -------------------------
         m_d1 = uwv_cum(nlev)/cosz
         m_d2 = m_d1 + uwv_cum(nlev)*(1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O
-        itf_a_d1 = aeros_sw_aerosol_itf(1.0_wp/cosz)
-        itf_a_d2 = aeros_sw_aerosol_itf(1.0_wp/cosz + (1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O)
+        itf_a_d1 = aeros_sw_aerosol_itf(ot, im, 1.0_wp/cosz)
+        itf_a_d2 = aeros_sw_aerosol_itf(ot, im, 1.0_wp/cosz + (1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O)
         itf_atm_vu = (1.0_wp-s_vu)*(1.0_wp-av)*itf_a_d1*cvis_o3 &
                    + (1.0_wp-s_vu)*av*s_vu*(1.0_wp-av) &
                      /(1.0_wp - s_vu*av)*itf_a_d2*cvis_o3
@@ -543,7 +548,7 @@ contains
                           + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_w_ir(m_d1)*(1.0_wp - itf_a_d1)) &
               + swdown_toa*(SW_FRAC_VU*(1.0_wp-s_vu)*cvis_o3*itf_a_d1*av &
                           + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_w_ir(m_d1)*itf_a_d1*ai) &
-                *(1.0_wp - aeros_sw_aerosol_itf(1.0_wp/SW_COSZ_O))
+                *(1.0_wp - aeros_sw_aerosol_itf(ot, im, 1.0_wp/SW_COSZ_O))
         a_aer = min(a_aer, a_atm)
         if (l_o3) then
             a_o3 = swdown_toa*SW_FRAC_VU*(1.0_wp - s_vu)*(1.0_wp - cvis_o3)
@@ -620,7 +625,7 @@ contains
 
     subroutine aeros_ecckd_sw_cloudy_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
                                             coszen, alb_vis, alb_ir, cf, clwc, ciwc, &
-                                            heat, sw_up_toa, sw_dw_sur, sw_net_sur, sw_up_clear, so4)
+                                            heat, sw_up_toa, sw_dw_sur, sw_net_sur, sw_up_clear, so4, aer_ot, aer_im)
         ! All-sky shortwave: SESAM's run-twice-and-blend (aeros_sw_cloudy_column)
         ! on the ecCKD clear-sky SW base. A cloud reflector (conservative-scattering
         ! two-stream on the in-cloud optical depth, plus a small near-IR
@@ -637,6 +642,8 @@ contains
         real(wp), intent(out) :: heat(:), sw_up_toa, sw_dw_sur, sw_net_sur
         real(wp), intent(out), optional :: sw_up_clear  ! clear-sky reflected SW [W m-2]
         real(wp), intent(in),  optional :: so4   ! sulfate load [kg m-2]
+        real(wp), intent(in),  optional :: aer_ot ! aerosol optical thickness
+        real(wp), intent(in),  optional :: aer_im ! aerosol imaginary index
 
         real(wp) :: heat_cs(nlev), up_cs, dw_cs, net_cs
         real(wp) :: tau_c(nlev), cldw(nlev)
@@ -647,7 +654,7 @@ contains
 
         ! ecCKD clear-sky column (base; also the polar-night / no-cloud guard)
         call aeros_ecckd_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
-            coszen, alb_vis, alb_ir, heat_cs, up_cs, dw_cs, net_cs, so4=so4)
+            coszen, alb_vis, alb_ir, heat_cs, up_cs, dw_cs, net_cs, so4=so4, aer_ot=aer_ot, aer_im=aer_im)
         if (present(sw_up_clear)) sw_up_clear = up_cs
 
         cff = 0.0_wp

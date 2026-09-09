@@ -123,11 +123,24 @@ deficit is airmass-scaled and vapour-independent (tau ~0.019/airmass over the cl
    cover 0.39 (0.57), Jul-Aug land P 2.0/1.7 (2.5/2.4: the recycled half is gone). The land
    energy residual is now radiative only: SW net +29, LW down +3.
 
+4. **Dust optical thickness** (`dust_file`, `dust_scale` 0.3, `dust_im` 0.01; `&rce` and
+   `&radiation`): monthly maps from `scripts/dust_ot_from_deposition.py` = CLIMBER-X's
+   fake_dust_* deposition (Lambert 2015 present / LGM) inverted with its dust.f90 balance
+   (c_dust_dry/h_dust + c_dust_wet P, ERA5 P) x c_dust_mec; `input/dust_ot_lambert2015_{present,
+   lgm}.nc`. Per column the dust adds to the background with its own imaginary index
+   (`aeros_sw_aerosol_mix`: ot adds, ot im^0.636 conserved); interpolated to the day in
+   seasonal mode. Unscaled the map is ~3x ERA5 over the Sahara (source-region fall-out is
+   coarse, the inversion assumes the fine mode), and with im 0.02 it heated the land boundary
+   layer (July 2 m +1.5 K, TOA +0.6); 0.3 / 0.01 closes the Sahara offline (surface SW -7,
+   TOA +0.6), E Asia +15 -> +11, Europe/Siberia unchanged (not dust). Coupled (DUST3): neutral
+   -- TOA -0.11, P 2.85, NH land within noise of RS100.
+
 **Still open for deficit 1:** the NH continental clear-sky excess (+10 annual, ~+20 in
 summer at 40-70N land) is ERA5's Tegen aerosol (dust + carbonaceous), beyond the sulfate
-term; CLIMBER-X's remaining routes are the dust optical thickness (`fake_dust_*` deposition x
-`c_dust_mec`) and the sulfate indirect effect on cloud optical thickness (`l_so4_ie`). And the
-bucket's spring evaporation.
+and dust terms (Europe +15, Siberia +11, 40-70N land +9 W/m2 annual clear-sky surface SW);
+the remaining CLIMBER-X route is the sulfate indirect effect on cloud optical thickness
+(`l_so4_ie`), and the diagnostic cloud's summer-land deficit (cover 0.36 vs 0.57 in July with
+r_s 100). July 40-70N land: SW net +33, SH 75 (40), LH 60 (73), 2 m +4.4 K.
 
 
 ### Update 2026-09-08: deficit 0 (warm 300 hPa) half explained — two lid radiative effects

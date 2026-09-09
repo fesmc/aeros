@@ -5,8 +5,9 @@ module aeros_sw_aerosol
     ! refractive index `im`, uniform and constant -- CLIMBER-X's default
     ! (ars_ot 0.1, ars_im 0.01, `l_dust_rad = F`): a climate-independent
     ! background, equally valid for present day, climate change and paleo.
-    ! A dust/AOD field (CLIMBER-X's dust_ot, its fake_dust_* files) replaces
-    ! the constant behind the same two numbers when that is wanted.
+    ! A dust optical-thickness field (CLIMBER-X's dust_ot; here the monthly
+    ! maps of scripts/dust_ot_from_deposition.py from its fake_dust_* files)
+    ! adds to the background per column (aeros_radiation dust_file).
     !
     ! Two effects, both from the SESAM fits (Petoukhov et al. 2000):
     !
@@ -57,6 +58,7 @@ module aeros_sw_aerosol
     real(wp), protected, public :: SW_SIGMA_SO4 = 3.5e3_wp
 
     public :: aeros_sw_aerosol_configure
+    public :: aeros_sw_aerosol_mix
     public :: aeros_sw_so4_albedo
     public :: aeros_sw_aerosol_scat
     public :: aeros_sw_aerosol_itf
@@ -74,6 +76,24 @@ contains
         return
     end subroutine aeros_sw_aerosol_configure
 
+    pure subroutine aeros_sw_aerosol_mix(ot1, im1, ot2, im2, ot, im)
+        ! Two aerosol species (background + dust) as one (ot, im) pair for the
+        ! SESAM fits: optical thicknesses add, and the effective imaginary
+        ! index conserves the absorption exponent, ot im^gam2 = sum ot_k im_k^gam2.
+        implicit none
+        real(wp), intent(in)  :: ot1, im1, ot2, im2
+        real(wp), intent(out) :: ot, im
+        real(wp) :: a
+        ot = ot1 + ot2
+        if (ot <= 0.0_wp) then
+            im = im1
+            return
+        end if
+        a  = (ot1*im1**AER_GAM2 + ot2*im2**AER_GAM2)/ot
+        im = a**(1.0_wp/AER_GAM2)
+        return
+    end subroutine aeros_sw_aerosol_mix
+
     pure real(wp) function aeros_sw_so4_albedo(so4, cosz, alb_s) result(alb_sa)
         ! Combined surface + sulfate-layer albedo (Bauer et al. 2008 eq. 5-6).
         ! so4 <= 0 returns the surface albedo unchanged (bit-for-bit).
@@ -89,15 +109,16 @@ contains
         return
     end function aeros_sw_so4_albedo
 
-    pure subroutine aeros_sw_aerosol_scat(cosz, r_scat, alb_sct_vu, alb_sct_ir)
+    pure subroutine aeros_sw_aerosol_scat(ot, im, cosz, r_scat, alb_sct_vu, alb_sct_ir)
         ! Scattering (Rayleigh + aerosol) albedo of the atmosphere, visible and
         ! near-IR, for the direct beam at cosine zenith `cosz` (already floored
-        ! by the caller). r_scat is the visible Rayleigh reflectance.
+        ! by the caller), aerosol optical thickness `ot` (the background plus
+        ! any dust). r_scat is the visible Rayleigh reflectance.
         implicit none
-        real(wp), intent(in)  :: cosz, r_scat
+        real(wp), intent(in)  :: ot, im, cosz, r_scat
         real(wp), intent(out) :: alb_sct_vu, alb_sct_ir
         real(wp) :: b_ar, f1, f2, f3, e
-        b_ar = AER_B_OT*SW_AER_OT
+        b_ar = AER_B_OT*ot
         if (b_ar <= 0.0_wp) then
             alb_sct_vu = r_scat
             alb_sct_ir = 0.0_wp
@@ -105,26 +126,26 @@ contains
         end if
         f1 = cosz**AER_P1
         f2 = b_ar**AER_P2
-        f3 = AER_ALF1 - AER_ALF2*log(1.0_wp + AER_ALF3*SW_AER_IM)
+        f3 = AER_ALF1 - AER_ALF2*log(1.0_wp + AER_ALF3*im)
         e  = exp(-f1*f2*f3)
         alb_sct_vu = 1.0_wp - (1.0_wp - r_scat)*e
         alb_sct_ir = 1.0_wp - e
         return
     end subroutine aeros_sw_aerosol_scat
 
-    pure real(wp) function aeros_sw_aerosol_itf(m) result(itf)
-        ! Aerosol absorption transmission on a path of airmass factor `m`
-        ! (1/cosz for the direct beam, 1/cosz + 1.66 for the TOA round trip,
-        ! the two-path surface factors for the reflected beam).
+    pure real(wp) function aeros_sw_aerosol_itf(ot, im, m) result(itf)
+        ! Aerosol absorption transmission of optical thickness `ot` on a path
+        ! of airmass factor `m` (1/cosz for the direct beam, 1/cosz + 1.66 for
+        ! the TOA round trip, the two-path surface factors for the reflected beam).
         implicit none
-        real(wp), intent(in) :: m
+        real(wp), intent(in) :: ot, im, m
         real(wp) :: b_ar
-        b_ar = AER_B_OT*SW_AER_OT
+        b_ar = AER_B_OT*ot
         if (b_ar <= 0.0_wp) then
             itf = 1.0_wp
             return
         end if
-        itf = exp(-AER_GAM1*b_ar*m*SW_AER_IM**AER_GAM2)
+        itf = exp(-AER_GAM1*b_ar*m*im**AER_GAM2)
         return
     end function aeros_sw_aerosol_itf
 
