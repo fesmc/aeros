@@ -46,20 +46,48 @@ module aeros_sw_aerosol
     real(wp), protected, public :: SW_AER_OT = 0.0_wp   ! optical thickness [-]
     real(wp), protected, public :: SW_AER_IM = 0.01_wp  ! imaginary refractive index [-]
 
+    ! Sulfate direct effect (CLIMBER-X `l_so4_de`, Bauer et al. 2008): a
+    ! non-absorbing scattering layer of load so4 [kg m-2] just above the
+    ! surface, upscatter fraction beta_so4 and scattering efficiency sigma_so4
+    ! [m2 kg-1]; its albedo beta sigma so4 / cosz combines with the surface
+    ! albedo as alb_sa = alb_a + (1-alb_a)^2 alb_s / (1 - alb_a alb_s). The
+    ! load is a field (CMIP6 historical/SSP ensemble mean in CLIMBER-X's
+    ! so4_*.nc, time in years since 2000) or a constant: 0 for paleo.
+    real(wp), protected, public :: SW_BETA_SO4  = 0.23_wp
+    real(wp), protected, public :: SW_SIGMA_SO4 = 3.5e3_wp
+
     public :: aeros_sw_aerosol_configure
+    public :: aeros_sw_so4_albedo
     public :: aeros_sw_aerosol_scat
     public :: aeros_sw_aerosol_itf
 
 contains
 
-    subroutine aeros_sw_aerosol_configure(ot, im)
+    subroutine aeros_sw_aerosol_configure(ot, im, beta_so4, sigma_so4)
         ! Set the background aerosol (any subset).
         implicit none
-        real(wp), intent(in), optional :: ot, im
+        real(wp), intent(in), optional :: ot, im, beta_so4, sigma_so4
         if (present(ot)) SW_AER_OT = max(0.0_wp, ot)
         if (present(im)) SW_AER_IM = max(0.0_wp, im)
+        if (present(beta_so4))  SW_BETA_SO4  = beta_so4
+        if (present(sigma_so4)) SW_SIGMA_SO4 = sigma_so4
         return
     end subroutine aeros_sw_aerosol_configure
+
+    pure real(wp) function aeros_sw_so4_albedo(so4, cosz, alb_s) result(alb_sa)
+        ! Combined surface + sulfate-layer albedo (Bauer et al. 2008 eq. 5-6).
+        ! so4 <= 0 returns the surface albedo unchanged (bit-for-bit).
+        implicit none
+        real(wp), intent(in) :: so4, cosz, alb_s
+        real(wp) :: alb_a
+        if (so4 <= 0.0_wp) then
+            alb_sa = alb_s
+            return
+        end if
+        alb_a  = min(0.9_wp, SW_BETA_SO4*SW_SIGMA_SO4*so4/cosz)
+        alb_sa = alb_a + (1.0_wp - alb_a)**2*alb_s/(1.0_wp - alb_a*alb_s)
+        return
+    end function aeros_sw_so4_albedo
 
     pure subroutine aeros_sw_aerosol_scat(cosz, r_scat, alb_sct_vu, alb_sct_ir)
         ! Scattering (Rayleigh + aerosol) albedo of the atmosphere, visible and

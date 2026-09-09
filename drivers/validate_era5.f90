@@ -40,6 +40,7 @@ program validate_era5
                                 aeros_ecckd_sw_configure
     use aeros_cloud,     only : aeros_cloud_diagnose
     use aeros_sw_aerosol, only : aeros_sw_aerosol_configure, SW_AER_OT, SW_AER_IM
+    use aeros_bcinput,   only : aeros_bcinput_read_field
     use ncio,            only : nc_create, nc_write_dim, nc_write, nc_read, nc_size
 
     implicit none
@@ -55,7 +56,9 @@ program validate_era5
     real(wp), parameter :: M_CO2 = 44.0095_wp, M_AIR = 28.97_wp
     real(wp), parameter :: ACC   = 86400.0_wp     ! J m-2 (daily accum) -> W m-2
 
-    character(len=512) :: base, fout, dpl, dsl
+    character(len=512) :: base, fout, dpl, dsl, so4_file
+    integer :: so4_year
+    real(wp), allocatable :: so4_map(:,:)
     integer  :: nlon, nlat, nplev, ntime
     integer  :: i, j
 
@@ -137,6 +140,16 @@ program validate_era5
             call aeros_ecckd_sw_configure(b2_w=v)
         end if
     end block
+    ! args 9-10: sulfate load file (CLIMBER-X so4_*.nc; "" or "none" = off) and year
+    so4_file = ""; so4_year = 2003
+    if (command_argument_count() >= 9) call get_command_argument(9, so4_file)
+    if (trim(so4_file) == "none") so4_file = ""
+    if (command_argument_count() >= 10) then
+        block
+            character(len=32) :: arg
+            call get_command_argument(10, arg); read(arg, *) so4_year
+        end block
+    end if
     write(*,"(a,l1,a,f7.1,a,f6.3,a,f6.3)") " validate_era5:: ecCKD LW = ", lw_ecckd, &
                              "   CO2 ppm = ", co2_ppm_run, "   aerosol ot/im = ", SW_AER_OT, " / ", SW_AER_IM
     dpl = trim(base)//"/monthly-pressure-levels/"
@@ -194,6 +207,15 @@ program validate_era5
     allocate(swd_m(nlon,nlat), swd_e(nlon,nlat))
     allocate(swn_m(nlon,nlat), swn_e(nlon,nlat))
     allocate(insol(nlon,nlat))
+    ! sulfate load on the ERA5 grid (0 without a file)
+    allocate(so4_map(nlon,nlat)); so4_map = 0.0_wp
+    if (len_trim(so4_file) > 0) then
+        call aeros_bcinput_read_field(trim(so4_file), "so4", lon, lat, so4_map, &
+                                      lon_name="lon", lat_name="lat", itime=so4_year-1850+1)
+        so4_map = max(0.0_wp, so4_map)
+        write(*,"(a,i0,a,es10.3,a)") " validate_era5:: so4 map year ", so4_year, &
+            " (mean ", sum(so4_map)/real(size(so4_map),wp), " kg/m2)"
+    end if
     allocate(olra_m(nlon,nlat), olra_e(nlon,nlat))
     allocate(swta_m(nlon,nlat), swta_e(nlon,nlat))
     allocate(crelw_m(nlon,nlat), crelw_e(nlon,nlat))
@@ -313,11 +335,11 @@ contains
         if (lw_ecckd) then
             call aeros_ecckd_sw_clearsky_column(n, qcol(1:n), ocol(1:n), .TRUE., &
                 dpc(1:n), swin, coszen(j), alb, alb, &
-                heat(1:n), sw_up, sw_dw, sw_net)
+                heat(1:n), sw_up, sw_dw, sw_net, so4=so4_map(i,j))
         else
             call aeros_sw_clearsky_column(n, qcol(1:n), ocol(1:n), .TRUE., &
                 dpc(1:n), swin, coszen(j), alb, alb, &
-                heat(1:n), sw_up, sw_dw, sw_net)
+                heat(1:n), sw_up, sw_dw, sw_net, so4=so4_map(i,j))
         end if
 
         ! all-sky: the same operators with ERA5's cloud column
@@ -329,7 +351,7 @@ contains
             call aeros_ecckd_sw_cloudy_column(n, qcol(1:n), ocol(1:n), .TRUE., &
                 dpc(1:n), swin, coszen(j), alb, alb, &
                 ccol(1:n), lcol(1:n), icol(1:n), &
-                heat(1:n), swup_a, swdw_a, swnet_a)
+                heat(1:n), swup_a, swdw_a, swnet_a, so4=so4_map(i,j))
         else
             call aeros_lw_cloudy_column(n, tcol(1:n), qcol(1:n), ocol(1:n), &
                 dpc(1:n), zhalf(0:n), ts, q_co2, .TRUE., &
@@ -338,7 +360,7 @@ contains
             call aeros_sw_cloudy_column(n, qcol(1:n), ocol(1:n), .TRUE., &
                 dpc(1:n), swin, coszen(j), alb, alb, &
                 ccol(1:n), lcol(1:n), icol(1:n), &
-                heat(1:n), swup_a, swdw_a, swnet_a)
+                heat(1:n), swup_a, swdw_a, swnet_a, so4=so4_map(i,j))
         end if
 
         olr_m(i,j) = olr
@@ -365,7 +387,7 @@ contains
             cfd(1:n), lcd(1:n), icd(1:n), fnet(0:n), heat(1:n), olr_d, fdw_d)
         call aeros_sw_cloudy_column(n, qcol(1:n), ocol(1:n), .TRUE., &
             dpc(1:n), swin, coszen(j), alb, alb, &
-            cfd(1:n), lcd(1:n), icd(1:n), heat(1:n), swup_d, swdw_d, swnet_d)
+            cfd(1:n), lcd(1:n), icd(1:n), heat(1:n), swup_d, swdw_d, swnet_d, so4=so4_map(i,j))
 
         ccmax = 0.0_wp
         do kk = 1, n

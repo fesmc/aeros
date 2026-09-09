@@ -379,6 +379,18 @@ contains
             call check(heat_a(nlev) > heat(nlev), "aerosol heating lands in the lowest layer", nfail)
             call check(dw_0 == sw_dw .and. up_0 == sw_up .and. all(heat_0 == heat), &
                        "aerosol off is bit-identical to the clean sky", nfail)
+            ! sulfate direct effect: a scattering layer -- more reflected at TOA,
+            ! less absorbed by the surface, the atmosphere unchanged to first order
+            call aeros_sw_clearsky_column(nlev, q, o3, .FALSE., dp_lev, swdn, cz, &
+                                          0.06_wp, 0.06_wp, heat_a, up_a, dw_a, net_a, so4=2.0e-5_wp)
+            write(*,"(a,3f8.2)") "   so4 2e-5 kg/m2: surface net / TOA up / absorbed ", net_a, up_a, swdn-up_a-net_a
+            call check(up_a > sw_up + 1.0_wp .and. net_a < sw_net - 1.0_wp, &
+                       "sulfate reflects more at TOA and the surface absorbs less", nfail)
+            call check(abs((swdn-up_a-net_a) - a_atm) < 0.05_wp*a_atm, &
+                       "sulfate leaves the atmospheric absorption within 5%", nfail)
+            call aeros_sw_clearsky_column(nlev, q, o3, .FALSE., dp_lev, swdn, cz, &
+                                          0.06_wp, 0.06_wp, heat_0, up_0, dw_0, net_0, so4=0.0_wp)
+            call check(dw_0 == sw_dw .and. up_0 == sw_up, "so4 = 0 is bit-identical", nfail)
         end block
         return
     end subroutine test_shortwave

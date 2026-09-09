@@ -83,6 +83,43 @@ tropics/subtropics (+2.5 to +3) and 30–45S at 0.56–0.73 (−3.7); winter cap
 
 ## Log 2026-09-07/08 — the day's update blocks (superseded above where they disagree)
 
+### Update 2026-09-09: deficit 1 diagnosed -- clear-sky SW, not cloud; CLIMBER-X aerosol restored
+
+**Diagnosis** (`diag/land_budget.py`, `land_water.py`, `land_summer.py`, `validate_era5` by region):
+the JJA 40-70N land TOA reflected SW matches ERA5 (144/145), so the July surface SW surplus
+(217 vs 196) is clear-sky. Offline on ERA5 columns the ecCKD path (production `rad_scheme 2`)
+had global clear-sky surface SW at ERA5 only because the 2026-09-07 near-IR re-anchoring had
+put the missing absorption into water vapour: tropics -11 W/m2, NH continents +11 to +18. The
+deficit is airmass-scaled and vapour-independent (tau ~0.019/airmass over the clean ocean,
++0.010 over land): SESAM's aerosol branch, dropped in the port. The warm bias peaks Aug-Sep
+(+4.5 K) once the bucket has dried; April-June evaporation is 1.5-2x ERA5 (E and P both
+3.9 vs 2.4 mm/day in June, recycled).
+
+**Design rule (user, 2026-09-09):** physics beyond the dynamical core follows CLIMBER-X
+(`~/models/climber-x`, its only validated coupled paleo model); constants over ERA5-fitted maps.
+
+1. **Background aerosol** (ac75600, `src/physics/aeros_sw_aerosol.f90`): CLIMBER-X `swr.f90`
+   formulas (scattering albedo f1 f2 f3, absorption exp(-2.75 b m im^0.636), both bands and
+   paths) shared by the SESAM and ecCKD SW columns; heating sigma^2-weighted. ecCKD H2O fit back
+   at SESAM's 0.21/0.0267. **`sw_aer_ot 0.12 / sw_aer_im 0.02`** (CLIMBER-X 0.1/0.01) calibrated
+   on the clean 40-60S ocean (dn +0.2, TOA -0.2; global dn +3.2, net -0.5, TOA -4.3; tropics
+   TOA -6.8 is a separate reflection issue). Keys in `&rce` and `&radiation`; `validate_era5`
+   args 5-8 (ot, im, a1, b2) and 9-10 (so4 file, year). Coupled (AER1): neutral -- TOA -0.04,
+   T bias within 0.5 K of FINAL3, lid slightly better, **summer land unchanged** (the constant
+   cannot carry the continental pattern).
+2. **Sulfate direct effect** (this commit): CLIMBER-X `l_so4_de` (Bauer 2008, beta 0.23,
+   sigma 3.5e3 m2/kg) as a surface+sulfate albedo in all four SW columns (`so4` optional
+   argument); load map from CLIMBER-X's CMIP6 `so4_historical_*_5x5.nc` (`so4_file`,
+   `so4_year` 2003, `so4_const`; "" / 0 for paleo). Small: global -1 W/m2 at the surface,
+   Europe clear-sky dn +18.0 -> +17.1. Coupled (SO4): TOA -0.21, July land SW net 222 -> 217,
+   2 m July 293.9 -> 292.8, amplitude 34.6.
+
+**Still open for deficit 1:** the NH continental clear-sky excess (+10 annual, ~+20 in
+summer at 40-70N land) is ERA5's Tegen aerosol (dust + carbonaceous), beyond the sulfate
+term; CLIMBER-X's remaining routes are the dust optical thickness (`fake_dust_*` deposition x
+`c_dust_mec`) and the sulfate indirect effect on cloud optical thickness (`l_so4_ie`). And the
+bucket's spring evaporation.
+
 
 ### Update 2026-09-08: deficit 0 (warm 300 hPa) half explained — two lid radiative effects
 

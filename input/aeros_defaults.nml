@@ -302,6 +302,11 @@
     ! CLIMBER-X ars_ot/ars_im; calibrated on validate_era5, see rce_defaults)
     aer_ot   = 0.12
     aer_im   = 0.02
+    ! sulfate load for the direct effect: map from so4_file (CLIMBER-X CMIP6
+    ! so4_*.nc, time = year - 2000) at so4_year, else so4_const [kg/m2]; off here
+    so4_file  = ""
+    so4_year  = 2000
+    so4_const = 0.0
     tsi      = 1361.0
     seasonal = .FALSE.
     interval = 10800.0

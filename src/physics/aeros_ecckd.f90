@@ -111,7 +111,7 @@ module aeros_ecckd
     !   TOA net CRE -23.1 W/m2 (bias +1.1)
 
     use aeros_defs, only : wp, sigma_sb, grav, cp_d, p0, pi
-    use aeros_sw_aerosol, only : aeros_sw_aerosol_scat, aeros_sw_aerosol_itf
+    use aeros_sw_aerosol, only : aeros_sw_aerosol_scat, aeros_sw_aerosol_itf, aeros_sw_so4_albedo
 
     implicit none
 
@@ -443,7 +443,7 @@ contains
 
     subroutine aeros_ecckd_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
                                               coszen, alb_vis, alb_ir, heat, &
-                                              sw_up_toa, sw_dw_sur, sw_net_sur)
+                                              sw_up_toa, sw_dw_sur, sw_net_sur, so4)
         ! Clear-sky shortwave for one column. Signature identical to
         ! aeros_sw_clearsky_column (SESAM), so the two are interchangeable behind
         ! the scheme selector. Model ordering (k=1 top .. k=nlev surface).
@@ -465,8 +465,9 @@ contains
         real(wp), intent(in)  :: alb_vis, alb_ir   ! surface albedo, visible / near-IR
         real(wp), intent(out) :: heat(:)     ! (nlev) SW heating rate [K s-1]
         real(wp), intent(out) :: sw_up_toa, sw_dw_sur, sw_net_sur
+        real(wp), intent(in), optional :: so4   ! sulfate load [kg m-2] (direct effect)
 
-        real(wp) :: cosz, icos, uwv_cum(0:nlev), uo3_col, fdw_ir(0:nlev)
+        real(wp) :: cosz, icos, av, ai, uwv_cum(0:nlev), uo3_col, fdw_ir(0:nlev)
         real(wp) :: uwv_ps(0:nlev), pcum_ps(0:nlev)   ! pressure-scaled path, cumulative p
         real(wp) :: cvis_o3, itf_ir_full, m_col, m_d1
         real(wp) :: alb_vu, alb_ir_p, alb_p, itf_atm_vu, itf_atm_ir
@@ -482,6 +483,12 @@ contains
         end if
         cosz = max(coszen, 0.1_wp)
         icos = 1.0_wp/cosz + 1.0_wp/SW_COSZ_O
+        ! surface albedo seen by the transfer: surface + sulfate layer
+        av = alb_vis; ai = alb_ir
+        if (present(so4)) then
+            av = aeros_sw_so4_albedo(so4, cosz, alb_vis)
+            ai = aeros_sw_so4_albedo(so4, cosz, alb_ir)
+        end if
 
         ! cumulative water-vapour path from TOA [g cm-2]
         uwv_cum(0) = 0.0_wp; uwv_ps(0) = 0.0_wp; pcum_ps(0) = 0.0_wp
@@ -506,9 +513,9 @@ contains
         itf_a_col = aeros_sw_aerosol_itf(icos)
         m_col = uwv_cum(nlev)*icos
         itf_ir_full = itf_w_ir(m_col)
-        alb_vu   = (s_vu + (1.0_wp-s_vu)**2*alb_vis/(1.0_wp - s_vu*alb_vis)) &
+        alb_vu   = (s_vu + (1.0_wp-s_vu)**2*av/(1.0_wp - s_vu*av)) &
                    *itf_a_col*cvis_o3
-        alb_ir_p = (s_ir + (1.0_wp-s_ir)**2*alb_ir/(1.0_wp - s_ir*alb_ir)) &
+        alb_ir_p = (s_ir + (1.0_wp-s_ir)**2*ai/(1.0_wp - s_ir*ai)) &
                    *itf_ir_full*itf_a_col
         alb_p    = SW_FRAC_VU*alb_vu + (1.0_wp-SW_FRAC_VU)*alb_ir_p
         sw_up_toa = swdown_toa*alb_p
@@ -518,12 +525,12 @@ contains
         m_d2 = m_d1 + uwv_cum(nlev)*(1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O
         itf_a_d1 = aeros_sw_aerosol_itf(1.0_wp/cosz)
         itf_a_d2 = aeros_sw_aerosol_itf(1.0_wp/cosz + (1.0_wp - exp(-0.25_wp))*2.0_wp/SW_COSZ_O)
-        itf_atm_vu = (1.0_wp-s_vu)*(1.0_wp-alb_vis)*itf_a_d1*cvis_o3 &
-                   + (1.0_wp-s_vu)*alb_vis*s_vu*(1.0_wp-alb_vis) &
-                     /(1.0_wp - s_vu*alb_vis)*itf_a_d2*cvis_o3
-        itf_atm_ir = (1.0_wp-s_ir)*(1.0_wp-alb_ir)*itf_w_ir(m_d1)*itf_a_d1 &
-                   + (1.0_wp-s_ir)*alb_ir*s_ir*(1.0_wp-alb_ir) &
-                     /(1.0_wp - s_ir*alb_ir)*itf_w_ir(m_d2)*itf_a_d2
+        itf_atm_vu = (1.0_wp-s_vu)*(1.0_wp-av)*itf_a_d1*cvis_o3 &
+                   + (1.0_wp-s_vu)*av*s_vu*(1.0_wp-av) &
+                     /(1.0_wp - s_vu*av)*itf_a_d2*cvis_o3
+        itf_atm_ir = (1.0_wp-s_ir)*(1.0_wp-ai)*itf_w_ir(m_d1)*itf_a_d1 &
+                   + (1.0_wp-s_ir)*ai*s_ir*(1.0_wp-ai) &
+                     /(1.0_wp - s_ir*ai)*itf_w_ir(m_d2)*itf_a_d2
         sw_net_sur = swdown_toa*(SW_FRAC_VU*itf_atm_vu + (1.0_wp-SW_FRAC_VU)*itf_atm_ir)
         sw_dw_sur  = swdown_toa*(SW_FRAC_VU*itf_atm_vu/(1.0_wp-alb_vis) &
                                + (1.0_wp-SW_FRAC_VU)*itf_atm_ir/(1.0_wp-alb_ir))
@@ -534,8 +541,8 @@ contains
         ! on its way up; deposited sigma^2-weighted near the surface
         a_aer = swdown_toa*(SW_FRAC_VU*(1.0_wp-s_vu)*cvis_o3*(1.0_wp - itf_a_d1) &
                           + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_w_ir(m_d1)*(1.0_wp - itf_a_d1)) &
-              + swdown_toa*(SW_FRAC_VU*(1.0_wp-s_vu)*cvis_o3*itf_a_d1*alb_vis &
-                          + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_w_ir(m_d1)*itf_a_d1*alb_ir) &
+              + swdown_toa*(SW_FRAC_VU*(1.0_wp-s_vu)*cvis_o3*itf_a_d1*av &
+                          + (1.0_wp-SW_FRAC_VU)*(1.0_wp-s_ir)*itf_w_ir(m_d1)*itf_a_d1*ai) &
                 *(1.0_wp - aeros_sw_aerosol_itf(1.0_wp/SW_COSZ_O))
         a_aer = min(a_aer, a_atm)
         if (l_o3) then
@@ -613,7 +620,7 @@ contains
 
     subroutine aeros_ecckd_sw_cloudy_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
                                             coszen, alb_vis, alb_ir, cf, clwc, ciwc, &
-                                            heat, sw_up_toa, sw_dw_sur, sw_net_sur, sw_up_clear)
+                                            heat, sw_up_toa, sw_dw_sur, sw_net_sur, sw_up_clear, so4)
         ! All-sky shortwave: SESAM's run-twice-and-blend (aeros_sw_cloudy_column)
         ! on the ecCKD clear-sky SW base. A cloud reflector (conservative-scattering
         ! two-stream on the in-cloud optical depth, plus a small near-IR
@@ -629,6 +636,7 @@ contains
         real(wp), intent(in)  :: cf(:), clwc(:), ciwc(:)
         real(wp), intent(out) :: heat(:), sw_up_toa, sw_dw_sur, sw_net_sur
         real(wp), intent(out), optional :: sw_up_clear  ! clear-sky reflected SW [W m-2]
+        real(wp), intent(in),  optional :: so4   ! sulfate load [kg m-2]
 
         real(wp) :: heat_cs(nlev), up_cs, dw_cs, net_cs
         real(wp) :: tau_c(nlev), cldw(nlev)
@@ -639,7 +647,7 @@ contains
 
         ! ecCKD clear-sky column (base; also the polar-night / no-cloud guard)
         call aeros_ecckd_sw_clearsky_column(nlev, q, o3, l_o3, dp_lev, swdown_toa, &
-            coszen, alb_vis, alb_ir, heat_cs, up_cs, dw_cs, net_cs)
+            coszen, alb_vis, alb_ir, heat_cs, up_cs, dw_cs, net_cs, so4=so4)
         if (present(sw_up_clear)) sw_up_clear = up_cs
 
         cff = 0.0_wp

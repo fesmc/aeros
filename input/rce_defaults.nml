@@ -159,6 +159,13 @@
     ! dust or SO4 field, as in CLIMBER-X. 0 = off (bit-for-bit clean sky).
     sw_aer_ot        = 0.12
     sw_aer_im        = 0.02
+    ! Sulfate direct effect (CLIMBER-X l_so4_de, Bauer et al. 2008): the CMIP6
+    ! historical ensemble-mean SO4 load (CLIMBER-X input, 5x5, annual 1850-2014,
+    ! time = year - 2000) at so4_year; so4_file = "" and so4_const = 0 for
+    ! paleo. Present-day calibration year 2003 (ERA5 1991-2020 mid-point).
+    so4_file         = "/Users/alrobi001/models/climber-x/input/so4_historical_CMIP6_ensmean_ann_5x5.nc"
+    so4_year         = 2003
+    so4_const        = 0.0
     l_cloud_prog     = .false.
     cloud_rhc_sfc    = 0.40
     cloud_rhc_top    = 0.60

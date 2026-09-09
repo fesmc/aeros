@@ -33,7 +33,7 @@ program rce_long
     use aeros_sw_aerosol, only : aeros_sw_aerosol_configure
     use aeros_convection, only : SCHEME_SBM, SCHEME_SBM_FRIERSON, SCHEME_MANABE
     use aeros_timestep
-    use aeros_radiation, only : SCHEME_ECCKD
+    use aeros_radiation, only : aeros_radiation_so4_load, SCHEME_ECCKD
     use aeros_bd,        only : aeros_bd_init, aeros_bd_read
     use aeros_ocean,    only : aeros_ocean_init
     use aeros_topography, only : aeros_topography_load, aeros_topography_scale
@@ -203,6 +203,9 @@ program rce_long
     real(wp) :: cld_rhc_sfc = 0.52_wp, cld_rhc_top = 1.07_wp, cld_rhc_ice = -1.0_wp
     real(wp) :: cld_lwc = 0.020e-3_wp, cld_iwc = 0.014e-3_wp
     real(wp) :: sw_aer_ot = 0.0_wp, sw_aer_im = 0.02_wp   ! background aerosol (aeros_sw_aerosol)
+    character(len=512) :: so4_file = ""                   ! sulfate load map (direct effect)
+    integer  :: so4_year = 2000
+    real(wp) :: so4_const = 0.0_wp
     real(wp) :: cloud_rhc_sfc  = 0.40_wp    ! critical RH at the surface (calibrated)
     real(wp) :: cloud_rhc_top  = 0.60_wp    ! critical RH at the model top (higher aloft)
     real(wp) :: cloud_tau_form = 10800.0_wp ! formation timescale [s] (~3 h; de-patchifies)
@@ -431,6 +434,10 @@ program rce_long
     ts%rad%aer_ot   = sw_aer_ot
     ts%rad%aer_im   = sw_aer_im
     call aeros_sw_aerosol_configure(ot=sw_aer_ot, im=sw_aer_im)
+    ts%rad%so4_file  = so4_file
+    ts%rad%so4_year  = so4_year
+    ts%rad%so4_const = so4_const
+    call aeros_radiation_so4_load(ts%rad, grd)
     ts%ocn%mode     = ocean_mode
     ts%ocn%depth    = ocean_depth
     ts%ocn%sst_eq    = sst_eq
@@ -1419,6 +1426,9 @@ contains
         call nml_read(nmlfile, "rce", "cld_iwc", cld_iwc, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "sw_aer_ot", sw_aer_ot, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "sw_aer_im", sw_aer_im, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "so4_file", so4_file, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "so4_year", so4_year, defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "so4_const", so4_const, defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_sponge", l_sponge, &
                       defaults_file="input/rce_defaults.nml")
         call nml_read(nmlfile, "rce", "l_vdiff", l_vdiff)
