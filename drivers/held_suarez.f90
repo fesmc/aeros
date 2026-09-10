@@ -23,7 +23,7 @@ program held_suarez
     ! grid are configured exactly as any other run.
 
     use aeros_defs,        only : dp, wp, io_unit_err, year_seconds
-    use aeros,             only : aeros_class, aeros_init, aeros_update, aeros_end, &
+    use aeros,             only : aeros_class, aeros_lib_init, aeros_lib_step, aeros_lib_finalize, &
                                     aeros_set_isothermal, aeros_diagnose, &
                                     aeros_print_config
     use aeros_budget,      only : aeros_budget_class, aeros_budget_calc, aeros_budget_report
@@ -86,8 +86,14 @@ program held_suarez
             write(io_unit_err,*) "held_suarez:: error: defaults file not found: ", defaults_file
             stop 1
         end if
-        call aeros_init(ams, path_par, group="aeros", time_init=0.0_wp, &
-                        defaults_file=defaults_file)
+        block
+            integer :: ierr_init
+            call aeros_lib_init(ams, path_par, defaults_file=defaults_file, ierr=ierr_init)
+            if (ierr_init /= 0) then
+                write(io_unit_err,*) "held_suarez:: aeros_lib_init failed, ierr = ", ierr_init
+                stop 1
+            end if
+        end block
     end block
 
     if (.not. ams%par%held_suarez) then
@@ -151,7 +157,14 @@ program held_suarez
         day  = real(n, wp)*dt_sample
         time = day*86400.0_wp/real(year_seconds, wp)
 
-        call aeros_update(ams, time)
+        block
+            integer :: ierr_step
+            call aeros_lib_step(ams, dt_couple=dt_sample*86400.0_dp, ierr=ierr_step)
+            if (ierr_step /= 0) then
+                write(io_unit_err,*) "held_suarez:: aeros_lib_step failed, ierr = ", ierr_step
+                stop 1
+            end if
+        end block
 
         ! aeros_update leaves the grid fields consistent, so the sample costs
         ! no extra transforms -- which is why the sampling interval and the
@@ -213,7 +226,14 @@ program held_suarez
     call aeros_write_diag(io, trim(file_diag), ams%grd, ams%vgrid, dgn)
 
     call aeros_diag_end(dgn)
-    call aeros_end(ams)
+    block
+        integer :: ierr_end
+        call aeros_lib_finalize(ams, ierr=ierr_end)
+        if (ierr_end /= 0) then
+            write(io_unit_err,*) "held_suarez:: aeros_lib_finalize failed, ierr = ", ierr_end
+            stop 1
+        end if
+    end block
 
     write(*,*) "held_suarez:: done."
     write(*,*) "  state       -> ", trim(file_out)
