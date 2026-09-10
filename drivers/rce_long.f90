@@ -44,7 +44,10 @@ program rce_long
                                 aeros_timestep_set_qforce, aeros_timestep_write_restart
     use aeros_topography, only : aeros_topography_scale
     use aeros_boundary, only : aeros_boundary_refresh, aeros_boundary_kind_name, BC_NONE
-    use aeros_diag_acc, only : aeros_diag_acc_init_monthly, AEROS_DIAG_NMON
+    use aeros_diag_acc, only : aeros_diag_acc_init_monthly, AEROS_DIAG_NMON, &
+                                aeros_diag_acc_energy, aeros_diag_acc_water, &
+                                aeros_diag_acc_second_half, aeros_diag_acc_monthly, &
+                                aeros_diag_acc_imon
     use aeros,          only : aeros_class, aeros_lib_init, aeros_lib_finalize, &
                                 aeros_lib_restart_read, aeros_set_rce_warm, &
                                 aeros_boundary_apply
@@ -311,28 +314,17 @@ program rce_long
             blew_up = .TRUE.
             exit
         end if
-        if (ams%phys%l_surf .and. allocated(ams%ts%cnv%precip) .and. allocated(ams%ts%cnd%precip)) then
-            ams%diag_acc%wb_p_acc = ams%diag_acc%wb_p_acc + gmean2((ams%ts%cnv%precip + ams%ts%cnd%precip)*86400.0_wp)
-            ams%diag_acc%wb_e_acc = ams%diag_acc%wb_e_acc + gmean2(ams%ts%surf%evap*86400.0_wp)
-            ams%diag_acc%wb_n_acc = ams%diag_acc%wb_n_acc + 1
-        end if
-        call energy_accumulate()
+        ! Per-step accumulators (library owns the arithmetic; the driver
+        ! decides WHEN). Water/energy every step; the 2nd-half tavg and
+        ! monthly bin only after the spin-up windows below.
+        call aeros_diag_acc_water(ams%diag_acc, ams%ts, ams%phys, ams%grd)
+        call aeros_diag_acc_energy(ams%diag_acc, ams%ts, ams%phys, ams%grd)
         if (mod(n, print_every) == 0) call report(n)
         ! Time-mean omega over the run's second half (equilibrium) for a robust
         ! zonal-mean subsidence diagnostic -- a single snapshot is too noisy.
         if (l_diag .and. n > n0 + nstep/2) then
-            ams%diag_acc%w_tavg = ams%diag_acc%w_tavg + ams%ts%wrk%omega
-            ams%diag_acc%cnv_tavg  = ams%diag_acc%cnv_tavg  + ams%ts%wrk%dt_cnv
-            ams%diag_acc%cnd_tavg  = ams%diag_acc%cnd_tavg  + ams%ts%wrk%dt_cnd
-            ams%diag_acc%rad_tavg  = ams%diag_acc%rad_tavg  + ams%ts%wrk%dt_rad
-            ams%diag_acc%surf_tavg = ams%diag_acc%surf_tavg + ams%ts%wrk%dt_surf
-            ams%diag_acc%vadv_tavg = ams%diag_acc%vadv_tavg + ams%ts%wrk%dt_vadv*ams%par%dt      ! rates [K/s] -> [K/step]
-            ams%diag_acc%dyn_tavg  = ams%diag_acc%dyn_tavg  + ams%ts%wrk%dtdt*ams%par%dt
-            ams%diag_acc%vdf_tavg  = ams%diag_acc%vdf_tavg  + ams%ts%wrk%dt_vdiff
-            ams%diag_acc%bd_tavg   = ams%diag_acc%bd_tavg   + ams%ts%wrk%dt_bd
-            call accum_zmflux()
-            call accum_espec()
-            ams%diag_acc%n_wacc = ams%diag_acc%n_wacc + 1
+            call aeros_diag_acc_second_half(ams%diag_acc, ams%ts, ams%now, &
+                                            ams%vgrid, ams%grd, ams%par)
         end if
         ! Monthly-mean climatology sampling (feat/seasonal): bin the zonal-mean
         ! state by calendar month on a ~daily cadence, once past the spin-up
@@ -344,7 +336,9 @@ program rce_long
         if (len_trim(monthly_out) > 0 .and. mod(n, ams%diag_acc%nacc_mon) == 0 .and. &
             real(n,wp)*ams%par%dt/86400.0_wp >= mon_spinup_days) then
             call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
-            call accum_monthly(n)
+            call aeros_diag_acc_monthly(ams%diag_acc, ams%ts, ams%now, ams%vgrid, &
+                                        ams%grd, ams%par, ams%phys, &
+                                        aeros_diag_acc_imon(ams%ts%rad%doy0 + real(n,wp)*ams%par%dt/86400.0_wp))
         end if
         ! Periodic checkpoint (restart_interval > 0). The model time carried into
         ! the file is the absolute elapsed time n*dt.
@@ -561,142 +555,6 @@ contains
         deallocate(rh_zm, cf_zm, t_zm, q_zm, p_zm, u_zm, v_zm, cover, latout, levout)
         return
     end subroutine dump_rh
-
-    subroutine accum_monthly(n)
-        ! Bin the current zonal-mean state into its calendar-month slot
-        ! (feat/seasonal). Called on a ~daily cadence. RH is diagnosed per column
-        ! (nonlinear in T,q) then zonal-averaged, exactly as dump_rh does. SST and
-        ! total (convective + large-scale) precip are surface fields.
-        integer, intent(in) :: n
-        real(wp), parameter :: DAYS_YR = 365.0_wp   ! radiative year (aeros_insol_day wrap)
-        real(wp), parameter :: P500 = 50000.0_wp    ! [Pa] level of the geopotential diagnostic
-        real(wp) :: phc(0:ams%par%nlev), pfc(ams%par%nlev), dpcc(ams%par%nlev)
-        real(wp) :: qsl, dqsl, day, frac, rnlon
-        integer  :: ii, jj, kk, imon
-        real(wp) :: tzm(ams%grd%nlat,ams%par%nlev), uzm(ams%grd%nlat,ams%par%nlev), vzm(ams%grd%nlat,ams%par%nlev), rzm(ams%grd%nlat,ams%par%nlev)
-        real(wp) :: sstz(ams%grd%nlat), prz(ams%grd%nlat)
-        real(wp) :: phif(ams%par%nlev), phih, alph, pr_ij, wgt
-        real(wp) :: cfz(ams%grd%nlat,ams%par%nlev), cfc(ams%par%nlev), clwc(ams%par%nlev), ciwc(ams%par%nlev)
-        real(wp) :: qzm(ams%grd%nlat,ams%par%nlev), vtzm(ams%grd%nlat,ams%par%nlev), vqzm(ams%grd%nlat,ams%par%nlev), uvzm(ams%grd%nlat,ams%par%nlev)
-        real(wp) :: u2zm(ams%grd%nlat,ams%par%nlev), v2zm(ams%grd%nlat,ams%par%nlev)
-        real(wp) :: mrzm(ams%grd%nlat,ams%par%nlev), mrtzm(ams%grd%nlat,ams%par%nlev), mrqzm(ams%grd%nlat,ams%par%nlev), mr
-        logical  :: have_pr
-
-        day  = ams%ts%rad%doy0 + real(n,wp)*ams%par%dt/86400.0_wp
-        frac = modulo(day - 1.0_wp, DAYS_YR)                 ! 0-based day within year
-        imon = min(NMON, int(frac/(DAYS_YR/real(NMON,wp))) + 1)
-
-        have_pr = allocated(ams%ts%cnv%precip) .and. allocated(ams%ts%cnd%precip)
-        rnlon = real(ams%grd%nlon, wp)
-        tzm = 0.0_wp; uzm = 0.0_wp; vzm = 0.0_wp; rzm = 0.0_wp
-        sstz = 0.0_wp; prz = 0.0_wp; cfz = 0.0_wp
-        qzm = 0.0_wp; vtzm = 0.0_wp; vqzm = 0.0_wp; u2zm = 0.0_wp; v2zm = 0.0_wp; uvzm = 0.0_wp
-        mrzm = 0.0_wp; mrtzm = 0.0_wp; mrqzm = 0.0_wp
-        do jj = 1, ams%grd%nlat
-            do ii = 1, ams%grd%nlon
-                call aeros_vgrid_pressure(ams%vgrid, ams%now%ps(ii,jj), phc, pfc, dpcc)
-                ! per-level cloud fraction as radiation sees it
-                if (ams%ts%cpr%enabled) then
-                    cfc = ams%now%cf_g(ii,jj,:)
-                else
-                    call aeros_cloud_diagnose(ams%par%nlev, ams%now%temp_g(ii,jj,:), &
-                        ams%now%qv_g(ii,jj,:), pfc, ams%now%ps(ii,jj), cfc, clwc, ciwc)
-                end if
-                cfz(jj,:) = cfz(jj,:) + cfc
-                do kk = 1, ams%par%nlev
-                    call aeros_qsat(ams%now%temp_g(ii,jj,kk), pfc(kk), qsl, dqsl)
-                    tzm(jj,kk) = tzm(jj,kk) + ams%now%temp_g(ii,jj,kk)
-                    uzm(jj,kk) = uzm(jj,kk) + ams%now%u(ii,jj,kk)
-                    vzm(jj,kk) = vzm(jj,kk) + ams%now%v(ii,jj,kk)
-                    rzm(jj,kk) = rzm(jj,kk) + &
-                        ams%now%qv_g(ii,jj,kk)/max(qsl,1.0e-12_wp)*100.0_wp
-                    qzm(jj,kk)  = qzm(jj,kk)  + ams%now%qv_g(ii,jj,kk)
-                    vtzm(jj,kk) = vtzm(jj,kk) + ams%now%v(ii,jj,kk)*ams%now%temp_g(ii,jj,kk)
-                    uvzm(jj,kk) = uvzm(jj,kk) + ams%now%u(ii,jj,kk)*ams%now%v(ii,jj,kk)
-                    vqzm(jj,kk) = vqzm(jj,kk) + ams%now%v(ii,jj,kk)*ams%now%qv_g(ii,jj,kk)
-                    u2zm(jj,kk) = u2zm(jj,kk) + ams%now%u(ii,jj,kk)**2
-                    v2zm(jj,kk) = v2zm(jj,kk) + ams%now%v(ii,jj,kk)**2
-                    mr = ams%ts%mst%mass_ratio(ii,jj,kk) - 1.0_wp
-                    mrzm(jj,kk)  = mrzm(jj,kk)  + mr
-                    mrtzm(jj,kk) = mrtzm(jj,kk) + mr*ams%now%temp_g(ii,jj,kk)
-                    mrqzm(jj,kk) = mrqzm(jj,kk) + mr*ams%now%qv_g(ii,jj,kk)
-                end do
-                sstz(jj) = sstz(jj) + ams%ts%ocn%sst(ii,jj)
-                if (have_pr) then
-                    pr_ij = (ams%ts%cnv%precip(ii,jj) + ams%ts%cnd%precip(ii,jj))*86400.0_wp  ! kg/m2/s -> mm/day
-                    prz(jj) = prz(jj) + pr_ij
-                    ams%diag_acc%mon_pr2d(ii,jj,imon) = ams%diag_acc%mon_pr2d(ii,jj,imon) + pr_ij
-                end if
-                ! Hydrostatic geopotential on the full levels, integrated up from
-                ! the surface (Simmons-Burridge layer alpha; ln 2 in the top
-                ! layer) -- a diagnostic, not the dynamics' own -- then Z500 by
-                ! log-p interpolation (the lowest layer extrapolated where the
-                ! surface is above 500 hPa).
-                phih = phis2(ii,jj)
-                do kk = ams%par%nlev, 1, -1
-                    if (kk == 1) then
-                        alph = log(2.0_wp)
-                    else
-                        alph = 1.0_wp - phc(kk-1)/dpcc(kk)*log(phc(kk)/phc(kk-1))
-                    end if
-                    phif(kk) = phih + real(R_d,wp)*ams%now%temp_g(ii,jj,kk)*alph
-                    if (kk > 1) phih = phih + real(R_d,wp)*ams%now%temp_g(ii,jj,kk)*log(phc(kk)/phc(kk-1))
-                end do
-                kk = ams%par%nlev - 1
-                do while (kk > 1 .and. pfc(kk) > P500)
-                    kk = kk - 1
-                end do
-                wgt = (log(P500) - log(pfc(kk)))/(log(pfc(kk+1)) - log(pfc(kk)))
-                ams%diag_acc%mon_z500(ii,jj,imon) = ams%diag_acc%mon_z500(ii,jj,imon) + &
-                    (phif(kk) + wgt*(phif(kk+1) - phif(kk)))/real(grav,wp)
-            end do
-        end do
-        ams%diag_acc%mon_t(:,:,imon)  = ams%diag_acc%mon_t(:,:,imon)  + tzm/rnlon
-        ams%diag_acc%mon_u(:,:,imon)  = ams%diag_acc%mon_u(:,:,imon)  + uzm/rnlon
-        ams%diag_acc%mon_v(:,:,imon)  = ams%diag_acc%mon_v(:,:,imon)  + vzm/rnlon
-        ams%diag_acc%mon_rh(:,:,imon) = ams%diag_acc%mon_rh(:,:,imon) + rzm/rnlon
-        ams%diag_acc%mon_sst(:,imon)  = ams%diag_acc%mon_sst(:,imon)  + sstz/rnlon
-        ams%diag_acc%mon_pr(:,imon)   = ams%diag_acc%mon_pr(:,imon)   + prz/rnlon
-        ams%diag_acc%mon_cf(:,:,imon) = ams%diag_acc%mon_cf(:,:,imon) + cfz/rnlon
-        ! eddy covariances of this sample: [vT] - [v][T] etc.
-        ams%diag_acc%mon_vt(:,:,imon)  = ams%diag_acc%mon_vt(:,:,imon)  + (vtzm - vzm*tzm/rnlon)/rnlon
-        ams%diag_acc%mon_uv(:,:,imon)  = ams%diag_acc%mon_uv(:,:,imon)  + (uvzm - uzm*vzm/rnlon)/rnlon
-        ams%diag_acc%mon_vq(:,:,imon)  = ams%diag_acc%mon_vq(:,:,imon)  + (vqzm - vzm*qzm/rnlon)/rnlon
-        ams%diag_acc%mon_eke(:,:,imon) = ams%diag_acc%mon_eke(:,:,imon) + 0.5_wp*(u2zm + v2zm - (uzm**2 + vzm**2)/rnlon)/rnlon
-        ams%diag_acc%mon_mr(:,:,imon)  = ams%diag_acc%mon_mr(:,:,imon)  + mrzm/rnlon
-        ams%diag_acc%mon_mrt(:,:,imon) = ams%diag_acc%mon_mrt(:,:,imon) + (mrtzm - mrzm*tzm/rnlon)/rnlon
-        ams%diag_acc%mon_mrq(:,:,imon) = ams%diag_acc%mon_mrq(:,:,imon) + (mrqzm - mrzm*qzm/rnlon)/rnlon
-        ams%diag_acc%mon_mr2(:,:,imon) = ams%diag_acc%mon_mr2(:,:,imon) + ams%ts%mst%mass_ratio(:,:,ams%par%nlev) - 1.0_wp
-        ams%diag_acc%mon_u3(:,:,:,imon) = ams%diag_acc%mon_u3(:,:,:,imon) + ams%now%u(:,:,1:ams%par%nlev)
-        ams%diag_acc%mon_v3(:,:,:,imon) = ams%diag_acc%mon_v3(:,:,:,imon) + ams%now%v(:,:,1:ams%par%nlev)
-        ams%diag_acc%mon_t3(:,:,:,imon) = ams%diag_acc%mon_t3(:,:,:,imon) + ams%now%temp_g(:,:,1:ams%par%nlev)
-        ams%diag_acc%mon_q3(:,:,:,imon) = ams%diag_acc%mon_q3(:,:,:,imon) + ams%now%qv_g(:,:,1:ams%par%nlev)
-        if (ams%ts%land%enabled .and. allocated(ams%ts%land%skin)) then
-            ams%diag_acc%mon_skin(:,:,imon) = ams%diag_acc%mon_skin(:,:,imon) + ams%ts%land%skin
-        else
-            ams%diag_acc%mon_skin(:,:,imon) = ams%diag_acc%mon_skin(:,:,imon) + ams%ts%ocn%sst
-        end if
-        if (allocated(ams%ts%rad%olr)) then
-            ams%diag_acc%mon_lwd(:,:,imon)   = ams%diag_acc%mon_lwd(:,:,imon)   + ams%ts%rad%lw_dw_sur
-            ams%diag_acc%mon_olr(:,:,imon)   = ams%diag_acc%mon_olr(:,:,imon)   + ams%ts%rad%olr
-            ams%diag_acc%mon_olrcs(:,:,imon) = ams%diag_acc%mon_olrcs(:,:,imon) + ams%ts%rad%olr_cs
-            ams%diag_acc%mon_cover(:,:,imon) = ams%diag_acc%mon_cover(:,:,imon) + ams%ts%rad%cover
-            ams%diag_acc%mon_swn(:,:,imon)   = ams%diag_acc%mon_swn(:,:,imon)   + ams%ts%rad%sw_net_sur
-            ams%diag_acc%mon_swup(:,:,imon)  = ams%diag_acc%mon_swup(:,:,imon)  + ams%ts%rad%sw_up_toa
-        end if
-        ams%diag_acc%mon_tlow(:,:,imon) = ams%diag_acc%mon_tlow(:,:,imon) + ams%now%temp_g(:,:,ams%par%nlev)  ! lowest level (~350 m)
-        if (ams%ts%surf%enabled) then
-            ams%diag_acc%mon_t2m(:,:,imon) = ams%diag_acc%mon_t2m(:,:,imon) + ams%ts%surf%t2m          ! surface-layer 2 m T
-        else
-            ams%diag_acc%mon_t2m(:,:,imon) = ams%diag_acc%mon_t2m(:,:,imon) + ams%now%temp_g(:,:,ams%par%nlev)
-        end if
-        ams%diag_acc%mon_vlow(:,:,imon) = ams%diag_acc%mon_vlow(:,:,imon) + sqrt(ams%now%u(:,:,ams%par%nlev)**2 + ams%now%v(:,:,ams%par%nlev)**2)
-        if (allocated(ams%ts%surf%evap)) then
-            ams%diag_acc%mon_evap(:,:,imon) = ams%diag_acc%mon_evap(:,:,imon) + ams%ts%surf%evap*86400.0_wp
-            ams%diag_acc%mon_shf(:,:,imon)  = ams%diag_acc%mon_shf(:,:,imon)  + ams%ts%surf%shf
-        end if
-        ams%diag_acc%mon_cnt(imon)    = ams%diag_acc%mon_cnt(imon) + 1
-    end subroutine accum_monthly
 
     subroutine dump_monthly(fname)
         ! Write the 12-month zonal-mean climatology (feat/seasonal): T/u/v/RH
@@ -1131,68 +989,6 @@ contains
         return
     end subroutine eddy_diag
 
-    subroutine accum_zmflux()
-        ! Accumulate, over the equilibrated 2nd half (same window as dacc%w_tavg), the
-        ! time-mean zonal-mean jet [u], meridional wind [v], and eddy momentum
-        ! flux [u*v*] = zonal mean of (u-[u])(v-[v]) at every (lat,lev). The
-        ! meridional convergence of [u*v*] is the eddy forcing that terminates
-        ! the Hadley cell -- the cell-edge diagnostic this branch is after.
-        integer  :: i, j, k
-        real(wp) :: uzm, vzm, up, vp, cov, rn
-        rn = real(ams%grd%nlon, wp)
-        do k = 1, ams%par%nlev
-            do j = 1, ams%grd%nlat
-                uzm = sum(ams%now%u(:,j,k))/rn
-                vzm = sum(ams%now%v(:,j,k))/rn
-                cov = 0.0_wp
-                do i = 1, ams%grd%nlon
-                    up = ams%now%u(i,j,k) - uzm
-                    vp = ams%now%v(i,j,k) - vzm
-                    cov = cov + up*vp
-                end do
-                ams%diag_acc%ubar_tavg(j,k) = ams%diag_acc%ubar_tavg(j,k) + uzm
-                ams%diag_acc%vbar_tavg(j,k) = ams%diag_acc%vbar_tavg(j,k) + vzm
-                ams%diag_acc%uv_tavg(j,k)   = ams%diag_acc%uv_tavg(j,k)   + cov/rn
-            end do
-        end do
-        return
-    end subroutine accum_zmflux
-
-    subroutine accum_espec()
-        ! Eddy KE and [u*v*] momentum-flux co-spectrum by zonal wavenumber m,
-        ! mass (dsigma) + area weighted and summed over the globe, accumulated
-        ! over the 2nd half. One-sided (factor 2 for +-m): sum_m dacc%ke_spec(m) is the
-        ! total eddy KE, sum_m dacc%mf_spec(m) the total momentum flux.
-        integer  :: i, j, k, m
-        real(wp) :: uzm, vzm, up, vp, w, dsig, rn, ur, ui, vr, vi, c, s, kem
-        rn = real(ams%grd%nlon, wp)
-        do k = 1, ams%par%nlev
-            dsig = ams%vgrid%sigma_half(k) - ams%vgrid%sigma_half(k-1)
-            do j = 1, ams%grd%nlat
-                w   = ams%grd%area(1,j)*dsig
-                uzm = sum(ams%now%u(:,j,k))/rn
-                vzm = sum(ams%now%v(:,j,k))/rn
-                do m = 1, ams%diag_acc%mmax_spec
-                    ur = 0.0_wp; ui = 0.0_wp; vr = 0.0_wp; vi = 0.0_wp
-                    do i = 1, ams%grd%nlon
-                        up = ams%now%u(i,j,k) - uzm
-                        vp = ams%now%v(i,j,k) - vzm
-                        c  = ams%diag_acc%ctab(m,i); s = ams%diag_acc%stab(m,i)
-                        ur = ur + up*c; ui = ui + up*s
-                        vr = vr + vp*c; vi = vi + vp*s
-                    end do
-                    ur = ur/rn; ui = ui/rn; vr = vr/rn; vi = vi/rn
-                    kem = ur*ur + ui*ui + vr*vr + vi*vi
-                    ams%diag_acc%ke_spec(m)   = ams%diag_acc%ke_spec(m)   + w*kem
-                    ams%diag_acc%ke_latm(j,m) = ams%diag_acc%ke_latm(j,m) + dsig*kem
-                    ams%diag_acc%ke_levm(k,m) = ams%diag_acc%ke_levm(k,m) + ams%grd%area(1,j)*kem
-                    ams%diag_acc%mf_spec(m) = ams%diag_acc%mf_spec(m) + w*2.0_wp*(ur*vr + ui*vi)
-                end do
-            end do
-        end do
-        return
-    end subroutine accum_espec
-
     subroutine locate_umax(umax, ium, jum, kum)
         ! max|u| and its (i,j,k) -- to see whether the growing jet sits at the
         ! model top (the thermal-wind blow-up) and where in latitude.
@@ -1211,31 +1007,6 @@ contains
         end do
         return
     end subroutine locate_umax
-
-    subroutine energy_accumulate()
-        ! Per-step global means of the energy-budget terms, for energy_balance.
-        real(wp) :: swin, wsum
-        integer  :: j
-        if (.not. (ams%phys%l_rad .or. ams%phys%l_surf)) return
-        if (ams%phys%l_rad) then
-            ams%diag_acc%tb_olr   = ams%diag_acc%tb_olr   + gmean2(ams%ts%rad%olr)
-            ams%diag_acc%tb_swup  = ams%diag_acc%tb_swup  + gmean2(ams%ts%rad%sw_up_toa)
-            ams%diag_acc%tb_olrc  = ams%diag_acc%tb_olrc  + gmean2(ams%ts%rad%olr_cs)
-            ams%diag_acc%tb_swupc = ams%diag_acc%tb_swupc + gmean2(ams%ts%rad%sw_up_toa_cs)
-            ams%diag_acc%tb_cov   = ams%diag_acc%tb_cov   + gmean2(ams%ts%rad%cover)
-            swin = 0.0_wp; wsum = 0.0_wp
-            do j = 1, ams%grd%nlat
-                swin = swin + ams%ts%rad%sw_toa(j)*sum(ams%grd%area(:,j))
-                wsum = wsum + sum(ams%grd%area(:,j))
-            end do
-            ams%diag_acc%tb_swin = ams%diag_acc%tb_swin + swin/wsum
-        end if
-        if (ams%phys%l_surf) then
-            ams%diag_acc%tb_shf = ams%diag_acc%tb_shf + gmean2(ams%ts%surf%shf); ams%diag_acc%tb_lhf = ams%diag_acc%tb_lhf + gmean2(ams%ts%surf%lhf)
-        end if
-        ams%diag_acc%tb_n = ams%diag_acc%tb_n + 1
-        return
-    end subroutine energy_accumulate
 
     subroutine energy_balance()
         ! Global-mean TOA and surface energy budget, time-mean since the last

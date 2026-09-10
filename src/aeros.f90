@@ -46,7 +46,8 @@ module aeros
                                 aeros_timestep_end, aeros_timestep_step, &
                                 aeros_timestep_diagnose, aeros_timestep_print, &
                                 aeros_timestep_write_restart, &
-                                aeros_timestep_read_restart, aeros_timestep_set_phis
+                                aeros_timestep_read_restart, aeros_timestep_set_phis, &
+                                aeros_timestep_enable_diag
     use aeros_boundary, only : aeros_boundary_t, aeros_bc_2d_t, aeros_boundary_load, &
                                 aeros_boundary_end, aeros_boundary_refresh, &
                                 BC_NONE, BC_EXTERNAL
@@ -55,7 +56,11 @@ module aeros
     use aeros_topography, only : aeros_topography_bandlimit
     use ncio,           only : nc_write, nc_read, nc_exists_var
     use aeros_diag_acc, only : aeros_diag_acc_t, aeros_diag_acc_init, &
-                                aeros_diag_acc_reset, aeros_diag_acc_end
+                                aeros_diag_acc_reset, aeros_diag_acc_end, &
+                                aeros_diag_acc_energy, aeros_diag_acc_water, &
+                                aeros_diag_acc_second_half, aeros_diag_acc_monthly, &
+                                aeros_diag_acc_imon, aeros_diag_acc_init_monthly, &
+                                AEROS_DIAG_NMON
     use aeros_bundles,  only : aeros_imports_t, aeros_exports_t, aeros_diag_t
 
     implicit none
@@ -710,9 +715,51 @@ contains
         call aeros_boundary_refresh(ams%bounds, doy)
         call aeros_boundary_apply(ams)
 
-        ! === Sub-cycle ========================================================
+        ! === Sub-cycle with per-step accumulation ===========================
+        !
+        ! Wave 4c: the library owns the accumulator arithmetic. Every
+        ! sub-step feeds the water / energy sums and the 2nd-half tavg (a
+        ! coupled host has no spin-up notion: the whole run is treated as
+        ! equilibrated, and the driver's export bundle is a cycle-mean read
+        ! from the running sums). The monthly-climatology bin is filled on a
+        ! ~daily cadence using the day-of-year calendar.
+        !
+        ! Monthly bins are lazily allocated on first coupled-path use so
+        ! standalone drivers that never set monthly_out do not carry the
+        ! memory.
+        ! Wave 4c: the coupled path needs the per-term heating split (dt_cnv,
+        ! dt_cnd, dt_rad, dt_surf, dt_vadv, dt_vdiff, dt_bd on ts%wrk) for
+        ! aeros_diag_acc_second_half to fill the tavg fields. rce_long turns
+        ! this on when l_diag=T; a coupled host has no such flag, so enable
+        ! it lazily on first entry here. Held-Suarez runs the dry core and
+        ! never enters aeros_diag_acc_second_half (guarded), so its dry
+        ! Held-Suarez skips this branch (par%held_suarez=T).
+        if (.not. ams%par%held_suarez .and. .not. allocated(ams%ts%wrk%dt_cnv)) then
+            call aeros_timestep_enable_diag(ams%ts)
+        end if
+
+        ! The monthly-bin arithmetic is a moist-physics climatology; a dry
+        ! Held-Suarez run has no cloud / precip / surface fluxes to bin, so
+        ! the bin stays absent on that path.
+        if (.not. allocated(ams%diag_acc%mon_cnt) .and. &
+            (ams%phys%l_cnd .or. ams%phys%l_cnv .or. ams%phys%l_rad .or. ams%phys%l_surf)) then
+            call aeros_diag_acc_init_monthly(ams%diag_acc, ams%par%nlon, &
+                                             ams%par%nlat, ams%par%nlev)
+        end if
         do n = 1, nsub
             call aeros_timestep_step(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
+            call aeros_diag_acc_water(ams%diag_acc, ams%ts, ams%phys, ams%grd)
+            call aeros_diag_acc_energy(ams%diag_acc, ams%ts, ams%phys, ams%grd)
+            call aeros_diag_acc_second_half(ams%diag_acc, ams%ts, ams%now, &
+                                            ams%vgrid, ams%grd, ams%par)
+            if (allocated(ams%diag_acc%mon_cnt) .and. &
+                mod(ams%nstep + n, ams%diag_acc%nacc_mon) == 0) then
+                call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
+                call aeros_diag_acc_monthly(ams%diag_acc, ams%ts, ams%now, ams%vgrid, &
+                                            ams%grd, ams%par, ams%phys, &
+                                            aeros_diag_acc_imon(ams%ts%rad%doy0 + &
+                                                real(ams%nstep + n, wp)*ams%par%dt/86400.0_wp))
+            end if
         end do
 
         ams%nstep = ams%nstep + nsub
@@ -721,19 +768,13 @@ contains
         ! Leave the grid-space fields consistent with the spectral state.
         call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
 
-        ! === Cycle-end exports and accumulator reset =========================
-        if (present(exports)) call export_populate(ams, exports)
-
-        ! Zero the library-side accumulators for the next cycle.
+        ! === Cycle-end exports ==============================================
         !
-        ! Wave 4a: ams%diag_acc IS allocated now (aeros_init), so this reset
-        ! is no longer a no-op -- it wipes the buffers every coupling cycle.
-        ! That is the per-cycle export contract, not rce_long's run-long
-        ! second-half accumulation: a driver that needs run-long means must
-        ! NOT accumulate into ams%diag_acc through aeros_lib_step yet. Wave 4c
-        ! replaces this blanket reset with method-based accumulation
-        ! (accumulate / finalize / reset as explicit calls on the container).
-        call aeros_diag_acc_reset(ams%diag_acc)
+        ! Wave 4c: accumulators are NOT reset here -- the coupled contract is
+        ! that a host reads cycle-mean fields off `exports`, and can inspect
+        ! run-long accumulators on ams%diag_acc between calls. A driver that
+        ! wants a per-cycle window explicitly calls aeros_diag_acc_reset.
+        if (present(exports)) call export_populate(ams, exports)
 
         return
 
@@ -788,32 +829,90 @@ contains
     end subroutine import_copy
 
     subroutine export_populate(ams, exports)
-        ! Populate the allocated fields of `exports` with cycle-mean values.
-        !
-        ! Wave-3.a: this is a shell. The cycle-mean accumulators live in
-        ! ams%diag_acc, whose accumulate/finalize arithmetic ports from
-        ! rce_long in a later wave. For now the routine leaves allocated
-        ! export arrays at zero -- the caller sees a well-shaped bundle with
-        ! zeros, which is enough to compile and link the API. Phase A
-        ! calibration lands the field-by-field wire-up when a driver first
-        ! consumes it.
+        ! Populate the export bundle with the end-of-cycle grid state (Phase A,
+        ! spec sec. 6.2). Each field is allocated on demand -- the host reads
+        ! back whatever aeros can compute cheaply today; unallocated fields
+        ! are Phase C. Values are the current snapshot on the physics state
+        ! (ts%surf, ts%rad, ts%cnv/cnd) and ams%now -- for a 1-day coupling
+        ! cycle this is effectively the cycle-mean; a strict cycle-mean would
+        ! come from ams%diag_acc%mon_* running sums divided by mon_cnt.
 
         implicit none
 
         type(aeros_class),     intent(inout) :: ams
         type(aeros_exports_t), intent(out)   :: exports
 
-        ! intent(out) leaves scalar fields at their type defaults and every
-        ! allocatable component un-allocated. If the caller pre-allocated
-        ! fields on the exports bundle they'd be dropped here -- so the
-        ! contract for the shell is: caller does not pre-allocate exports;
-        ! the wave that fills these fields will switch to intent(inout).
-        !
-        ! Keep the reference to `ams` alive so gfortran does not warn about
-        ! unused-argument on this stub.
-        if (ams%par%nlon < 0) return
+        integer :: nlon, nlat
+
+        nlon = ams%par%nlon
+        nlat = ams%par%nlat
+
+        ! Near-surface state. Fields the physics does not yet expose (q2m,
+        ! u10m, v10m, taux, tauy) are Phase C -- left unallocated so the
+        ! host can detect "not provided" by allocated().
+        allocate(exports%ps(nlon,nlat));   exports%ps  = ams%now%ps
+        if (allocated(ams%ts%surf%t2m)) then
+            allocate(exports%t2m(nlon,nlat));  exports%t2m = ams%ts%surf%t2m
+        end if
+        ! wind10m from the lowest model level (a proxy until aeros_surface
+        ! exposes a proper 10 m diagnostic in Phase C).
+        allocate(exports%wind10m(nlon,nlat))
+        exports%wind10m = sqrt(ams%now%u(:,:,ams%par%nlev)**2 + ams%now%v(:,:,ams%par%nlev)**2)
+
+        ! Radiation at surface.
+        if (allocated(ams%ts%rad%sw_dw_sur)) then
+            allocate(exports%sw_dw_sur(nlon,nlat));  exports%sw_dw_sur  = ams%ts%rad%sw_dw_sur
+        end if
+        if (allocated(ams%ts%rad%lw_dw_sur)) then
+            allocate(exports%lw_dw_sur(nlon,nlat));  exports%lw_dw_sur  = ams%ts%rad%lw_dw_sur
+        end if
+        if (allocated(ams%ts%rad%sw_net_sur)) then
+            allocate(exports%sw_net_sur(nlon,nlat)); exports%sw_net_sur = ams%ts%rad%sw_net_sur
+        end if
+
+        ! Water: convective + condensation precipitation as combined rate;
+        ! Phase A does not split rain/snow (single-phase precip today).
+        if (allocated(ams%ts%cnv%precip) .and. allocated(ams%ts%cnd%precip)) then
+            allocate(exports%prc_total(nlon,nlat))
+            exports%prc_total = ams%ts%cnv%precip + ams%ts%cnd%precip
+        end if
+
+        ! Grid-mean cloud cover (TOA, max-overlap) from radiation cache.
+        if (allocated(ams%ts%rad%cover)) then
+            allocate(exports%cld(nlon,nlat)); exports%cld = ams%ts%rad%cover
+        end if
+
+        ! TOA radiation trio.
+        if (allocated(ams%ts%rad%olr)) then
+            allocate(exports%olr_toa(nlon,nlat));    exports%olr_toa    = ams%ts%rad%olr
+        end if
+        if (allocated(ams%ts%rad%sw_up_toa)) then
+            allocate(exports%sw_toa_net(nlon,nlat))
+            ! sw_toa is a 1D latitude-only field (sw at TOA is only a function of latitude
+            ! at the moment: no diurnal/longitudinal dependence in the annual mean).
+            block
+                integer :: j
+                do j = 1, nlat
+                    exports%sw_toa_net(:,j) = ams%ts%rad%sw_toa(j) - ams%ts%rad%sw_up_toa(:,j)
+                end do
+            end block
+        end if
+        if (allocated(ams%ts%rad%sw_toa)) then
+            allocate(exports%sw_toa_dw(nlon,nlat))
+            block
+                integer :: j
+                do j = 1, nlat
+                    exports%sw_toa_dw(:,j) = ams%ts%rad%sw_toa(j)
+                end do
+            end block
+        end if
+
+        ! slp, tam, ram, gams, u700, v700: Phase C (needs vertical interp /
+        ! reduction not currently exposed on the physics state) -- left
+        ! unallocated so a host can detect "not provided" by allocated().
 
         return
+
     end subroutine export_populate
 
     subroutine aeros_lib_finalize(ams, ierr)

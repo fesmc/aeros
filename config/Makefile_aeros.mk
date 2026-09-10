@@ -278,7 +278,9 @@ $(objdir)/aeros_diagnostics.o: $(srcdir)/aeros_diagnostics.f90 \
 # today live at rce_long program scope. A leaf module: needs only aeros_defs
 # for the working precision.
 $(objdir)/aeros_diag_acc.o: $(srcdir)/aeros_diag_acc.f90 \
-							$(objdir)/aeros_defs.o
+							$(objdir)/aeros_defs.o $(objdir)/aeros_timestep.o \
+							$(objdir)/aeros_vertical.o $(objdir)/aeros_physics.o \
+							$(objdir)/aeros_condensation.o $(objdir)/aeros_cloud.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 # Output, driven by the variable tables under input/. Depends on the
