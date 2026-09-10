@@ -337,6 +337,27 @@
     t_frz        = 271.35
 /
 
+&land
+    ! Land surface (src/physics/aeros_land.f90). Read by aeros_land_load
+    ! (Wave 1). OFF by default -> all-ocean, bit-for-bit. Defaults match the
+    ! aeros_land_class initializers (src lines 66-113).
+    enabled          = .FALSE.
+    lsm_file         = ""       ! land-sea mask (var lsm); empty = required when enabled
+    albedo_file      = ""       ! forecast albedo (var fal); empty = use land_albedo
+    lsm_threshold    = 0.5      ! land where lsm >= threshold
+    w_field_capacity = 0.15     ! bucket capacity [m]
+    w_crit           = -1.0     ! beta knee [m]; < 0 = 0.75 * w_field_capacity
+    c_soil           = 2.0e6    ! soil heat capacity [J m-2 K-1]
+    land_albedo      = 0.20     ! fallback land albedo [-]
+    c_h_land         = 1.5e-3   ! land sensible exchange coefficient
+    c_e_land         = 1.5e-3   ! land moisture exchange coefficient
+    freeze_floor     = .FALSE.  ! clamp t_soil >= T0 (no snow)
+    snow_albedo      = -1.0     ! cold-endpoint albedo [-]; < 0 = off
+    snow_dt          = 5.0      ! snow-albedo ramp width below T0 [K]
+    beta_frozen      = 1.0      ! frozen-ground beta multiplier; 1 = off
+    albedo_seasonal  = .FALSE.  ! .TRUE. = use 12-month fal climatology
+/
+
 &radiation
     ! Clear-sky longwave + shortwave (src/physics/aeros_radiation.f90), ported
     ! SESAM band kernel. OFF by default. scheme=1 is the SESAM kernel; co2_ppm
@@ -369,6 +390,10 @@
     seasonal = .FALSE.
     interval = 10800.0
     doy0     = 0.0
+    ! Backward-compat mirror of `&insolation/time_bp` -- read at
+    ! src/physics/aeros_radiation.f90:411 (Wave 1 legacy read). Wave 4 will
+    ! unify the two; keep this in sync with &insolation until then.
+    time_bp  = 0.0
     ! ecCKD near-IR H2O band knobs (aeros_ecckd module state, folded into
     ! aeros_radiation_load Wave 1). Defaults match the compile-time defaults;
     ! overriding them is a calibration path, not production tuning.
@@ -397,6 +422,19 @@
     rhc_ice = -1.0    ! ice-phase critical RH; < 0 = off (single warm threshold)
     lwc     = 0.017e-3  ! in-cloud liquid water content [kg m-3]
     iwc     = 0.018e-3  ! in-cloud ice water content    [kg m-3]
+/
+
+&aeros_cloud
+    ! Prognostic cloud-fraction scheme (Sundqvist 1989),
+    ! src/physics/aeros_cloud_prog.f90. Read by aeros_cloud_prog_load
+    ! (Wave 1). OFF by default and bit-for-bit vs the diagnostic path.
+    ! Defaults match the aeros_cloud_prog_class initializers (src lines 88-106).
+    l_cloud_prog   = .FALSE.
+    cloud_rhc_sfc  = 0.40      ! critical RH at the surface (sigma = 1)
+    cloud_rhc_top  = 0.60      ! critical RH at the top (sigma = 0)
+    cloud_tau_form = 10800.0   ! formation relaxation timescale [s]
+    cloud_tau_evap = 10800.0   ! evaporation relaxation timescale [s]
+    cloud_c_detr   = 0.5       ! convective-detrainment anvil ceiling [-]
 /
 
 &vdiff
