@@ -1,15 +1,21 @@
 module aeros_physics
     ! Master on/off flags for the physics subsystems.
     !
-    ! Wave 1 of the coupling API (docs/coupling_api.md sec. 5, 8): the
-    ! per-subsystem knobs today live in `&rce` (and one flag each in the
-    ! subsystem group). This module reserves the single `&physics` namelist
-    ! group that will hold them all in the coupled API, and exposes them as a
-    ! plain container. Nothing consumes these flags yet -- driver refactors
-    ! (Wave 4) migrate the current callers onto them.
+    ! Wave 1 of the coupling API (docs/coupling_api.md sec. 5, 8) reserved the
+    ! single `&physics` namelist group; Wave 4a.1 makes it the ONE source of
+    ! truth for the on/off state of every subsystem on the library path:
+    ! aeros_init loads it right after the dynamics parameters and
+    ! aeros_timestep_init hands each flag to the matching subsystem `_load`
+    ! (which no longer reads an `enabled` key of its own). rce_long still
+    ! sets the `ts%<sub>%enabled` fields by hand from `&rce`; Wave 4a.2 moves
+    ! it onto this group.
     !
-    ! Defaults match today's real-Earth production configuration: physics on,
-    ! land / topography on, sea ice / prognostic cloud / Brewer-Dobson off.
+    ! Type defaults here are the real-Earth production configuration; the
+    ! shipped input/aeros_defaults.nml overrides them to the bare dynamical
+    ! core (every switch off) so aeros_run.x / held_suarez.x keep their
+    ! pre-Wave-4a behaviour -- a case file turns things on. `l_topography` has
+    ! no library consumer yet (the phis provider is Wave 4b) and `l_moist` is
+    ! unassigned (condensation is `l_cnd`; the transport is always on).
 
     use nml, only : nml_read
 

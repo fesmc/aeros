@@ -121,22 +121,23 @@ contains
         return
     end subroutine aeros_vdiff_init
 
-    subroutine aeros_vdiff_load(vd, filename, grd, defaults_file)
+    subroutine aeros_vdiff_load(vd, filename, grd, enabled, defaults_file)
+        ! Read the `vdiff` namelist group, then init. `enabled` is the
+        ! `&physics l_vdiff` master flag (Wave 4a), not a key of this group.
         implicit none
         type(aeros_vdiff_class), intent(inout) :: vd
         character(len=*),        intent(in)    :: filename
         character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class),  intent(in)    :: grd
+        logical,                 intent(in)    :: enabled
 
-        logical  :: enabled, richardson
+        logical  :: richardson
         real(wp) :: k0, sigma, ri_crit, z0, von_karman, surf_frac
 
-        enabled = vd%enabled
         k0 = vd%k0; sigma = vd%sigma
         richardson = vd%richardson; ri_crit = vd%ri_crit
         z0 = vd%z0; von_karman = vd%von_karman; surf_frac = vd%surf_frac
 
-        call nml_read(filename, "vdiff", "enabled",    enabled, defaults_file=defaults_file)
         call nml_read(filename, "vdiff", "k0",         k0, defaults_file=defaults_file)
         call nml_read(filename, "vdiff", "sigma",      sigma, defaults_file=defaults_file)
         call nml_read(filename, "vdiff", "richardson", richardson, defaults_file=defaults_file)

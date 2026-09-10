@@ -39,7 +39,9 @@ module aeros
     use aeros_grid,     only : aeros_grid_init, aeros_grid_end
     use aeros_state,    only : aeros_state_alloc, aeros_state_end, aeros_spec_zero
     use aeros_vertical, only : aeros_vgrid_class, aeros_vgrid_load, aeros_vgrid_end, &
-                                aeros_vgrid_print
+                                aeros_vgrid_print, aeros_vgrid_pressure
+    use aeros_physics,  only : aeros_physics_class, aeros_physics_load
+    use aeros_condensation, only : aeros_qsat
     use aeros_timestep, only : aeros_timestep_class, aeros_timestep_init, &
                                 aeros_timestep_end, aeros_timestep_step, &
                                 aeros_timestep_diagnose, aeros_timestep_print, &
@@ -48,7 +50,8 @@ module aeros
     use aeros_boundary, only : aeros_boundary_t, aeros_boundary_load, &
                                 aeros_boundary_end, aeros_boundary_refresh, &
                                 BC_EXTERNAL
-    use aeros_diag_acc, only : aeros_diag_acc_t, aeros_diag_acc_reset
+    use aeros_diag_acc, only : aeros_diag_acc_t, aeros_diag_acc_init, &
+                                aeros_diag_acc_reset, aeros_diag_acc_end
     use aeros_bundles,  only : aeros_imports_t, aeros_exports_t, aeros_diag_t
 
     implicit none
@@ -57,6 +60,11 @@ module aeros
 
     type aeros_class
         type(aeros_param_class)    :: par
+        ! Master physics on/off flags (&physics). The one source of every
+        ! subsystem's enabled state on the library path (Wave 4a): loaded
+        ! right after `par` and handed to the subsystem loaders by
+        ! aeros_timestep_init.
+        type(aeros_physics_class)  :: phys
         type(aeros_sht_pool_class) :: pool
         type(aeros_grid_class)     :: grd
         type(aeros_vgrid_class)    :: vgrid
@@ -71,9 +79,11 @@ module aeros
         type(aeros_boundary_t) :: bounds
 
         ! Library-side diagnostic accumulators (docs/coupling_api.md sec. 5,
-        ! 6.2, 6.3). Wave-2 addition: an empty container on a fresh init.
-        ! rce_long drives its own local dacc through the same type today; Wave
-        ! 3 will call the aeros_diag_acc lifecycle from library entry points.
+        ! 6.2, 6.3). Wave 4a: aeros_init allocates and zeroes the always-on
+        ! buffers (aeros_diag_acc_init), so the container is usable after init;
+        ! the monthly climatology bins stay a driver choice
+        ! (aeros_diag_acc_init_monthly). rce_long still drives its own local
+        ! dacc; Wave 4c moves the accumulation itself behind library methods.
         type(aeros_diag_acc_t) :: diag_acc
 
         real(wp) :: time                  ! current model time [yr]
@@ -86,6 +96,7 @@ module aeros
     public :: aeros_update
     public :: aeros_end
     public :: aeros_set_isothermal
+    public :: aeros_set_rce_warm
     public :: aeros_diagnose
     public :: aeros_print_config
 
@@ -121,23 +132,49 @@ contains
 
         call aeros_par_load(ams%par, filename, group, defaults_file=defaults_file)
 
+        ! Master physics flags (&physics; Wave 4a), loaded right after the
+        ! dynamics parameters: aeros_timestep_init hands them to the subsystem
+        ! loaders, which take their on/off state from nowhere else.
+        call aeros_physics_load(ams%phys, filename, defaults_file=defaults_file)
+
         ! One SHTns config per thread; see aeros_sht_pool_class for why aeros
         ! threads the level loop rather than letting SHTns thread a transform.
-        ! cache=.TRUE. because the pool builds nthreads IDENTICAL configs and
-        ! SHTns does not remember its auto-tuning between them -- without the
-        ! cache a 10-thread pool pays the tuning ten times.
-        call aeros_sht_pool_init(ams%pool, ams%par%trunc, &
-                                    nlon=ams%par%nlon, nlat=ams%par%nlat, &
-                                    nthreads=ams%par%nthreads, cache=.TRUE.)
+        ! sht_mode = "cache" (the default) because the pool builds nthreads
+        ! IDENTICAL configs and SHTns does not remember its auto-tuning between
+        ! them -- without the cache a 10-thread pool pays the tuning ten times.
+        ! "quick" skips the tuning altogether (rce_long's choice; the two are
+        ! not bit-identical, see aeros_param_class%sht_mode).
+        select case (trim(ams%par%sht_mode))
+        case ("cache")
+            call aeros_sht_pool_init(ams%pool, ams%par%trunc, &
+                                        nlon=ams%par%nlon, nlat=ams%par%nlat, &
+                                        nthreads=ams%par%nthreads, cache=.TRUE.)
+        case ("quick")
+            call aeros_sht_pool_init(ams%pool, ams%par%trunc, &
+                                        nlon=ams%par%nlon, nlat=ams%par%nlat, &
+                                        nthreads=ams%par%nthreads, quick=.TRUE.)
+        case default
+            write(io_unit_err,*) "aeros_init:: error: sht_mode must be 'cache' or 'quick', got '"// &
+                                    trim(ams%par%sht_mode)//"'"
+            stop 1
+        end select
 
         call aeros_grid_init(ams%grd, ams%pool%sht(1))
+
+        ! Non-rotating planet (l_nonrotating): with no Coriolis there is
+        ! nothing to organise a meridional asymmetry into a jet, so with
+        ! uniform forcing every column runs the same RCE -- the single-column
+        ! validation vehicle on the full physics stack. Zeroed here, between
+        ! the grid and the integrator init, which is where everything that
+        ! reads grd%coriolis is built.
+        if (ams%par%l_nonrotating) ams%grd%coriolis = 0.0_wp
 
         call aeros_vgrid_load(ams%vgrid, ams%par%nlev, filename, defaults_file=defaults_file)
 
         call aeros_state_alloc(ams%now, ams%grd, ams%pool%sht(1)%nlm, ams%par%nlev)
 
         call aeros_timestep_init(ams%ts, ams%par, ams%pool, ams%grd, ams%vgrid, filename, &
-                                    defaults_file=defaults_file)
+                                    defaults_file=defaults_file, phys=ams%phys)
 
         ! Boundary providers (Wave-2 addition). Load the &boundary namelist
         ! group and allocate every 2D provider's buffer on the model grid.
@@ -146,6 +183,17 @@ contains
         ! buffers at zero and the pre-Wave-2 code paths (which don't read
         ! ams%bounds yet) are unaffected.
         call aeros_boundary_load(ams%bounds, filename, ams%grd, defaults_file=defaults_file)
+
+        ! Library-side diagnostic accumulators (Wave 4a): allocate and zero the
+        ! always-on buffers so ams%diag_acc is usable by a driver and by
+        ! aeros_lib_step, as rce_long's local dacc is after its own init call.
+        ! The twelve-month climatology bins are NOT allocated here -- they are
+        ! an output choice (rce_long's monthly_out), so a driver that wants
+        ! them calls aeros_diag_acc_init_monthly(ams%diag_acc, ...) after init
+        ! and nothing else pays for their storage.
+        call aeros_diag_acc_end(ams%diag_acc)
+        call aeros_diag_acc_init(ams%diag_acc, ams%grd%nlon, ams%grd%nlat, ams%par%nlev, &
+                                    mmax_spec=ams%par%trunc, dt=ams%par%dt)
 
         ! Initial condition. A resting isothermal atmosphere over a flat
         ! surface -- the only state the dry core can be started from at M1
@@ -222,6 +270,88 @@ contains
 
     end subroutine aeros_set_isothermal
 
+    subroutine aeros_set_rce_warm(ams, seed_asym, gradient)
+        ! Reset the state to the warm, humid, conditionally unstable cold start
+        ! of the RCE runs (drivers/rce_long.f90's IC block, moved here so the
+        ! library path reproduces it bit for bit; also test_rce/test_moist_run):
+        !
+        !     T(k)   = 300 - 90 (1 - ((k - 1/2)/nlev)^0.6)     [K], resting
+        !     ln p_s = ln(p0)
+        !     T(l=2, m=0) = -5 (spectral units): the initial equator-pole
+        !                   gradient -- skipped when `gradient` is .FALSE.,
+        !                   the uniform-insolation single-column case, where
+        !                   the intended state is horizontally uniform
+        !     T(l=m+2, m=1..6) = seed_asym (1+i) at every level: an optional
+        !                   zonal-asymmetry seed so baroclinic instability can
+        !                   grow eddies. Without it the run is trapped in the
+        !                   axisymmetric manifold -- with zonally symmetric
+        !                   forcing and an m=0-only start the nonlinear terms
+        !                   never populate m>0.
+        !     qv     = 0.9 qsat(T, p) on the grid
+        !
+        ! `seed_asym` defaults to the &aeros key (par%seed_asym); `gradient`
+        ! to .TRUE. Ends with the grid-space fields refreshed (they are what
+        ! the humidity is built from), so the state is complete on return.
+
+        implicit none
+
+        type(aeros_class), intent(inout), target :: ams
+        real(wp), intent(in), optional :: seed_asym
+        logical,  intent(in), optional :: gradient
+
+        type(aeros_sht_class), pointer :: s
+        real(wp) :: tval, seed, qs, dqsdt
+        real(wp), allocatable :: phalf(:), pfull(:), dpc(:)
+        integer  :: i, j, k, m, nlev, lm00
+        logical  :: grad
+
+        s    => ams%pool%sht(1)
+        nlev = ams%vgrid%nlev
+        lm00 = aeros_sht_lm(s, 0, 0)
+
+        seed = ams%par%seed_asym
+        if (present(seed_asym)) seed = seed_asym
+        grad = .TRUE.
+        if (present(gradient)) grad = gradient
+
+        call aeros_spec_zero(ams%now%spec)
+        do k = 1, nlev
+            tval = 300.0_wp - 90.0_wp*(1.0_wp - ((real(k,wp) - 0.5_wp)/real(nlev,wp))**0.6_wp)
+            ams%now%spec%temp(lm00,k) = &
+                    cmplx(real(tval,dp)*sqrt(16.0_dp*atan(1.0_dp)), 0.0_dp, wp_sh)
+        end do
+        ams%now%spec%lnps(lm00) = &
+                cmplx(log(real(p0,dp))*sqrt(16.0_dp*atan(1.0_dp)), 0.0_dp, wp_sh)
+
+        if (grad) ams%now%spec%temp(aeros_sht_lm(s,2,0),:) = cmplx(-5.0_dp, 0.0_dp, wp_sh)
+
+        if (seed > 0.0_wp) then
+            do k = 1, nlev
+                do m = 1, 6
+                    ams%now%spec%temp(aeros_sht_lm(s, m+2, m), k) = &
+                        cmplx(real(seed,dp), real(seed,dp), wp_sh)
+                end do
+            end do
+        end if
+
+        call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
+
+        allocate(phalf(0:nlev), pfull(nlev), dpc(nlev))
+        do j = 1, ams%grd%nlat
+            do i = 1, ams%grd%nlon
+                call aeros_vgrid_pressure(ams%vgrid, ams%now%ps(i,j), phalf, pfull, dpc)
+                do k = 1, nlev
+                    call aeros_qsat(ams%now%temp_g(i,j,k), pfull(k), qs, dqsdt)
+                    ams%now%qv_g(i,j,k) = 0.9_wp*qs
+                end do
+            end do
+        end do
+        deallocate(phalf, pfull, dpc)
+
+        return
+
+    end subroutine aeros_set_rce_warm
+
     subroutine aeros_diagnose(ams)
         ! Refresh the grid-space fields from the spectral state.
         !
@@ -286,6 +416,7 @@ contains
 
         type(aeros_class), intent(inout) :: ams
 
+        call aeros_diag_acc_end(ams%diag_acc)
         call aeros_boundary_end(ams%bounds)
         call aeros_timestep_end(ams%ts)
         call aeros_state_end(ams%now)
@@ -370,7 +501,10 @@ contains
         !   "restart"           -- reserved; call aeros_lib_restart_read after
         !                          init to load a checkpoint. init installs
         !                          "resting" so the shapes are ready.
-        !   "rce_warm"/"coupler"-- reserved for Phase C. Not accepted here.
+        !   "rce_warm"          -- rce_long's warm, humid cold start
+        !                          (aeros_set_rce_warm, seed from &aeros
+        !                          seed_asym). Wave 4a.
+        !   "coupler"           -- reserved for Phase C. Not accepted here.
 
         implicit none
 
@@ -388,17 +522,20 @@ contains
         if (present(ic_source)) ic = ic_source
 
         select case (trim(ic))
-        case ("resting", "restart")
+        case ("resting", "restart", "rce_warm")
             ! "restart" defers the state overwrite to aeros_lib_restart_read;
             ! init still installs the resting shape so allocations exist.
+            ! "rce_warm" is installed below, once the grids and state exist.
         case default
             write(io_unit_err,*) "aeros_lib_init:: unsupported ic_source='", &
-                                    trim(ic), "' (Phase A: 'resting' or 'restart' only)"
+                                    trim(ic), "' (Phase A: 'resting', 'restart' or 'rce_warm')"
             ierr = 1
             return
         end select
 
         call aeros_init(ams, cfg_file, defaults_file=defaults_file)
+
+        if (trim(ic) == "rce_warm") call aeros_set_rce_warm(ams)
 
         return
 
@@ -466,9 +603,15 @@ contains
         ! === Cycle-end exports and accumulator reset =========================
         if (present(exports)) call export_populate(ams, exports)
 
-        ! Zero the library-side accumulators for the next cycle. Wave-2 ships
-        ! diag_acc as an empty container by default; the reset is safe (a
-        ! no-op on un-allocated buffers).
+        ! Zero the library-side accumulators for the next cycle.
+        !
+        ! Wave 4a: ams%diag_acc IS allocated now (aeros_init), so this reset
+        ! is no longer a no-op -- it wipes the buffers every coupling cycle.
+        ! That is the per-cycle export contract, not rce_long's run-long
+        ! second-half accumulation: a driver that needs run-long means must
+        ! NOT accumulate into ams%diag_acc through aeros_lib_step yet. Wave 4c
+        ! replaces this blanket reset with method-based accumulation
+        ! (accumulate / finalize / reset as explicit calls on the container).
         call aeros_diag_acc_reset(ams%diag_acc)
 
         return

@@ -102,6 +102,12 @@ module aeros_boundary
         type(aeros_bc_2d_t) :: so4           ! sulfate load [kg m-2]
         type(aeros_bc_2d_t) :: o3            ! ozone column (2D placeholder; 3D is Phase C)
 
+        ! Surface-geopotential spin-up ramp [days] (rce_long's topo_ramp_days:
+        ! phis is scaled linearly from 0 to full over this many days). Wave 4a
+        ! reads the key only; the ramp consumer moves into the library with
+        ! the phis provider in Wave 4b. 0 = no ramp.
+        real(wp) :: phis_ramp_days = 0.0_wp
+
         ! === Scalar (year-boundary) fields ================================
         type(aeros_bc_scalar_t) :: co2       ! CO2 [ppmv]
         type(aeros_bc_scalar_t) :: ch4       ! CH4 [ppbv] (Phase C reader)
@@ -146,6 +152,8 @@ contains
         call read_2d(bounds%albedo,      "albedo",      filename, defaults_file)
         call read_2d(bounds%z0m,         "z0m",         filename, defaults_file)
         call read_2d(bounds%phis,        "phis",        filename, defaults_file)
+        call nml_read(filename, "boundary", "phis_ramp_days", bounds%phis_ramp_days, &
+                      defaults_file=defaults_file)
         call read_2d(bounds%lsm,         "lsm",         filename, defaults_file)
         call read_2d(bounds%dust,        "dust",        filename, defaults_file)
         call read_2d(bounds%so4,         "so4",         filename, defaults_file)

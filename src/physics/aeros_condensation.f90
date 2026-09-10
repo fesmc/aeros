@@ -178,8 +178,10 @@ contains
 
     end subroutine aeros_condensation_init
 
-    subroutine aeros_condensation_load(cnd, filename, grd, defaults_file)
-        ! Configure from the `aeros_moisture` namelist group.
+    subroutine aeros_condensation_load(cnd, filename, grd, enabled, defaults_file)
+        ! Configure from the `aeros_moisture` namelist group. The on/off flag
+        ! is `enabled` (Wave 4a: the `&physics l_cnd` master flag, passed in by
+        ! aeros_timestep_init), not a key of this group.
 
         implicit none
 
@@ -187,16 +189,14 @@ contains
         character(len=*),       intent(in)    :: filename
         character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class), intent(in)    :: grd
+        logical,                intent(in)    :: enabled
 
-        logical  :: moist
         real(wp) :: rh_crit, rh_crit_ice, reevap, time_scale, lid_q_max
 
-        moist      = .FALSE.
         rh_crit    = 0.95_wp
         reevap     = 30.0_wp
         time_scale = 3.0_wp
         rh_crit_ice = cnd%rh_crit_ice
-        call nml_read(filename, "aeros_moisture", "moist",   moist, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "rh_crit", rh_crit, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "rh_crit_ice", rh_crit_ice, &
                       defaults_file=defaults_file)
@@ -207,7 +207,7 @@ contains
         call nml_read(filename, "aeros_moisture", "cond_time_scale", time_scale, &
                       defaults_file=defaults_file)
 
-        call aeros_condensation_init(cnd, grd, moist)
+        call aeros_condensation_init(cnd, grd, enabled)
 
         if (time_scale < 1.0_wp) then
             write(io_unit_err,*) "aeros_condensation_load:: error: cond_time_scale must be >= 1 "// &

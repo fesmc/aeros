@@ -82,28 +82,30 @@ contains
         return
     end subroutine aeros_bd_init
 
-    subroutine aeros_bd_load(bd, filename, grd, defaults_file)
+    subroutine aeros_bd_load(bd, filename, grd, l_bd, defaults_file)
         ! Read the `bd` namelist group, then init. Mirrors aeros_land_load.
-        ! If `file` is non-empty and `enabled`, also reads the w*(lat,month)
-        ! climatology from that netCDF file.
+        ! `l_bd` is the `&physics l_bd` master flag (Wave 4a), not a key of
+        ! this group; the module runs only when l_bd is on AND `file` is
+        ! non-empty (rce_long's rule: no climatology, nothing to apply), in
+        ! which case the w*(lat,month) climatology is read from that file.
         implicit none
         type(aeros_bd_class),   intent(inout) :: bd
         character(len=*),       intent(in)    :: filename
         type(aeros_grid_class), intent(in)    :: grd
+        logical,                intent(in)    :: l_bd
         character(len=*), intent(in), optional :: defaults_file
 
         logical            :: enabled
         character(len=512) :: file
         real(wp)           :: scale, per_k, t_ref, tau_mean_days
 
-        enabled       = bd%enabled
+        enabled       = l_bd
         file          = ""
         scale         = bd%scale
         per_k         = bd%per_k
         t_ref         = bd%t_ref
         tau_mean_days = bd%tau_mean/86400.0_wp
 
-        call nml_read(filename, "bd", "enabled",       enabled,       defaults_file=defaults_file)
         call nml_read(filename, "bd", "file",          file,          defaults_file=defaults_file)
         call nml_read(filename, "bd", "scale",         scale,         defaults_file=defaults_file)
         call nml_read(filename, "bd", "per_k",         per_k,         defaults_file=defaults_file)

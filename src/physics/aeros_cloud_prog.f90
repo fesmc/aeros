@@ -131,26 +131,25 @@ contains
         return
     end subroutine aeros_cloud_prog_init
 
-    subroutine aeros_cloud_prog_load(cpr, filename, grd, defaults_file)
+    subroutine aeros_cloud_prog_load(cpr, filename, grd, enabled, defaults_file)
         ! Read the scheme configuration from the `aeros_cloud` namelist group,
-        ! mirroring the other physics `_load` routines.
+        ! mirroring the other physics `_load` routines. `enabled` is the
+        ! `&physics l_cloud_prog` master flag (Wave 4a), not a key of this group.
         implicit none
         type(aeros_cloud_prog_class), intent(inout) :: cpr
         character(len=*),             intent(in)    :: filename
         type(aeros_grid_class),       intent(in)    :: grd
+        logical,                      intent(in)    :: enabled
         character(len=*), intent(in), optional      :: defaults_file
 
-        logical  :: enabled
         real(wp) :: rhc_sfc, rhc_top, tau_form, tau_evap, c_detr
 
-        enabled  = .FALSE.
         rhc_sfc  = 0.40_wp
         rhc_top  = 0.60_wp
         tau_form = 10800.0_wp
         tau_evap = 10800.0_wp
         c_detr   = 0.5_wp
 
-        call nml_read(filename, "aeros_cloud", "l_cloud_prog",  enabled,  defaults_file=defaults_file)
         call nml_read(filename, "aeros_cloud", "cloud_rhc_sfc", rhc_sfc,  defaults_file=defaults_file)
         call nml_read(filename, "aeros_cloud", "cloud_rhc_top", rhc_top,  defaults_file=defaults_file)
         call nml_read(filename, "aeros_cloud", "cloud_tau_form", tau_form, defaults_file=defaults_file)

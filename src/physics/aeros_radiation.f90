@@ -340,16 +340,18 @@ contains
         return
     end subroutine aeros_radiation_init
 
-    subroutine aeros_radiation_load(rad, filename, grd, defaults_file)
-        ! Read the `radiation` namelist group, then finish init.
+    subroutine aeros_radiation_load(rad, filename, grd, enabled, defaults_file)
+        ! Read the `radiation` namelist group, then finish init. `enabled` is
+        ! the `&physics l_rad` master flag (Wave 4a), not a key of this group.
 
         implicit none
         type(aeros_rad_class),   intent(inout) :: rad
         character(len=*),        intent(in)    :: filename
         character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class),  intent(in)    :: grd
+        logical,                 intent(in)    :: enabled
 
-        logical  :: enabled, seasonal
+        logical  :: seasonal
         integer  :: scheme
         real(wp) :: co2_ppm, albedo, tsi, interval, doy0, aer_ot, aer_im, so4_const, dust_scale, dust_im
         character(len=512) :: dust_file
@@ -372,7 +374,6 @@ contains
         dust_file  = rad%dust_file
         dust_scale = rad%dust_scale
         dust_im    = rad%dust_im
-        enabled  = rad%enabled
         scheme   = rad%scheme
         co2_ppm  = rad%co2_ppm
         l_o3     = rad%l_o3
@@ -389,7 +390,6 @@ contains
         ecckd_b1_w = 6.27_wp
         ecckd_b2_w = 0.0267_wp
 
-        call nml_read(filename, "radiation", "enabled",  enabled, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "scheme",   scheme, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "co2_ppm",  co2_ppm, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "l_o3",     l_o3, defaults_file=defaults_file)

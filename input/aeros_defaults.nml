@@ -105,6 +105,52 @@
     ndiff    = 6
     tau_diff = 6.0
 
+    ! Semi-implicit decentering weight on X^(n+1): 0.5 centered (neutral on
+    ! gravity waves), 1.0 backward-implicit (SpeedyWeather; damps the fast modes
+    ! in the solve). 0.5 is the pre-Wave-4a library behaviour.
+    si_alpha = 0.5
+    ! Divergence-only diffusion e-folding time [h] (SpeedyWeather-style: the
+    ! divergent/gravity-wave modes damped on their own, shorter timescale).
+    ! <= 0 = use tau_diff, bit-for-bit the single-timescale scheme.
+    tau_diff_div = 0.0
+
+    ! Adaptive hyperdiffusion (src/dynamics/aeros_timestep.f90 header). Both
+    ! parts OFF = the fixed del^ndiff scheme, bit for bit.
+    ! (1) vorticity-scaled strength: multiplier keyed to the level's RMS
+    ! vorticity exceeding diff_zeta_ref [s-1], gain diff_adapt_gain, capped at
+    ! diff_adapt_max.
+    diff_adapt      = .FALSE.
+    diff_zeta_ref   = 1.0e-4
+    diff_adapt_gain = 1.0
+    diff_adapt_max  = 10.0
+    ! (2) sigma-tapered order on the divergence: order ramps from ndiff to
+    ! diff_ndiff_top (even, <= ndiff) above sigma = diff_taper_sigma.
+    diff_taper       = .FALSE.
+    diff_ndiff_top   = 4
+    diff_taper_sigma = 0.15
+
+    ! Upper-level sponge (aeros_timestep "Upper-level sponge"): implicit
+    ! Rayleigh drag (rate sponge_kr [s-1]) and Newtonian cooling (sponge_kt) on
+    ! the layers above sigma = sponge_sigma, squared-ramped to the top. OFF =
+    ! bit for bit.
+    l_sponge     = .FALSE.
+    sponge_kr    = 2.3148e-5      ! 1/(0.5 d)
+    sponge_kt    = 1.1574e-5      ! 1/(1 d)
+    sponge_sigma = 0.12
+
+    ! Non-rotating planet: zero Coriolis parameter (single-column RCE vehicle).
+    l_nonrotating = .FALSE.
+
+    ! Amplitude of the m>0 temperature seed in the "rce_warm" initial condition
+    ! (aeros_set_rce_warm); 0 = axisymmetric start.
+    seed_asym = 0.0
+
+    ! SHTns setup: "cache" auto-tunes once per working directory and saves/loads
+    ! the tuning (the pre-Wave-4a library behaviour); "quick" skips the tuning
+    ! (~20% slower transforms, bit-reproducible across directories; rce_long).
+    ! The two modes differ at round-off in every transform.
+    sht_mode = "cache"
+
     ! Held & Suarez (1994) idealized forcing -- the M1 validation benchmark
     ! (docs/design.md section 7). .FALSE. leaves the bare adiabatic core, which
     ! is what the conservation tests want and what this namelist's default
@@ -206,20 +252,24 @@
 /
 
 &physics
-    ! Master on/off flags for the physics subsystems (Wave 1 of the coupling
-    ! API, docs/coupling_api.md sec. 5, 8). Consumed by aeros_physics_load;
-    ! nothing wires them onto the subsystems yet -- the driver refactor is
-    ! Wave 4. Defaults match today's real-Earth production configuration.
-    l_surf        = .TRUE.
-    l_cnv         = .TRUE.
-    l_cnd         = .TRUE.
-    l_rad         = .TRUE.
-    l_land        = .TRUE.
+    ! Master on/off flags for the physics subsystems (docs/coupling_api.md
+    ! sec. 5, 8). THE source of each subsystem's enabled state on the library
+    ! path (Wave 4a): aeros_init loads them and aeros_timestep_init hands each
+    ! to its subsystem loader -- the per-group `enabled` keys are gone. This
+    ! schema is the bare dynamical core, every switch off, so aeros_run.x and
+    ! held_suarez.x run exactly what they ran before; a case file turns
+    ! physics on. (l_topography has no library consumer yet -- the phis
+    ! provider is Wave 4b; l_moist is unassigned, condensation is l_cnd.)
+    l_surf        = .FALSE.     ! surface fluxes (&surface)
+    l_cnv         = .FALSE.     ! moist convection (&aeros_moisture conv_*)
+    l_cnd         = .FALSE.     ! large-scale condensation (&aeros_moisture)
+    l_rad         = .FALSE.     ! radiation (&radiation)
+    l_land        = .FALSE.     ! land surface (&land)
     l_topography  = .TRUE.
-    l_seaice      = .FALSE.
-    l_cloud_prog  = .FALSE.
-    l_bd          = .FALSE.
-    l_vdiff       = .TRUE.
+    l_seaice      = .FALSE.     ! thermodynamic sea ice (&ocean ice_*; needs mode=1)
+    l_cloud_prog  = .FALSE.     ! prognostic cloud fraction (&aeros_cloud); forces &radiation clouds on
+    l_bd          = .FALSE.     ! lid Brewer-Dobson w* (&bd; also needs a file)
+    l_vdiff       = .FALSE.     ! boundary-layer vertical diffusion (&vdiff)
     l_moist       = .TRUE.
 /
 
@@ -235,9 +285,8 @@
 &aeros_moisture
     ! Large-scale condensation (src/physics/aeros_condensation.f90). The
     ! humidity transport itself is always on -- it costs nothing on a dry field
-    ! -- so this switch is condensation, the moist physics. OFF by default and
-    ! in the Held-Suarez benchmark, which is dry by construction.
-    moist   = .FALSE.
+    ! -- the switch is &physics l_cnd (off in this schema, and in the
+    ! Held-Suarez benchmark, which is dry by construction).
 
     ! Critical relative humidity for condensation. 1.0 is true saturation
     ! adjustment; a lower value stands in for sub-grid humidity variability.
@@ -256,12 +305,11 @@
     ! at min(rh_crit*q_sat, lid_q_max). <= 0 = off.
     lid_q_max       = 1.0e-5
 
-    ! Moist convective adjustment (src/physics/aeros_convection.f90). OFF by
-    ! default and in the dry Held-Suarez benchmark. `conv_scheme` selects the
-    ! scheme: "sbm" (Simplified Betts-Miller, the default) or "manabe" (the
-    ! parameter-free reference). conv_tau is the SBM relaxation time [s] and
-    ! conv_rhref its reference relative humidity.
-    convect     = .FALSE.
+    ! Moist convective adjustment (src/physics/aeros_convection.f90); the
+    ! switch is &physics l_cnv. `conv_scheme` selects the scheme: "sbm"
+    ! (Simplified Betts-Miller, the default) or "manabe" (the parameter-free
+    ! reference). conv_tau is the SBM relaxation time [s] and conv_rhref its
+    ! reference relative humidity.
     conv_scheme = "sbm"
     conv_tau    = 14400.0
     conv_rhref  = 0.7
@@ -283,12 +331,12 @@
 &surface
     ! Prescribed-SST surface energy/moisture budget (src/physics/aeros_surface.f90):
     ! bulk turbulent sensible + latent fluxes into the lowest layer, the source
-    ! that closes the atmosphere's budget once Held-Suarez is removed. OFF by
-    ! default. c_h/c_e are the exchange coefficients; the surface wind the fluxes
-    ! see is sqrt((wind_slowdown*|V_low|)^2 + gust_speed^2) (SpeedyWeather's
-    ! SurfaceCondition); the SST is the APE control profile, sst_eq K above
-    ! freezing at the equator tapering to freezing poleward of sst_lat degrees.
-    enabled = .FALSE.
+    ! that closes the atmosphere's budget once Held-Suarez is removed. The
+    ! switch is &physics l_surf. c_h/c_e are the exchange coefficients; the
+    ! surface wind the fluxes see is sqrt((wind_slowdown*|V_low|)^2 +
+    ! gust_speed^2) (SpeedyWeather's SurfaceCondition); the SST is the APE
+    ! control profile, sst_eq K above freezing at the equator tapering to
+    ! freezing poleward of sst_lat degrees.
     ! <= 0 = SpeedyWeather's bulk-Richardson log-law coefficient diagnosed per
     ! point from the lowest-level height and z0 (one for heat/moisture/momentum,
     ! c_d = 0 = no drag); > 0 pins a fixed coefficient.
@@ -324,13 +372,13 @@
     ! (gradient steepest at 30 deg); 1.0 gives cos^2(phi), a smoother, more
     ! poleward SpeedyWeather-like profile (use with sst_lat = 90).
     sst_shape    = 1.5
-    ! Thermodynamic sea ice (opt-in). l_seaice on REPLACES the freeze floor with a
-    ! Semtner 0-layer ice model (needs a slab, mode=1): the mixed-layer deficit
-    ! forms ice, ice grows/melts from the surface balance, and the surface albedo
-    ! rises to ice_albedo where ice is present (the high-latitude feedback). k_ice
-    ! is the ice conductivity, t_frz the seawater freezing point, ocn_albedo the
-    ! open-water albedo. Off by default -> exact freeze-floor behaviour.
-    l_seaice     = .FALSE.
+    ! Thermodynamic sea ice (opt-in, switch &physics l_seaice). On, it REPLACES
+    ! the freeze floor with a Semtner 0-layer ice model (needs a slab, mode=1):
+    ! the mixed-layer deficit forms ice, ice grows/melts from the surface
+    ! balance, and the surface albedo rises to ice_albedo where ice is present
+    ! (the high-latitude feedback). k_ice is the ice conductivity, t_frz the
+    ! seawater freezing point, ocn_albedo the open-water albedo. Off -> exact
+    ! freeze-floor behaviour.
     ice_albedo   = 0.60
     ocn_albedo   = 0.06
     k_ice        = 2.0
@@ -338,10 +386,9 @@
 /
 
 &land
-    ! Land surface (src/physics/aeros_land.f90). Read by aeros_land_load
-    ! (Wave 1). OFF by default -> all-ocean, bit-for-bit. Defaults match the
-    ! aeros_land_class initializers (src lines 66-113).
-    enabled          = .FALSE.
+    ! Land surface (src/physics/aeros_land.f90). Read by aeros_land_load; the
+    ! switch is &physics l_land (off -> all-ocean, bit-for-bit). Defaults match
+    ! the aeros_land_class initializers (src lines 66-113).
     lsm_file         = ""       ! land-sea mask (var lsm); empty = required when enabled
     albedo_file      = ""       ! forecast albedo (var fal); empty = use land_albedo
     lsm_threshold    = 0.5      ! land where lsm >= threshold
@@ -360,14 +407,14 @@
 
 &radiation
     ! Clear-sky longwave + shortwave (src/physics/aeros_radiation.f90), ported
-    ! SESAM band kernel. OFF by default. scheme=1 is the SESAM kernel; co2_ppm
+    ! SESAM band kernel; the switch is &physics l_rad. scheme=1 is the SESAM kernel; co2_ppm
     ! the CO2 volume mixing ratio; l_o3 the prescribed analytic ozone; albedo
     ! the surface broadband albedo; tsi the solar constant [W/m2]; seasonal
     ! toggles the daily-mean seasonal cycle (else annual-mean); interval the
     ! recompute cadence [s]; doy0 the start day-of-year in seasonal mode.
     ! clouds turns on the diagnostic all-sky path (aeros_cloud + the cloudy
-    ! kernels); OFF => clear-sky, bit-unchanged.
-    enabled  = .FALSE.
+    ! kernels); OFF => clear-sky, bit-unchanged (forced ON by &physics
+    ! l_cloud_prog, whose fraction is only consumed through this path).
     scheme   = 1
     co2_ppm  = 280.0
     l_o3     = .TRUE.
@@ -426,10 +473,10 @@
 
 &aeros_cloud
     ! Prognostic cloud-fraction scheme (Sundqvist 1989),
-    ! src/physics/aeros_cloud_prog.f90. Read by aeros_cloud_prog_load
-    ! (Wave 1). OFF by default and bit-for-bit vs the diagnostic path.
-    ! Defaults match the aeros_cloud_prog_class initializers (src lines 88-106).
-    l_cloud_prog   = .FALSE.
+    ! src/physics/aeros_cloud_prog.f90. Read by aeros_cloud_prog_load; the
+    ! switch is &physics l_cloud_prog (off -> bit-for-bit vs the diagnostic
+    ! path). Defaults match the aeros_cloud_prog_class initializers (src lines
+    ! 88-106).
     cloud_rhc_sfc  = 0.40      ! critical RH at the surface (sigma = 1)
     cloud_rhc_top  = 0.60      ! critical RH at the top (sigma = 0)
     cloud_tau_form = 10800.0   ! formation relaxation timescale [s]
@@ -439,12 +486,12 @@
 
 &vdiff
     ! Boundary-layer vertical diffusion (src/physics/aeros_vdiff.f90): mixes the
-    ! surface source up the column (implicit on the n+1 state). OFF by default.
+    ! surface source up the column (implicit on the n+1 state); the switch is
+    ! &physics l_vdiff.
     ! richardson = .TRUE. uses the Frierson (2006) bulk-Ri diagnosed depth and
     ! K-profile (ri_crit, z0, von_karman, surf_frac apply); .FALSE. is the
     ! legacy fixed-depth scheme (k0 is the eddy diffusivity [m2/s], sigma the
     ! boundary-layer top).
-    enabled    = .FALSE.
     richardson = .TRUE.
     k0         = 25.0
     sigma      = 0.7
@@ -456,12 +503,12 @@
 
 &bd
     ! Prescribed Brewer-Dobson residual circulation in the lid layer
-    ! (src/physics/aeros_bd.f90). OFF by default (empty `file` forces off).
-    ! `file` is the netCDF climatology of w*(lat,month) and its reference
-    ! stability; `scale` a global amplitude factor; `per_k` a fractional change
-    ! of w* per K of running annual global-mean lowest-level T anomaly from
-    ! `t_ref`; `tau_mean_days` the running-mean time scale [days].
-    enabled       = .FALSE.
+    ! (src/physics/aeros_bd.f90). Runs when &physics l_bd is on AND `file` is
+    ! non-empty (an empty file forces off). `file` is the netCDF climatology of
+    ! w*(lat,month) and its reference stability; `scale` a global amplitude
+    ! factor; `per_k` a fractional change of w* per K of running annual
+    ! global-mean lowest-level T anomaly from `t_ref`; `tau_mean_days` the
+    ! running-mean time scale [days].
     file          = ""
     scale         = 1.0
     per_k         = 0.0
@@ -594,6 +641,11 @@
     phis_value      = 0.0
     phis_scale      = 1.0
     phis_floor      = -1.0e30
+    ! Surface-geopotential spin-up ramp [days] (rce_long topo_ramp_days): phis
+    ! scaled linearly from 0 to full over this many days; 0 = none. Read into
+    ! bounds%phis_ramp_days only -- the ramp consumer arrives with the phis
+    ! provider (Wave 4b).
+    phis_ramp_days  = 0.0
 
     ! Land-sea mask (ERA5 lsm, single slice). Path/varname match aeros_land's
     ! lsm_file default in rce_defaults.nml. Kind stays BC_CONSTANT (see the

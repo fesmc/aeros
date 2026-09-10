@@ -177,24 +177,23 @@ contains
         return
     end subroutine aeros_surface_init
 
-    subroutine aeros_surface_load(surf, filename, grd, defaults_file)
-        ! Configure from the `surface` namelist group, then init.
+    subroutine aeros_surface_load(surf, filename, grd, enabled, defaults_file)
+        ! Configure from the `surface` namelist group, then init. `enabled` is
+        ! the `&physics l_surf` master flag (Wave 4a), not a key of this group.
 
         implicit none
         type(aeros_surf_class), intent(inout) :: surf
         character(len=*),       intent(in)    :: filename
         character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class), intent(in)    :: grd
+        logical,                intent(in)    :: enabled
 
-        logical  :: enabled
         real(wp) :: c_h, c_e, gust, slow, c_d, z0o, z0l, ric, rsl, cdm
 
-        enabled = surf%enabled
         c_h = surf%c_h; c_e = surf%c_e; gust = surf%gust_speed; slow = surf%wind_slowdown
         c_d = surf%c_d; z0o = surf%z0_ocean; z0l = surf%z0_land; ric = surf%ri_crit
         rsl = surf%r_s_land; cdm = surf%cd_min
 
-        call nml_read(filename, "surface", "enabled", enabled, defaults_file=defaults_file)
         call nml_read(filename, "surface", "c_h",     c_h, defaults_file=defaults_file)
         call nml_read(filename, "surface", "c_e",     c_e, defaults_file=defaults_file)
         call nml_read(filename, "surface", "gust_speed",    gust, defaults_file=defaults_file)

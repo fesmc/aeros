@@ -178,24 +178,25 @@ contains
         return
     end subroutine aeros_ocean_init
 
-    subroutine aeros_ocean_load(ocn, filename, grd, defaults_file)
-        ! Read the `ocean` namelist group, then init.
+    subroutine aeros_ocean_load(ocn, filename, grd, l_seaice, defaults_file)
+        ! Read the `ocean` namelist group, then init. `l_seaice` is the
+        ! `&physics l_seaice` master flag (Wave 4a), not a key of this group.
 
         implicit none
         type(aeros_ocean_class), intent(inout) :: ocn
         character(len=*),        intent(in)    :: filename
         character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class),  intent(in)    :: grd
+        logical,                 intent(in)    :: l_seaice
 
         integer  :: mode
         real(wp) :: depth, sst_eq, sst_lat, sst_shape
         logical  :: freeze_floor
-        logical  :: l_seaice
         real(wp) :: ice_albedo, ocn_albedo, k_ice, t_frz
 
         mode = ocn%mode; depth = ocn%depth; freeze_floor = ocn%freeze_floor
         sst_eq = ocn%sst_eq; sst_lat = ocn%sst_lat; sst_shape = ocn%sst_shape
-        l_seaice = ocn%l_seaice; ice_albedo = ocn%ice_albedo
+        ice_albedo = ocn%ice_albedo
         ocn_albedo = ocn%ocn_albedo; k_ice = ocn%k_ice; t_frz = ocn%t_frz
 
         call nml_read(filename, "ocean", "mode",         mode, defaults_file=defaults_file)
@@ -204,8 +205,8 @@ contains
         call nml_read(filename, "ocean", "sst_eq",       sst_eq, defaults_file=defaults_file)
         call nml_read(filename, "ocean", "sst_lat",      sst_lat, defaults_file=defaults_file)
         call nml_read(filename, "ocean", "sst_shape",    sst_shape, defaults_file=defaults_file)
-        ! Sea-ice knobs (opt-in). Off by default -> exact freeze-floor behaviour.
-        call nml_read(filename, "ocean", "l_seaice",     l_seaice, defaults_file=defaults_file)
+        ! Sea-ice knobs (opt-in; the switch itself is `l_seaice` above). Off ->
+        ! exact freeze-floor behaviour.
         call nml_read(filename, "ocean", "ice_albedo",   ice_albedo, defaults_file=defaults_file)
         call nml_read(filename, "ocean", "ocn_albedo",   ocn_albedo, defaults_file=defaults_file)
         call nml_read(filename, "ocean", "k_ice",        k_ice, defaults_file=defaults_file)

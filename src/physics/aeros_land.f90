@@ -230,23 +230,25 @@ contains
         return
     end subroutine aeros_land_init
 
-    subroutine aeros_land_load(land, filename, grd, defaults_file)
+    subroutine aeros_land_load(land, filename, grd, enabled, defaults_file)
         ! Read the `land` namelist group, then init. Mirrors aeros_ocean_load.
+        ! `enabled` is the `&physics l_land` master flag (Wave 4a), not a key
+        ! of this group.
 
         implicit none
         type(aeros_land_class), intent(inout) :: land
         character(len=*),       intent(in)    :: filename
         character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class), intent(in)    :: grd
+        logical,                intent(in)    :: enabled
 
-        logical            :: enabled, freeze_floor
+        logical            :: freeze_floor
         character(len=512) :: lsm_file, albedo_file
         real(wp)           :: lsm_threshold, w_field_capacity, w_crit, c_soil
         real(wp)           :: land_albedo, c_h_land, c_e_land
         real(wp)           :: snow_albedo, snow_dt, beta_frozen
         logical            :: albedo_seasonal
 
-        enabled          = land%enabled
         albedo_seasonal  = land%albedo_seasonal
         lsm_file         = land%lsm_file
         albedo_file      = land%albedo_file
@@ -262,7 +264,6 @@ contains
         snow_dt          = land%snow_dt
         beta_frozen      = land%beta_frozen
 
-        call nml_read(filename, "land", "enabled",          enabled, defaults_file=defaults_file)
         call nml_read(filename, "land", "lsm_file",         lsm_file, defaults_file=defaults_file)
         call nml_read(filename, "land", "albedo_file",      albedo_file, defaults_file=defaults_file)
         call nml_read(filename, "land", "lsm_threshold",    lsm_threshold, defaults_file=defaults_file)

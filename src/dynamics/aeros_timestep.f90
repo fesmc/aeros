@@ -265,9 +265,17 @@ module aeros_timestep
                                 aeros_correction_load, aeros_correction_end, &
                                 aeros_correction_apply, aeros_correction_report
     use aeros_transport, only : aeros_transport_class, aeros_transport_init, &
+                                aeros_transport_load, &
                                 aeros_transport_end, aeros_transport_transport, &
                                 aeros_transport_report
-    use aeros_bd,           only : aeros_bd_class, aeros_bd_apply, aeros_bd_init, aeros_bd_end
+    use aeros_bd,           only : aeros_bd_class, aeros_bd_apply, aeros_bd_init, &
+                                aeros_bd_load, aeros_bd_end
+    ! Master physics flags (&physics): the one source of the subsystem on/off
+    ! state on the namelist path (Wave 4a).
+    use aeros_physics,      only : aeros_physics_class
+    ! Diagnostic cloud scheme config record (the scheme itself is module-scope
+    ! state; the record is what the namelist loader fills).
+    use aeros_cloud,        only : aeros_cloud_config_t, aeros_cloud_load
     use aeros_condensation, only : aeros_cond_class, aeros_condensation_init, &
                                 aeros_condensation_load, aeros_condensation_end, &
                                 aeros_condensation_apply, aeros_condensation_report
@@ -295,6 +303,7 @@ module aeros_timestep
     use aeros_land,       only : aeros_land_class, aeros_land_init, &
                                 aeros_land_load, aeros_land_end, &
                                 aeros_land_pre, aeros_land_step, &
+                                aeros_land_set_albedo, &
                                 aeros_land_couple_radiation, aeros_land_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
@@ -401,6 +410,13 @@ module aeros_timestep
         ! Uses the surface module's prescribed SST as the skin temperature. Off
         ! unless a namelist turns it on.
         type(aeros_rad_class) :: rad
+
+        ! Diagnostic RH->cover cloud scheme configuration (aeros_cloud). The
+        ! scheme consumes module-scope constants; this record is the namelist
+        ! image of them, filled by aeros_cloud_load on the filename path and
+        ! pushed into the module via aeros_cloud_configure. Only read when
+        ! radiation runs its all-sky path.
+        type(aeros_cloud_config_t) :: cld
 
         ! Prognostic cloud fraction (aeros_cloud_prog): the opt-in Sundqvist
         ! source/sink budget for now%cf_g, applied at the grid seam AFTER
@@ -534,15 +550,24 @@ module aeros_timestep
 
 contains
 
-    subroutine aeros_timestep_init(ts, par, pool, grd, vg, filename, defaults_file)
+    subroutine aeros_timestep_init(ts, par, pool, grd, vg, filename, defaults_file, phys)
         ! Allocate the time levels and the scratch, and build the solve.
         !
-        ! `filename` is optional and only the correction layer needs it: its
-        ! configuration is a namelist group of its own rather than a handful of
-        ! scalars in aeros_param_class, because a term carries per-field and
-        ! per-scale selectors and there may be several. Omitting it leaves the
-        ! correction empty and disabled, which is what the acceptance tests
-        ! want -- they measure the bare integrator.
+        ! `filename` is optional. Without it every physics module is
+        ! initialised OFF and the correction is empty, which is what the
+        ! acceptance tests want -- they measure the bare integrator and set
+        ! what they need on `ts` afterwards. With it (the library path,
+        ! aeros_init) every subsystem is configured from its own namelist
+        ! group, and `phys` -- the `&physics` master flags, loaded by the
+        ! caller -- is REQUIRED: it is the single source of each subsystem's
+        ! on/off state (Wave 4a), passed into the `_load` routines rather than
+        ! read by them.
+        !
+        ! The integrator's own optional pieces (sponge, adaptive/tapered
+        ! diffusion, divergence timescale) come from `par` on both paths and
+        ! are applied BEFORE the per-level tables are built, so a driver that
+        ! sets them in `&aeros` gets the same `ts` as one that calls the
+        ! aeros_timestep_set_* routines after init.
 
         implicit none
 
@@ -553,6 +578,7 @@ contains
         type(aeros_vgrid_class),    intent(in)    :: vg
         character(len=*), intent(in), optional    :: filename
         character(len=*), intent(in), optional    :: defaults_file
+        type(aeros_physics_class), intent(in), optional :: phys
 
         integer  :: nlm, lmax, l, k
         integer :: ischeme, ivariant
@@ -627,6 +653,27 @@ contains
         ts%mass_fixer    = par%mass_fixer
         ts%nstep         = 0
 
+        ! Wave 4a: the integrator options that used to be set by the driver
+        ! through aeros_timestep_set_sponge / _set_diff_taper and direct field
+        ! writes after init. Applied here, before build_diff_ratio /
+        ! build_sponge_ramp below, so the tables are built from the namelist
+        ! values. The type defaults of aeros_param_class equal the type
+        ! defaults of this class, so a caller that never sets them is
+        ! unchanged bit for bit.
+        ts%tau_diff_div     = par%tau_diff_div*3600.0_wp   ! namelist is in hours
+        ts%sponge_on        = par%l_sponge
+        ts%sponge_kr        = par%sponge_kr
+        ts%sponge_kt        = par%sponge_kt
+        ts%sponge_sigma     = par%sponge_sigma
+        ts%diff_adapt       = par%diff_adapt
+        ts%diff_zeta_ref    = par%diff_zeta_ref
+        ts%diff_adapt_gain  = par%diff_adapt_gain
+        ts%diff_adapt_max   = par%diff_adapt_max
+        ts%diff_taper       = par%diff_taper
+        ts%diff_ndiff_top   = par%diff_ndiff_top
+        ts%diff_taper_sigma = par%diff_taper_sigma
+        if (ts%diff_taper) call check_diff_taper(ts, "aeros_timestep_init")
+
         ts%mass_target = -1.0_dp
         ts%lnr_last    = 0.0_dp
         ts%lnr_cum     = 0.0_dp
@@ -652,18 +699,47 @@ contains
             call aeros_correction_init(ts%cor, pool%sht(1), vg%nlev)
         end if
 
-        call aeros_transport_init(ts%mst, grd, vg%nlev)
-
         if (present(filename)) then
-            call aeros_condensation_load(ts%cnd, filename, grd, defaults_file=defaults_file)
-            call aeros_convection_load(ts%cnv, filename, grd, defaults_file=defaults_file)
-            call aeros_surface_load(ts%surf, filename, grd, defaults_file=defaults_file)
-            call aeros_ocean_load(ts%ocn, filename, grd, defaults_file=defaults_file)
-            call aeros_radiation_load(ts%rad, filename, grd, defaults_file=defaults_file)
-            call aeros_cloud_prog_load(ts%cpr, filename, grd, defaults_file=defaults_file)
-            call aeros_vdiff_load(ts%vd, filename, grd, defaults_file=defaults_file)
-            call aeros_land_load(ts%land, filename, grd, defaults_file=defaults_file)   ! feat/land
+            if (.not. present(phys)) then
+                write(io_unit_err,*) "aeros_timestep_init:: error: a namelist file was given "// &
+                                        "without the &physics flags (phys); load them with "// &
+                                        "aeros_physics_load first (aeros_init does)."
+                error stop 1
+            end if
+
+            ! Every subsystem from its own group, in rce_long's order (transport,
+            ! condensation, BD, convection, surface, radiation + diagnostic
+            ! clouds, prognostic clouds, vdiff, ocean, land). The on/off flag of
+            ! each comes from `phys`. Ordering that matters: radiation before
+            ! land (land composes rad%alb_map from rad%albedo), ocean before
+            ! land (rce_long sets the ocean albedo before coupling land).
+            call aeros_transport_load(ts%mst, filename, grd, vg%nlev, defaults_file=defaults_file)
+            call aeros_condensation_load(ts%cnd, filename, grd, phys%l_cnd, defaults_file=defaults_file)
+            call aeros_bd_load(ts%bd, filename, grd, phys%l_bd, defaults_file=defaults_file)
+            call aeros_convection_load(ts%cnv, filename, grd, phys%l_cnv, defaults_file=defaults_file)
+            call aeros_surface_load(ts%surf, filename, grd, phys%l_surf, defaults_file=defaults_file)
+            call aeros_radiation_load(ts%rad, filename, grd, phys%l_rad, defaults_file=defaults_file)
+            call aeros_cloud_load(ts%cld, filename, defaults_file=defaults_file)
+            call aeros_cloud_prog_load(ts%cpr, filename, grd, phys%l_cloud_prog, defaults_file=defaults_file)
+            ! Consistency requirement, not a hidden tie: a prognostic cloud
+            ! fraction is only consumed through radiation's all-sky path, so
+            ! l_cloud_prog forces it on regardless of &radiation clouds (as
+            ! rce_long does). The one place this override lives.
+            if (ts%cpr%enabled) ts%rad%clouds = .TRUE.
+            call aeros_vdiff_load(ts%vd, filename, grd, phys%l_vdiff, defaults_file=defaults_file)
+            call aeros_ocean_load(ts%ocn, filename, grd, phys%l_seaice, defaults_file=defaults_file)
+            call aeros_land_load(ts%land, filename, grd, phys%l_land, defaults_file=defaults_file)   ! feat/land
+            ! Land albedo composition (rce_long init, land block): seed the
+            ! seasonal bare albedo at the start day and build the per-point
+            ! surface albedo map radiation reads -- ocean scalar over sea,
+            ! land albedo on land. Both no-ops when land is off (rad keeps its
+            ! scalar albedo; the all-ocean run is bit for bit).
+            if (ts%land%enabled) then
+                call aeros_land_set_albedo(ts%land, ts%rad%doy0)
+                call aeros_land_couple_radiation(ts%land, ts%rad%alb_map, ts%rad%albedo)
+            end if
         else
+            call aeros_transport_init(ts%mst, grd, vg%nlev)
             call aeros_condensation_init(ts%cnd, grd, .FALSE.)
             call aeros_bd_init(ts%bd, grd, .FALSE.)
             call aeros_convection_init(ts%cnv, grd, .FALSE.)
@@ -682,10 +758,11 @@ contains
         end do
 
         ! Per-level ratios for the sigma-tapered order (module header). Built
-        ! from ts%ndiff / diff_taper / diff_ndiff_top / diff_taper_sigma, which
-        ! carry their type defaults here (taper OFF); a driver that wants the
-        ! taper sets those and calls aeros_timestep_set_diff_taper to rebuild.
-        ! With taper off every level uses ndiff, so dratio_lev(:,k) == dratio(:).
+        ! from ts%ndiff / diff_taper / diff_ndiff_top / diff_taper_sigma as
+        ! set from `par` above (type defaults: taper OFF); a driver can still
+        ! change them after init through aeros_timestep_set_diff_taper, which
+        ! rebuilds. With taper off every level uses ndiff, so
+        ! dratio_lev(:,k) == dratio(:).
         allocate(ts%dratio_lev(0:lmax, vg%nlev), ts%ndiff_lev(vg%nlev))
         call build_diff_ratio(ts, vg)
 
@@ -823,18 +900,34 @@ contains
         if (present(ndiff_top))   ts%diff_ndiff_top   = ndiff_top
         if (present(taper_sigma)) ts%diff_taper_sigma = taper_sigma
 
-        if (ts%diff_ndiff_top < 2 .or. mod(ts%diff_ndiff_top,2) /= 0 &
-            .or. ts%diff_ndiff_top > ts%ndiff) then
-            write(io_unit_err,*) "aeros_timestep_set_diff_taper:: error: diff_ndiff_top "// &
-                "must be a positive even order <= ndiff, got ", ts%diff_ndiff_top
-            error stop 1
-        end if
+        call check_diff_taper(ts, "aeros_timestep_set_diff_taper")
 
         call build_diff_ratio(ts, vg)
 
         return
 
     end subroutine aeros_timestep_set_diff_taper
+
+    subroutine check_diff_taper(ts, who)
+        ! The tapered order at the model top must be a positive even order no
+        ! higher than ndiff (build_diff_ratio steps in even orders). Shared by
+        ! init (namelist path) and the setter.
+
+        implicit none
+
+        type(aeros_timestep_class), intent(in) :: ts
+        character(len=*),           intent(in) :: who
+
+        if (ts%diff_ndiff_top < 2 .or. mod(ts%diff_ndiff_top,2) /= 0 &
+            .or. ts%diff_ndiff_top > ts%ndiff) then
+            write(io_unit_err,*) who//":: error: diff_ndiff_top "// &
+                "must be a positive even order <= ndiff, got ", ts%diff_ndiff_top
+            error stop 1
+        end if
+
+        return
+
+    end subroutine check_diff_taper
 
     subroutine aeros_timestep_end(ts)
 

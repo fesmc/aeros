@@ -219,9 +219,10 @@ contains
 
     end subroutine aeros_convection_init
 
-    subroutine aeros_convection_load(cnv, filename, grd, defaults_file)
-        ! Configure from the `aeros_moisture` namelist group. `convect` turns it
-        ! on; `conv_scheme` selects ("sbm" or "manabe"); `conv_tau` and
+    subroutine aeros_convection_load(cnv, filename, grd, enabled, defaults_file)
+        ! Configure from the `aeros_moisture` namelist group. `enabled` turns it
+        ! on (Wave 4a: the `&physics l_cnv` master flag, passed in by
+        ! aeros_timestep_init -- not a key of this group); `conv_scheme` selects ("sbm" or "manabe"); `conv_tau` and
         ! `conv_rhref` are the Simplified Betts-Miller knobs. An unknown scheme
         ! name is an error, not a silent fallback, so a typo does not quietly
         ! run a scheme the user did not ask for.
@@ -232,14 +233,14 @@ contains
         character(len=*),       intent(in)    :: filename
         character(len=*), intent(in), optional :: defaults_file
         type(aeros_grid_class), intent(in)    :: grd
+        logical,                intent(in)    :: enabled
 
-        logical            :: convect, dry_adjust
+        logical            :: dry_adjust
         character(len=32)  :: conv_scheme
         real(wp)           :: conv_tau, conv_rhref, conv_rh_ref_bl
         real(wp)           :: conv_rh_hscale, conv_rh_zpbl, conv_rh_ztop
         real(wp)           :: conv_shallow_sig
 
-        convect        = .FALSE.
         conv_scheme    = "sbm_frierson"
         conv_tau       = 14400.0_wp
         conv_rhref     = 0.7_wp
@@ -249,7 +250,6 @@ contains
         conv_rh_ztop   = cnv%rh_z_top
         conv_shallow_sig = cnv%shallow_sig
         dry_adjust     = cnv%dry_adjust
-        call nml_read(filename, "aeros_moisture", "convect",     convect, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "conv_scheme", conv_scheme, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "conv_tau",    conv_tau, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "conv_rhref",  conv_rhref, defaults_file=defaults_file)
@@ -260,7 +260,7 @@ contains
         call nml_read(filename, "aeros_moisture", "conv_shallow_sig", conv_shallow_sig, defaults_file=defaults_file)
         call nml_read(filename, "aeros_moisture", "conv_dry_adjust",  dry_adjust,       defaults_file=defaults_file)
 
-        call aeros_convection_init(cnv, grd, convect)
+        call aeros_convection_init(cnv, grd, enabled)
 
         select case (trim(conv_scheme))
         case ("sbm")

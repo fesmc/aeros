@@ -153,6 +153,39 @@ module aeros_defs
         ! the fast gravity/computational modes in the solve). Defaulted so drivers
         ! and tests that never set it get the bit-for-bit centered scheme.
         real(wp) :: si_alpha = 0.5_wp
+        ! Divergence-only diffusion e-folding time [h] (Wave 4a key tau_diff_div;
+        ! aeros_timestep stores seconds). <= 0 = use tau_diff, bit-for-bit the
+        ! single-timescale scheme. SpeedyWeather runs tau_diff 4 h, tau_diff_div 1 h.
+        real(wp) :: tau_diff_div = 0.0_wp
+        ! Upper-level sponge (aeros_timestep "Upper-level sponge"; Wave 4a keys).
+        ! Defaults are the integrator's type defaults: off, 0.5 d / 1 d rates,
+        ! ramp top at sigma 0.12.
+        logical  :: l_sponge     = .FALSE.
+        real(wp) :: sponge_kr    = 1.0_wp/43200.0_wp   ! max Rayleigh rate [s-1]
+        real(wp) :: sponge_kt    = 1.0_wp/86400.0_wp   ! max Newtonian rate [s-1]
+        real(wp) :: sponge_sigma = 0.12_wp             ! sponge top of ramp [sigma]
+        ! Adaptive hyperdiffusion (aeros_timestep module header; Wave 4a keys).
+        ! Both parts default OFF = the fixed del^ndiff scheme, bit for bit.
+        logical  :: diff_adapt       = .FALSE.     ! vorticity-scaled strength
+        real(wp) :: diff_zeta_ref    = 1.0e-4_wp   ! reference RMS |zeta| [s-1]
+        real(wp) :: diff_adapt_gain  = 1.0_wp      ! excess-vorticity gain [-]
+        real(wp) :: diff_adapt_max   = 10.0_wp     ! cap on the multiplier [-]
+        logical  :: diff_taper       = .FALSE.     ! sigma-tapered order (divergence)
+        integer  :: diff_ndiff_top   = 4           ! order at the model top
+        real(wp) :: diff_taper_sigma = 0.15_wp     ! ramp threshold [sigma]
+        ! Non-rotating planet: aeros_init zeroes grd%coriolis between the grid
+        ! and the integrator init (the single-column RCE validation vehicle).
+        logical  :: l_nonrotating = .FALSE.
+        ! Amplitude of the m>0 temperature seed in the "rce_warm" initial
+        ! condition (aeros_set_rce_warm); 0 = axisymmetric start.
+        real(wp) :: seed_asym = 0.0_wp
+        ! SHTns setup mode (aeros_sht_init): "cache" auto-tunes the transform
+        ! once per working directory and saves/loads the tuning; "quick" skips
+        ! the tuning (~20% slower transforms). The two are NOT bit-identical
+        ! (round-off-level differences in analysis/synthesis), and "cache" can
+        ! itself pick a different algorithm on a reload than on a fresh tune, so
+        ! "quick" is the reproducible choice and what rce_long uses.
+        character(len=8) :: sht_mode = "cache"
         ! -- Time scheme (src/dynamics/aeros_timestep.f90, "The Lorenz N-cycle").
         ! "leapfrog": the RAW-filtered semi-implicit leapfrog (three time levels,
         ! eps_filter/raw_alpha apply). "ncycle": the two-time-level semi-implicit
@@ -358,6 +391,28 @@ contains
         call nml_read(filename, nml_group, "held_suarez",   par%held_suarez, defaults_file=defaults_file)
         call nml_read(filename, nml_group, "mass_fixer",    par%mass_fixer, defaults_file=defaults_file)
 
+        ! Wave 4a keys: the semi-implicit weight, the divergence diffusion
+        ! timescale, the sponge, the adaptive diffusion, the non-rotating switch,
+        ! the rce_warm seed and the SHTns mode. Every one defaults (here and in
+        ! input/aeros_defaults.nml) to the integrator's type default, so a
+        ! namelist that omits them gets the pre-Wave-4a model bit for bit.
+        call nml_read(filename, nml_group, "si_alpha",         par%si_alpha, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "tau_diff_div",     par%tau_diff_div, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "l_sponge",         par%l_sponge, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "sponge_kr",        par%sponge_kr, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "sponge_kt",        par%sponge_kt, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "sponge_sigma",     par%sponge_sigma, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "diff_adapt",       par%diff_adapt, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "diff_zeta_ref",    par%diff_zeta_ref, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "diff_adapt_gain",  par%diff_adapt_gain, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "diff_adapt_max",   par%diff_adapt_max, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "diff_taper",       par%diff_taper, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "diff_ndiff_top",   par%diff_ndiff_top, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "diff_taper_sigma", par%diff_taper_sigma, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "l_nonrotating",    par%l_nonrotating, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "seed_asym",        par%seed_asym, defaults_file=defaults_file)
+        call nml_read(filename, nml_group, "sht_mode",         par%sht_mode, defaults_file=defaults_file)
+
         if (par%trunc < 1) then
             write(io_unit_err,*) "aeros_par_load:: error: trunc must be >= 1, got ", par%trunc
             stop 1
@@ -365,6 +420,12 @@ contains
 
         if (par%nlev < 1) then
             write(io_unit_err,*) "aeros_par_load:: error: nlev must be >= 1, got ", par%nlev
+            stop 1
+        end if
+
+        if (trim(par%sht_mode) /= "cache" .and. trim(par%sht_mode) /= "quick") then
+            write(io_unit_err,*) "aeros_par_load:: error: sht_mode must be 'cache' or 'quick', got '"// &
+                                    trim(par%sht_mode)//"'"
             stop 1
         end if
 
