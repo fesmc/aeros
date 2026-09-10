@@ -16,7 +16,9 @@ program test_topography
     !
     ! The topography feed's third property -- that l_topography = .false. gives
     ! EXACTLY zero surface geopotential (bit-for-bit aquaplanet) -- is pinned on
-    ! aeros_topography_scale, together with the restart-safe time ramp.
+    ! aeros_topography_scale, together with the restart-safe time ramp. (The
+    ! field itself comes from the phis boundary provider, aeros_boundary, and
+    ! is band-limited by aeros_topography_bandlimit on the library path.)
     !
     ! Exits non-zero on failure.
 

@@ -8,20 +8,19 @@ module aeros_topography
     ! Earth's, lifting the pressure surfaces over the continents and mountains
     ! and letting the flow feel them.
     !
-    ! This module is a thin, named front door: given a file it returns phis on
-    ! the model grid. It leans entirely on aeros_bcinput for the netCDF read and
-    ! the regridding -- the topography-specific knowledge here is only that the
-    ! ERA5 surface-geopotential variable IS phis directly (units m2 s-2, already
-    ! a geopotential -- NOT an elevation, so there is no multiply by g), stored
-    ! under the short name "z" in the ERA5 single-level convention.
+    ! The field itself comes from the phis boundary provider (aeros_boundary:
+    ! ERA5 surface geopotential `z`, already m2 s-2 -- NOT an elevation, so no
+    ! multiply by g -- or a coupler push). This module holds the two things
+    ! every source of orography is put through before the dynamics sees it:
     !
-    ! A separate module (rather than an inline read in the driver) so that every
-    ! driver that wants orography -- rce_long today, the coupled model later --
-    ! shares one definition of "load the Earth's topography", and so the ERA5
-    ! variable-name convention lives in exactly one place.
+    !   aeros_topography_bandlimit -- the spectral truncation to the model
+    !                                 resolution (applied by the library
+    !                                 whenever the provider buffer changes);
+    !   aeros_topography_scale     -- the restart-safe spin-up ramp (applied
+    !                                 by a driver that wants one).
 
-    use aeros_defs,    only : wp
-    use aeros_bcinput, only : aeros_bcinput_read_field
+    use aeros_defs,     only : dp, wp, wp_sh
+    use aeros_spectral, only : aeros_sht_class, aeros_sht_analysis, aeros_sht_synthesis
 
     implicit none
 
@@ -29,8 +28,8 @@ module aeros_topography
 
     real(wp), parameter :: SECONDS_PER_DAY = 86400.0_wp
 
-    public :: aeros_topography_load
     public :: aeros_topography_scale
+    public :: aeros_topography_bandlimit
 
 contains
 
@@ -76,29 +75,35 @@ contains
 
     end function aeros_topography_scale
 
-    subroutine aeros_topography_load(filename, tgt_lon, tgt_lat, phis, varname)
-        ! Return phis(size(tgt_lon), size(tgt_lat)) [m2 s-2] read from `filename`
-        ! and interpolated onto the model grid (tgt_lon [deg east], tgt_lat [deg
-        ! north]). `varname` defaults to "z" (ERA5 surface geopotential); the
-        ! value is used as phis with no unit conversion.
+    subroutine aeros_topography_bandlimit(sht, phis)
+        ! Spectrally truncate phis (in place, on the model grid) to the model
+        ! resolution. A spectral core can only carry the surface geopotential
+        ! at its resolved scales: the raw interpolated field still has grid-
+        ! scale structure at coastlines and mountain flanks, which aliases in
+        ! the transforms and rings (Gibbs), destabilizing the lowest layer.
+        ! One analysis -> synthesis round-trip (SHTns truncates at the model
+        ! truncation) gives the smooth orography the dynamics is consistent
+        ! with. Standard spectral-model practice. Applied to every source of
+        ! orography -- file or coupler -- alike.
 
         implicit none
 
-        character(len=*), intent(in)  :: filename
-        real(wp),         intent(in)  :: tgt_lon(:), tgt_lat(:)
-        real(wp),         intent(out) :: phis(:,:)
-        character(len=*), intent(in), optional :: varname
+        type(aeros_sht_class), intent(in)    :: sht
+        real(wp),              intent(inout) :: phis(:,:)
 
-        character(len=64) :: vnm
+        complex(wp_sh), allocatable :: phis_lm(:)
+        real(dp),       allocatable :: gwork(:,:)
 
-        vnm = "z"
-        if (present(varname)) vnm = varname
-
-        call aeros_bcinput_read_field(trim(filename), trim(vnm), &
-                                      tgt_lon, tgt_lat, phis)
+        allocate(phis_lm(sht%nlm))
+        allocate(gwork(size(phis,1), size(phis,2)))
+        gwork = real(phis, dp)
+        call aeros_sht_analysis(sht, gwork, phis_lm)    ! grid -> spectral (overwrites gwork)
+        call aeros_sht_synthesis(sht, phis_lm, gwork)   ! spectral -> band-limited grid
+        phis = real(gwork, wp)
+        deallocate(phis_lm, gwork)
 
         return
 
-    end subroutine aeros_topography_load
+    end subroutine aeros_topography_bandlimit
 
 end module aeros_topography

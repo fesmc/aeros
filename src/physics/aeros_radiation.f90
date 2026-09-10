@@ -88,7 +88,6 @@ module aeros_radiation
                                aeros_sw_aerosol_itf, aeros_sw_so4_albedo, aeros_sw_aerosol_mix, &
                                aeros_sw_so4_cloud_factor, &
                                SW_AER_OT, SW_AER_IM
-    use aeros_bcinput,  only : aeros_bcinput_read_field
     use nml,            only : nml_read
 
     implicit none
@@ -223,24 +222,16 @@ module aeros_radiation
         ! uniform, constant optical thickness and imaginary index. 0 = off.
         real(wp) :: aer_ot   = 0.0_wp
         real(wp) :: aer_im   = 0.01_wp
-        ! Sulfate load for the direct effect (aeros_sw_so4_albedo): a constant
-        ! [kg m-2] or a (lon,lat) map from `so4_file` (CLIMBER-X's CMIP6
-        ! so4_*.nc, annual, time = year - 2000) at calendar year `so4_year`.
-        ! "" and 0 = off (paleo).
-        character(len=512) :: so4_file = ""
-        integer  :: so4_year  = 2000
-        real(wp) :: so4_const = 0.0_wp
+        ! Sulfate load [kg m-2] for the direct effect (aeros_sw_so4_albedo)
+        ! and dust optical thickness added to the background aerosol per
+        ! column: both are boundary fields (the so4 / dust providers of
+        ! aeros_boundary -- CLIMBER-X's CMIP6 so4_*.nc at a calendar year,
+        ! the monthly dust maps of scripts/dust_ot_from_deposition.py --
+        ! written into the working maps below by aeros_boundary_apply).
+        ! Unallocated = no provider: so4 = 0, no dust (paleo / dry core).
         logical  :: so4_indirect = .TRUE.    ! sulfate indirect effect on the liquid cloud water (CLIMBER-X l_so4_ie)
         real(wp), allocatable :: so4_map(:,:)
-        ! Dust optical thickness, added to the background aerosol per column:
-        ! monthly (lon,lat,12) maps from `dust_file` (scripts/dust_ot_from_
-        ! deposition.py on CLIMBER-X's fake_dust_* deposition), scaled by
-        ! `dust_scale`; interpolated to the day in seasonal mode, else the
-        ! annual mean. "" = none.
-        character(len=512) :: dust_file  = ""
-        real(wp) :: dust_scale = 1.0_wp
         real(wp) :: dust_im    = 0.01_wp     ! dust imaginary index (CLIMBER-X ars_im)
-        real(wp), allocatable :: dust_clim(:,:,:)
         real(wp), allocatable :: dust_ot(:,:)
         logical  :: seasonal = .FALSE.       ! .FALSE. = annual-mean insolation
         real(wp) :: doy0     = 0.0_wp        ! start day-of-year (seasonal mode)
@@ -285,9 +276,6 @@ module aeros_radiation
     public :: aeros_radiation_init
     public :: aeros_radiation_load
     public :: aeros_radiation_end
-    public :: aeros_radiation_so4_load
-    public :: aeros_radiation_dust_load
-    public :: aeros_radiation_set_dust
     public :: aeros_radiation_apply
     public :: aeros_radiation_report
     public :: aeros_lw_clearsky_column
@@ -353,12 +341,9 @@ contains
 
         logical  :: seasonal
         integer  :: scheme
-        real(wp) :: co2_ppm, albedo, tsi, interval, doy0, aer_ot, aer_im, so4_const, dust_scale, dust_im
-        character(len=512) :: dust_file
+        real(wp) :: co2_ppm, albedo, tsi, interval, doy0, aer_ot, aer_im, dust_im
         real(dp) :: time_bp
         logical  :: l_o3, clouds, so4_indirect
-        integer  :: so4_year
-        character(len=512) :: so4_file
         ! ecCKD near-IR H2O band knobs (module state in aeros_ecckd, folded in here
         ! so aeros_radiation_load owns the full radiation module-scope config).
         ! Defaults match the compile-time defaults; overriding them is a
@@ -367,12 +352,7 @@ contains
 
         aer_ot    = rad%aer_ot
         aer_im    = rad%aer_im
-        so4_file  = rad%so4_file
-        so4_year  = rad%so4_year
-        so4_const = rad%so4_const
         so4_indirect = rad%so4_indirect
-        dust_file  = rad%dust_file
-        dust_scale = rad%dust_scale
         dust_im    = rad%dust_im
         scheme   = rad%scheme
         co2_ppm  = rad%co2_ppm
@@ -397,12 +377,7 @@ contains
         call nml_read(filename, "radiation", "albedo",   albedo, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "aer_ot",   aer_ot, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "aer_im",   aer_im, defaults_file=defaults_file)
-        call nml_read(filename, "radiation", "so4_file", so4_file, defaults_file=defaults_file)
-        call nml_read(filename, "radiation", "so4_year", so4_year, defaults_file=defaults_file)
-        call nml_read(filename, "radiation", "so4_const", so4_const, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "so4_indirect", so4_indirect, defaults_file=defaults_file)
-        call nml_read(filename, "radiation", "dust_file", dust_file, defaults_file=defaults_file)
-        call nml_read(filename, "radiation", "dust_scale", dust_scale, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "dust_im",   dust_im, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "tsi",      tsi, defaults_file=defaults_file)
         call nml_read(filename, "radiation", "seasonal", seasonal, defaults_file=defaults_file)
@@ -426,12 +401,7 @@ contains
         ! calibration drivers (validate_era5, rce_long).
         call aeros_sw_aerosol_configure(ot=aer_ot, im=aer_im)
         call aeros_ecckd_sw_configure(a1_w=ecckd_a1_w, b1_w=ecckd_b1_w, b2_w=ecckd_b2_w)
-        rad%so4_file  = so4_file
-        rad%so4_year  = so4_year
-        rad%so4_const = so4_const
         rad%so4_indirect = so4_indirect
-        rad%dust_file  = dust_file
-        rad%dust_scale = dust_scale
         rad%dust_im    = dust_im
         rad%tsi      = tsi
         rad%seasonal = seasonal
@@ -440,75 +410,11 @@ contains
         rad%time_bp  = time_bp
 
         call aeros_radiation_init(rad, grd, enabled)
-        ! The sulfate / dust forcing maps are read only for a radiation that
-        ! runs (Wave 4a.2: the schema defaults now name the present-day files,
-        ! and a dry-core run with l_rad off must not depend on them).
-        if (enabled) then
-            call aeros_radiation_so4_load(rad, grd)
-            call aeros_radiation_dust_load(rad, grd)
-        end if
+        ! The sulfate / dust maps are boundary fields: aeros_boundary_apply
+        ! writes rad%so4_map / rad%dust_ot from the so4 / dust providers.
 
         return
     end subroutine aeros_radiation_load
-
-    subroutine aeros_radiation_so4_load(rad, grd)
-        ! Regrid the sulfate load at rad%so4_year from rad%so4_file onto the
-        ! model grid (bilinear, aeros_bcinput); no file = no map, the constant
-        ! rad%so4_const is used instead. The file's time axis is years since
-        ! 2000, one record per year from 1850 (CLIMBER-X so4_*.nc).
-        implicit none
-        type(aeros_rad_class),  intent(inout) :: rad
-        type(aeros_grid_class), intent(in)    :: grd
-        integer :: itime
-        if (allocated(rad%so4_map)) deallocate(rad%so4_map)
-        if (len_trim(rad%so4_file) == 0) return
-        allocate(rad%so4_map(grd%nlon, grd%nlat))
-        itime = rad%so4_year - 1850 + 1
-        call aeros_bcinput_read_field(trim(rad%so4_file), "so4", grd%lon, grd%lat, &
-                                      rad%so4_map, lon_name="lon", lat_name="lat", itime=itime)
-        rad%so4_map = max(0.0_wp, rad%so4_map)
-        return
-    end subroutine aeros_radiation_so4_load
-
-    subroutine aeros_radiation_dust_load(rad, grd)
-        ! Regrid the 12 monthly dust optical-thickness maps of rad%dust_file
-        ! onto the model grid; rad%dust_ot starts at the annual mean (the
-        ! non-seasonal value) until aeros_radiation_set_dust picks the day.
-        implicit none
-        type(aeros_rad_class),  intent(inout) :: rad
-        type(aeros_grid_class), intent(in)    :: grd
-        integer :: mm
-        if (allocated(rad%dust_clim)) deallocate(rad%dust_clim)
-        if (allocated(rad%dust_ot))   deallocate(rad%dust_ot)
-        if (len_trim(rad%dust_file) == 0) return
-        allocate(rad%dust_clim(grd%nlon, grd%nlat, 12), rad%dust_ot(grd%nlon, grd%nlat))
-        do mm = 1, 12
-            call aeros_bcinput_read_field(trim(rad%dust_file), "dust_ot", grd%lon, grd%lat, &
-                                          rad%dust_clim(:,:,mm), lon_name="lon", lat_name="lat", itime=mm)
-        end do
-        rad%dust_clim = max(0.0_wp, rad%dust_clim)*rad%dust_scale
-        rad%dust_ot   = sum(rad%dust_clim, dim=3)/12.0_wp
-        return
-    end subroutine aeros_radiation_dust_load
-
-    subroutine aeros_radiation_set_dust(rad, day)
-        ! Dust optical thickness at day-of-year `day`: mid-month centres,
-        ! linear cyclic interpolation (the land-albedo rule). No-op without maps.
-        implicit none
-        type(aeros_rad_class), intent(inout) :: rad
-        real(wp),              intent(in)    :: day
-        real(wp), parameter :: DAYS_YR = 365.0_wp
-        real(wp) :: x, w
-        integer  :: im0, m0, m1
-        if (.not. allocated(rad%dust_clim)) return
-        x   = modulo(day, DAYS_YR)/DAYS_YR*12.0_wp - 0.5_wp
-        im0 = floor(x)
-        w   = x - real(im0, wp)
-        m0  = modulo(im0,     12) + 1
-        m1  = modulo(im0 + 1, 12) + 1
-        rad%dust_ot = (1.0_wp - w)*rad%dust_clim(:,:,m0) + w*rad%dust_clim(:,:,m1)
-        return
-    end subroutine aeros_radiation_set_dust
 
     subroutine aeros_radiation_end(rad)
         implicit none
@@ -524,7 +430,6 @@ contains
         if (allocated(rad%olr_cs))    deallocate(rad%olr_cs)
         if (allocated(rad%sw_up_toa_cs)) deallocate(rad%sw_up_toa_cs)
         if (allocated(rad%so4_map))      deallocate(rad%so4_map)
-        if (allocated(rad%dust_clim))    deallocate(rad%dust_clim)
         if (allocated(rad%dust_ot))      deallocate(rad%dust_ot)
         if (allocated(rad%cover))     deallocate(rad%cover)
         if (allocated(rad%alb_map))   deallocate(rad%alb_map)   ! feat/land
@@ -1319,7 +1224,6 @@ contains
                 ! year (DAY_YEAR), so pass the raw elapsed day-of-year.
                 doy = rad%doy0 + real(nstep, wp)*dt/86400.0_wp
                 call aeros_insol_day(rad%ins, rad%sw_toa, rad%coszen, doy)
-                call aeros_radiation_set_dust(rad, doy)
             end if
 
             !$omp parallel do collapse(2) schedule(static) &
@@ -1333,8 +1237,8 @@ contains
                     ! Surface albedo: the land map if present, else the scalar.
                     alb = rad%albedo
                     if (have_alb_map) alb = rad%alb_map(i,j)
-                    ! Sulfate load: the map if loaded, else the constant.
-                    so4v = rad%so4_const
+                    ! Sulfate load: the map if provided, else none.
+                    so4v = 0.0_wp
                     if (have_so4_map) so4v = rad%so4_map(i,j)
                     ! Aerosol optical thickness: the background plus the dust map.
                     otv = SW_AER_OT; imv = SW_AER_IM
@@ -1450,14 +1354,14 @@ contains
         write(io_unit, '(a,l1)')     "    l_o3     = ", rad%l_o3
         write(io_unit, '(a,f6.3,a,f6.3)') "    aerosol ot/im = ", SW_AER_OT, " / ", SW_AER_IM
         if (allocated(rad%so4_map)) then
-            write(io_unit, '(a,i0,a,es10.3,a)') "    so4 map year ", rad%so4_year, &
-                " (mean ", sum(rad%so4_map)/real(size(rad%so4_map),wp), " kg/m2)"
+            write(io_unit, '(a,es10.3,a)') "    so4 map (mean ", &
+                sum(rad%so4_map)/real(size(rad%so4_map),wp), " kg/m2)"
         else
-            write(io_unit, '(a,es10.3)') "    so4 const = ", rad%so4_const
+            write(io_unit, '(a)') "    so4 map = none (so4 = 0)"
         end if
         write(io_unit, '(a,l1)') "    so4 indirect effect = ", rad%so4_indirect
-        if (allocated(rad%dust_ot)) write(io_unit, '(a,f6.3,a)') "    dust ot map (annual mean ", &
-            sum(rad%dust_clim)/real(size(rad%dust_clim),wp), ")"
+        if (allocated(rad%dust_ot)) write(io_unit, '(a,f6.3,a)') "    dust ot map (mean ", &
+            sum(rad%dust_ot)/real(size(rad%dust_ot),wp), ")"
         write(io_unit, '(a,l1)')     "    clouds   = ", rad%clouds
         return
     end subroutine aeros_radiation_report

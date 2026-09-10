@@ -46,10 +46,14 @@ module aeros
                                 aeros_timestep_end, aeros_timestep_step, &
                                 aeros_timestep_diagnose, aeros_timestep_print, &
                                 aeros_timestep_write_restart, &
-                                aeros_timestep_read_restart
-    use aeros_boundary, only : aeros_boundary_t, aeros_boundary_load, &
+                                aeros_timestep_read_restart, aeros_timestep_set_phis
+    use aeros_boundary, only : aeros_boundary_t, aeros_bc_2d_t, aeros_boundary_load, &
                                 aeros_boundary_end, aeros_boundary_refresh, &
-                                BC_EXTERNAL
+                                BC_NONE, BC_EXTERNAL
+    use aeros_ocean,    only : OCEAN_PRESCRIBED
+    use aeros_land,     only : aeros_land_is_land, aeros_land_couple_radiation
+    use aeros_topography, only : aeros_topography_bandlimit
+    use ncio,           only : nc_write, nc_read, nc_exists_var
     use aeros_diag_acc, only : aeros_diag_acc_t, aeros_diag_acc_init, &
                                 aeros_diag_acc_reset, aeros_diag_acc_end
     use aeros_bundles,  only : aeros_imports_t, aeros_exports_t, aeros_diag_t
@@ -71,12 +75,21 @@ module aeros
         type(aeros_state_class)    :: now
         type(aeros_timestep_class) :: ts
 
-        ! Boundary providers (docs/coupling_api.md sec 7). Populated by
-        ! aeros_boundary_load in aeros_init; every 2D provider's `buffer` is
-        ! allocated on the model grid. Wave-2 addition; physics consumers
-        ! are wired in Wave 3 (rce_long's sst_clim, aeros_land's albedo_clim,
-        ! aeros_radiation's dust_clim / so4_map, aeros_topography's phis_full).
+        ! Boundary providers (docs/coupling_api.md sec 7): the one source of
+        ! every externally prescribed field. Populated by aeros_boundary_load
+        ! in aeros_init; every 2D provider's `buffer` is allocated on the
+        ! model grid. The physics never reads a provider directly:
+        ! aeros_boundary_apply copies each refreshed buffer into the working
+        ! field its kernel reads (ts%ocn%sst, ts%land%mask / %albedo,
+        ! ts%rad%dust_ot / %so4_map, the dynamics' phis) -- at the end of
+        ! aeros_init, after every refresh in aeros_lib_step, and wherever a
+        ! driver refreshes the providers itself (rce_long, daily).
         type(aeros_boundary_t) :: bounds
+        ! Provider version of the phis buffer last band-limited and handed to
+        ! the dynamics (aeros_boundary_apply): the analysis/synthesis
+        ! round-trip is done once per change, never repeated on an unchanged
+        ! buffer (a second round-trip is not bit-identical).
+        integer :: bc_phis_applied = 0
 
         ! Library-side diagnostic accumulators (docs/coupling_api.md sec. 5,
         ! 6.2, 6.3). Wave 4a: aeros_init allocates and zeroes the always-on
@@ -100,6 +113,7 @@ module aeros
     public :: aeros_set_rce_warm
     public :: aeros_diagnose
     public :: aeros_print_config
+    public :: aeros_boundary_apply
 
     ! Coupled library entry points (docs/coupling_api.md sec. 3, 12, 14).
     ! Wave-3.a addition: public interface added, but no in-tree driver calls
@@ -179,13 +193,30 @@ contains
         call aeros_timestep_init(ams%ts, ams%par, ams%pool, ams%grd, ams%vgrid, filename, &
                                     defaults_file=defaults_file, phys=ams%phys)
 
-        ! Boundary providers (Wave-2 addition). Load the &boundary namelist
-        ! group and allocate every 2D provider's buffer on the model grid.
-        ! Consumers are wired in Wave 3; the default kind is BC_CONSTANT with
-        ! value=0, so a driver that doesn't populate the group leaves the
-        ! buffers at zero and the pre-Wave-2 code paths (which don't read
-        ! ams%bounds yet) are unaffected.
+        ! Boundary providers: load the &boundary group and read every active
+        ! BC_FILE field onto the model grid. A provider is active only when a
+        ! consumer of it is on -- the &physics flags are the one source of
+        ! that, so a run with land off never opens the mask file, a dry core
+        ! never opens the SST table, and the schema can name the calibrated
+        ! real-Earth files for every field without making every run depend
+        ! on them. (l_topography off = flat, whatever the phis provider says;
+        ! a slab ocean owns its SST, so the sst provider is only for &ocean
+        ! mode = 0 and only when something reads the surface temperature.)
+        ams%bounds%lsm%active    = ams%phys%l_land
+        ams%bounds%albedo%active = ams%phys%l_land
+        ams%bounds%dust%active   = ams%phys%l_rad
+        ams%bounds%so4%active    = ams%phys%l_rad
+        ams%bounds%phis%active   = ams%phys%l_topography
+        ams%bounds%sst%active    = ams%ts%ocn%mode == OCEAN_PRESCRIBED .and. &
+                                   (ams%phys%l_surf .or. ams%phys%l_rad)
         call aeros_boundary_load(ams%bounds, filename, ams%grd, defaults_file=defaults_file)
+        ! Seed the monthly fields at the start day and hand every buffer to
+        ! its consumer: the model is complete on return from init, with the
+        ! SST / albedo / dust of doy0 (the values rce_long's set_seasonal_sst,
+        ! aeros_land_set_albedo and aeros_radiation_set_dust installed at
+        ! the start before Wave 4b) and the band-limited orography.
+        call aeros_boundary_refresh(ams%bounds, ams%ts%rad%doy0)
+        call aeros_boundary_apply(ams)
 
         ! Library-side diagnostic accumulators (Wave 4a): allocate and zero the
         ! always-on buffers so ams%diag_acc is usable by a driver and by
@@ -354,6 +385,88 @@ contains
         return
 
     end subroutine aeros_set_rce_warm
+
+    subroutine aeros_boundary_apply(ams)
+        ! Hand every provider buffer to the physics field that reads it.
+        !
+        ! The kernels keep their working fields (ts%ocn%sst, ts%land%mask and
+        ! %albedo, ts%rad%dust_ot and %so4_map, the tendency's phis) and are
+        ! untouched by the providers; this is the one routine that connects
+        ! the two, so a coupler that pushes any of these fields as
+        ! BC_EXTERNAL through aeros_lib_step(imports=...) needs no physics
+        ! change. Called at the end of aeros_init and after every
+        ! aeros_boundary_refresh (aeros_lib_step; rce_long's daily refresh).
+        !
+        ! A provider is applied only when it is active (its consumer is on)
+        ! and has a kind other than BC_NONE -- otherwise the consumer keeps
+        ! its own default (the ocean's analytic SST, the land's scalar
+        ! land_albedo, an all-ocean mask, no dust map, no sulfate map, a
+        ! flat surface).
+        !
+        !   sst    -> ts%ocn%sst, prescribed-SST mode only (a slab owns it).
+        !   lsm    -> ts%land%mask, thresholded at &land lsm_threshold.
+        !   albedo -> ts%land%albedo (the bare land albedo); the per-point
+        !             surface albedo map radiation reads (rad%alb_map) is
+        !             recomposed whenever land is on, so a mask or albedo
+        !             change reaches radiation here.
+        !   dust   -> ts%rad%dust_ot (allocated on first use).
+        !   so4    -> ts%rad%so4_map (allocated on first use).
+        !   phis   -> spectrally band-limited to the model truncation IN
+        !             PLACE (aeros_topography_bandlimit; the buffer then
+        !             holds the orography the dynamics is consistent with,
+        !             which is what a driver that ramps it reads) and set on
+        !             the dynamics (aeros_timestep_set_phis) -- once per
+        !             buffer version, since a repeated round-trip is not
+        !             bit-identical. Only with &physics l_topography; off,
+        !             the surface stays flat whatever the provider holds.
+        !             A driver may still scale what the dynamics sees
+        !             (rce_long's spin-up ramp); the buffer is the full field.
+
+        implicit none
+
+        type(aeros_class), intent(inout) :: ams
+
+        if (in_use(ams%bounds%sst) .and. ams%ts%ocn%mode == OCEAN_PRESCRIBED) &
+            ams%ts%ocn%sst = ams%bounds%sst%buffer
+
+        if (ams%ts%land%enabled) then
+            if (in_use(ams%bounds%lsm)) &
+                ams%ts%land%mask = aeros_land_is_land(ams%bounds%lsm%buffer, ams%ts%land%lsm_threshold)
+            if (in_use(ams%bounds%albedo)) ams%ts%land%albedo = ams%bounds%albedo%buffer
+            call aeros_land_couple_radiation(ams%ts%land, ams%ts%rad%alb_map, ams%ts%rad%albedo)
+        end if
+
+        if (ams%ts%rad%enabled) then
+            if (in_use(ams%bounds%dust)) then
+                if (.not. allocated(ams%ts%rad%dust_ot)) &
+                    allocate(ams%ts%rad%dust_ot(ams%grd%nlon, ams%grd%nlat))
+                ams%ts%rad%dust_ot = ams%bounds%dust%buffer
+            end if
+            if (in_use(ams%bounds%so4)) then
+                if (.not. allocated(ams%ts%rad%so4_map)) &
+                    allocate(ams%ts%rad%so4_map(ams%grd%nlon, ams%grd%nlat))
+                ams%ts%rad%so4_map = ams%bounds%so4%buffer
+            end if
+        end if
+
+        if (ams%phys%l_topography .and. in_use(ams%bounds%phis)) then
+            if (ams%bounds%phis%version /= ams%bc_phis_applied) then
+                call aeros_topography_bandlimit(ams%pool%sht(1), ams%bounds%phis%buffer)
+                call aeros_timestep_set_phis(ams%ts, ams%bounds%phis%buffer)
+                ams%bc_phis_applied = ams%bounds%phis%version
+            end if
+        end if
+
+        return
+
+    contains
+
+        pure logical function in_use(fld)
+            type(aeros_bc_2d_t), intent(in) :: fld
+            in_use = fld%active .and. fld%kind /= BC_NONE
+        end function in_use
+
+    end subroutine aeros_boundary_apply
 
     subroutine aeros_diagnose(ams)
         ! Refresh the grid-space fields from the spectral state.
@@ -556,10 +669,10 @@ contains
         ! absent one is treated as "not exchanging that side this cycle",
         ! preserving today's standalone behaviour.
         !
-        ! Wave-3.a: sub-step count, boundary refresh and diag_acc reset are
-        ! wired. imports/exports copy loops are placeholders (see field-copy
-        ! comments); the fields with aeros-side readers are wired subset-by-
-        ! subset in Wave 4 as the drivers migrate.
+        ! The imports copy feeds the BC_EXTERNAL buffers of every provider
+        ! (sst, lsm, albedo, dust, so4, phis have consumers; the rest are
+        ! Phase C) and aeros_boundary_apply hands the refreshed set to the
+        ! physics. exports is still a shell (Wave 4c).
 
         implicit none
 
@@ -583,15 +696,19 @@ contains
         nsub = nint(dt_couple/real(ams%par%dt, dp))
         if (nsub < 1) nsub = 1
 
-        ! Day-of-year for boundary refresh. Uses the 365-day convention that
-        ! aeros_boundary_interp_monthly assumes; Phase A calendar sec. 10 lets
-        ! a driver select "julian" (365) or "360d" via &aeros -- honour that
-        ! when the calendar plumbing is complete.
-        doy = modulo(real(ams%time*365.0_dp, wp), 365.0_wp)
+        ! Day-of-year for the boundary refresh: the model's one calendar,
+        ! &radiation doy0 plus the elapsed steps -- the same expression the
+        ! physics uses inside the step (insolation, Brewer-Dobson) and the
+        ! one rce_long passes to its daily refresh, evaluated for the step
+        ! about to run (rce_long refreshes before step n with n*dt). The
+        ! 365-day wrap is aeros_boundary_interp_monthly's; a 360-day
+        ! calendar (spec sec. 10) is wired there when the calendar lands.
+        doy = ams%ts%rad%doy0 + real(ams%nstep + 1, wp)*ams%par%dt/86400.0_wp
 
-        ! === Step 1-4: imports and boundary refresh ==========================
+        ! === Step 1-4: imports, boundary refresh, hand-over to the physics ===
         if (present(imports)) call import_copy(ams, imports)
         call aeros_boundary_refresh(ams%bounds, doy)
+        call aeros_boundary_apply(ams)
 
         ! === Sub-cycle ========================================================
         do n = 1, nsub
@@ -624,32 +741,28 @@ contains
 
     subroutine import_copy(ams, imports)
         ! Copy each allocated field of `imports` into its BC_EXTERNAL buffer
-        ! on ams%bounds. A field the host did not allocate is silently
-        ! skipped -- the existing buffer (BC_FILE / BC_CONSTANT / previous
-        ! external value) is used. Fields with no aeros-side reader today are
-        ! copied anyway so the buffer is populated before Phase C wires them.
+        ! on ams%bounds (bumping the buffer version). A field the host did
+        ! not allocate is silently skipped -- the existing buffer (BC_FILE /
+        ! BC_CONSTANT / previous external value) is used. Fields with no
+        ! aeros-side reader today are copied anyway so the buffer is
+        ! populated before Phase C wires them.
 
         implicit none
 
         type(aeros_class),     intent(inout) :: ams
         type(aeros_imports_t), intent(in)    :: imports
 
-        if (allocated(imports%sst)         .and. ams%bounds%sst%kind         == BC_EXTERNAL) &
-            ams%bounds%sst%buffer         = imports%sst
-        if (allocated(imports%sic)         .and. ams%bounds%sic%kind         == BC_EXTERNAL) &
-            ams%bounds%sic%buffer         = imports%sic
-        if (allocated(imports%t_ice_sfc)   .and. ams%bounds%t_ice_sfc%kind   == BC_EXTERNAL) &
-            ams%bounds%t_ice_sfc%buffer   = imports%t_ice_sfc
-        if (allocated(imports%t_skin_land) .and. ams%bounds%t_skin_land%kind == BC_EXTERNAL) &
-            ams%bounds%t_skin_land%buffer = imports%t_skin_land
-        if (allocated(imports%q_skin_land) .and. ams%bounds%q_skin_land%kind == BC_EXTERNAL) &
-            ams%bounds%q_skin_land%buffer = imports%q_skin_land
-        if (allocated(imports%albedo)      .and. ams%bounds%albedo%kind      == BC_EXTERNAL) &
-            ams%bounds%albedo%buffer      = imports%albedo
-        if (allocated(imports%z0m)         .and. ams%bounds%z0m%kind         == BC_EXTERNAL) &
-            ams%bounds%z0m%buffer         = imports%z0m
-        if (allocated(imports%so4_load)    .and. ams%bounds%so4%kind         == BC_EXTERNAL) &
-            ams%bounds%so4%buffer         = imports%so4_load
+        if (allocated(imports%sst))         call push(ams%bounds%sst,         imports%sst)
+        if (allocated(imports%sic))         call push(ams%bounds%sic,         imports%sic)
+        if (allocated(imports%t_ice_sfc))   call push(ams%bounds%t_ice_sfc,   imports%t_ice_sfc)
+        if (allocated(imports%t_skin_land)) call push(ams%bounds%t_skin_land, imports%t_skin_land)
+        if (allocated(imports%q_skin_land)) call push(ams%bounds%q_skin_land, imports%q_skin_land)
+        if (allocated(imports%albedo))      call push(ams%bounds%albedo,      imports%albedo)
+        if (allocated(imports%z0m))         call push(ams%bounds%z0m,         imports%z0m)
+        if (allocated(imports%so4_load))    call push(ams%bounds%so4,         imports%so4_load)
+        if (allocated(imports%dust))        call push(ams%bounds%dust,        imports%dust)
+        if (allocated(imports%lsm))         call push(ams%bounds%lsm,         imports%lsm)
+        if (allocated(imports%phis))        call push(ams%bounds%phis,        imports%phis)
 
         ! Year-boundary scalars: `current` is what physics reads.
         if (imports%year_boundary) then
@@ -660,6 +773,18 @@ contains
         end if
 
         return
+
+    contains
+
+        subroutine push(fld, values)
+            type(aeros_bc_2d_t), intent(inout) :: fld
+            real(wp),            intent(in)    :: values(:,:)
+            if (fld%kind /= BC_EXTERNAL) return
+            fld%buffer  = values
+            fld%version = fld%version + 1
+            return
+        end subroutine push
+
     end subroutine import_copy
 
     subroutine export_populate(ams, exports)
@@ -707,14 +832,16 @@ contains
     end subroutine aeros_lib_finalize
 
     subroutine aeros_lib_restart_write(ams, filename, ierr)
-        ! Write the checkpoint. Wraps aeros_timestep_write_restart unchanged
-        ! (spec sec. 9: "Phase A does not change the restart file format").
+        ! Write the checkpoint: aeros_timestep_write_restart unchanged (spec
+        ! sec. 9: Phase A does not change the restart file format), plus one
+        ! variable `bc_<field>` per BC_EXTERNAL 2D provider -- after a
+        ! coupled restart the host has not pushed anything yet and the
+        ! physics needs a valid starting field. BC_FILE / BC_CONSTANT
+        ! buffers are re-derived at init and are not written, so a run
+        ! without external providers writes exactly today's file.
         !
-        ! Boundary buffers with BC_EXTERNAL kind and diag_acc state are NOT
-        ! written in Wave-3.a: spec sec. 9 lists BC_EXTERNAL as a Phase A
-        ! addition, and the accumulator arithmetic still lives in rce_long
-        ! (not yet library-side), so there is nothing library-owned to
-        ! persist. Wire-up lands with the accumulator port in a later wave.
+        ! diag_acc state is not persisted (the accumulator arithmetic is
+        ! still rce_long's; Wave 4c).
 
         implicit none
 
@@ -729,7 +856,32 @@ contains
         time_s = ams%time*real(year_seconds, wp)
         call aeros_timestep_write_restart(ams%ts, ams%now, time_s, filename)
 
+        call write_bc(ams%bounds%sst,         "sst")
+        call write_bc(ams%bounds%sic,         "sic")
+        call write_bc(ams%bounds%t_ice_sfc,   "t_ice_sfc")
+        call write_bc(ams%bounds%t_skin_land, "t_skin_land")
+        call write_bc(ams%bounds%q_skin_land, "q_skin_land")
+        call write_bc(ams%bounds%albedo,      "albedo")
+        call write_bc(ams%bounds%z0m,         "z0m")
+        call write_bc(ams%bounds%phis,        "phis")
+        call write_bc(ams%bounds%lsm,         "lsm")
+        call write_bc(ams%bounds%dust,        "dust")
+        call write_bc(ams%bounds%so4,         "so4")
+        call write_bc(ams%bounds%o3,          "o3")
+
         return
+
+    contains
+
+        subroutine write_bc(fld, name)
+            type(aeros_bc_2d_t), intent(in) :: fld
+            character(len=*),    intent(in) :: name
+            if (fld%kind /= BC_EXTERNAL) return
+            call nc_write(filename, "bc_"//name, fld%buffer, dim1="lon", dim2="lat", &
+                          long_name="boundary provider buffer (BC_EXTERNAL): "//name)
+            return
+        end subroutine write_bc
+
     end subroutine aeros_lib_restart_write
 
     subroutine aeros_lib_restart_read(ams, filename, ierr)
@@ -753,9 +905,50 @@ contains
         ams%time  = time_s/real(year_seconds, wp)
         ams%nstep = ams%ts%nstep
 
+        ! BC_EXTERNAL provider buffers (written by aeros_lib_restart_write).
+        ! The physics working fields they feed were themselves restored by
+        ! the timestep restart, so nothing is re-applied here; the next
+        ! aeros_lib_step applies whatever the host pushes -- or, absent a
+        ! push, these. A file without them (an older checkpoint, or a run
+        ! that had no external provider) leaves the zero buffers of init.
+        call read_bc(ams%bounds%sst,         "sst")
+        call read_bc(ams%bounds%sic,         "sic")
+        call read_bc(ams%bounds%t_ice_sfc,   "t_ice_sfc")
+        call read_bc(ams%bounds%t_skin_land, "t_skin_land")
+        call read_bc(ams%bounds%q_skin_land, "q_skin_land")
+        call read_bc(ams%bounds%albedo,      "albedo")
+        call read_bc(ams%bounds%z0m,         "z0m")
+        call read_bc(ams%bounds%phis,        "phis")
+        call read_bc(ams%bounds%lsm,         "lsm")
+        call read_bc(ams%bounds%dust,        "dust")
+        call read_bc(ams%bounds%so4,         "so4")
+        call read_bc(ams%bounds%o3,          "o3")
+
+        ! phis is not part of the timestep restart, and the stored buffer is
+        ! the band-limited field aeros_boundary_apply left there: hand it to
+        ! the dynamics as is and mark that version applied, so the next
+        ! apply does not put it through a second (non-identical) round-trip.
+        if (ams%bounds%phis%kind == BC_EXTERNAL .and. ams%bc_phis_applied /= ams%bounds%phis%version) then
+            if (ams%phys%l_topography) call aeros_timestep_set_phis(ams%ts, ams%bounds%phis%buffer)
+            ams%bc_phis_applied = ams%bounds%phis%version
+        end if
+
         call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
 
         return
+
+    contains
+
+        subroutine read_bc(fld, name)
+            type(aeros_bc_2d_t), intent(inout) :: fld
+            character(len=*),    intent(in)    :: name
+            if (fld%kind /= BC_EXTERNAL) return
+            if (.not. nc_exists_var(filename, "bc_"//name)) return
+            call nc_read(filename, "bc_"//name, fld%buffer)
+            fld%version = fld%version + 1
+            return
+        end subroutine read_bc
+
     end subroutine aeros_lib_restart_read
 
     subroutine aeros_lib_diagnose(ams, diag_out, ierr)

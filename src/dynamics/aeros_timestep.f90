@@ -303,7 +303,6 @@ module aeros_timestep
     use aeros_land,       only : aeros_land_class, aeros_land_init, &
                                 aeros_land_load, aeros_land_end, &
                                 aeros_land_pre, aeros_land_step, &
-                                aeros_land_set_albedo, &
                                 aeros_land_couple_radiation, aeros_land_report
     use aeros_held_suarez, only : aeros_hs_class, aeros_hs_init, aeros_hs_end, &
                                 aeros_hs_apply, aeros_hs_print
@@ -729,13 +728,14 @@ contains
             call aeros_vdiff_load(ts%vd, filename, grd, phys%l_vdiff, defaults_file=defaults_file)
             call aeros_ocean_load(ts%ocn, filename, grd, phys%l_seaice, defaults_file=defaults_file)
             call aeros_land_load(ts%land, filename, grd, phys%l_land, defaults_file=defaults_file)   ! feat/land
-            ! Land albedo composition (rce_long init, land block): seed the
-            ! seasonal bare albedo at the start day and build the per-point
-            ! surface albedo map radiation reads -- ocean scalar over sea,
-            ! land albedo on land. Both no-ops when land is off (rad keeps its
-            ! scalar albedo; the all-ocean run is bit for bit).
+            ! Land albedo composition: build the per-point surface albedo map
+            ! radiation reads -- ocean scalar over sea, land albedo on land. A
+            ! no-op when land is off (rad keeps its scalar albedo; the
+            ! all-ocean run is bit for bit). The mask and the bare albedo are
+            ! boundary fields (aeros_boundary lsm / albedo providers): on the
+            ! library path aeros_boundary_apply writes them and recomposes
+            ! this map right after aeros_boundary_load.
             if (ts%land%enabled) then
-                call aeros_land_set_albedo(ts%land, ts%rad%doy0)
                 call aeros_land_couple_radiation(ts%land, ts%rad%alb_map, ts%rad%albedo)
             end if
         else
@@ -1015,10 +1015,10 @@ contains
         ! feedback (land skin temp drives it). When neither time-varying scheme is
         ! on the land-only map is static (built once at init) and this is skipped,
         ! bit-for-bit; with no land or ice, rad%alb_map stays unallocated and
-        ! radiation uses its scalar albedo.
-        ! (also when the bare land albedo itself is seasonal: aeros_land_set_albedo
-        ! updates land%albedo daily and the map has to follow it)
-        land_snow  = ts%land%enabled .and. (ts%land%snow_albedo >= 0.0_wp .or. ts%land%albedo_seasonal)
+        ! radiation uses its scalar albedo. (A change of the bare land albedo
+        ! itself -- the monthly albedo provider -- is recomposed into the map
+        ! by aeros_boundary_apply when the buffer is refreshed, not here.)
+        land_snow  = ts%land%enabled .and. ts%land%snow_albedo >= 0.0_wp
         seaice_alb = ts%ocn%l_seaice .and. allocated(ts%ocn%alb)
         if (land_snow .or. seaice_alb) then
             ! Land albedo on land (with the snow bump when active), ocean scalar on

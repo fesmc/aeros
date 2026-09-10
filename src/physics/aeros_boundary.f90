@@ -1,53 +1,64 @@
 module aeros_boundary
-    ! Boundary-provider abstraction for the library API refactor.
+    ! Boundary providers: the ONE source of every externally prescribed field.
     !
-    ! Every lower-boundary or forcing field that today lives in a physics
-    ! module or a driver as a private (nlon,nlat) array (rce_long's sst_clim,
-    ! aeros_land's albedo_clim, aeros_radiation's dust_clim / so4_map,
-    ! aeros_topography's phis_full, ...) gets ONE provider here. A provider
-    ! has a discriminated `kind`:
+    ! Every lower-boundary or forcing field the physics consumes but does not
+    ! compute -- the prescribed SST, the land-sea mask, the bare land albedo,
+    ! the dust and sulfate maps, the surface geopotential -- has one provider
+    ! here (spec docs/coupling_api.md sec 7). A provider has a discriminated
+    ! `kind`:
     !
+    !   BC_NONE      -- no provider: the consumer keeps its own internal
+    !                   default (the ocean module's analytic SST profile, the
+    !                   land module's scalar land_albedo, no dust, so4 = 0,
+    !                   phis = 0). The buffer is allocated and zero.
     !   BC_CONSTANT  -- a scalar `value` (a uniform fill for 2D buffers).
     !   BC_FILE      -- read from `file` (via aeros_bcinput_read_field): a
-    !                   single-slice `itime` or a 12-month climatology
-    !                   (`is_monthly = .TRUE.`). Monthly fields are held in
-    !                   `clim(:,:,1..12)`; the daily working `buffer(:,:)`
-    !                   is refreshed by day-of-year interpolation.
+    !                   single slice `itime` (0 = the time-mean of the file),
+    !                   or a 12-month climatology (`is_monthly = .TRUE.`) held
+    !                   in `clim(:,:,1..12)` and interpolated to the day into
+    !                   `buffer(:,:)` by aeros_boundary_refresh.
     !   BC_EXTERNAL  -- the buffer is written by the caller (a coupled host
     !                   through aeros_lib_step(imports=...)); no I/O here.
     !
-    ! `aeros_boundary_t` bundles one provider per known boundary field
-    ! (spec docs/coupling_api.md sec 7); each is configured at init from the
-    ! `&boundary` namelist group.
+    ! The physics modules never read a file and never own a climatology: the
+    ! library (aeros_boundary_apply in src/aeros.f90) copies each provider's
+    ! `buffer` into the working field the physics kernel reads (ocn%sst,
+    ! land%mask / land%albedo, rad%dust_ot / rad%so4_map, the dynamics' phis)
+    ! after every refresh. A coupler therefore pushes any of these fields as
+    ! BC_EXTERNAL with no physics change (Wave 4b).
     !
-    ! === Wave-2 scope (this commit) ========================================
+    ! `active`: a provider is materialised (file read, buffer applied) only
+    ! when a consumer of it is on -- the library sets it from the &physics
+    ! flags before init (l_land -> lsm/albedo, l_rad -> dust/so4,
+    ! l_topography -> phis, &ocean mode = 0 -> sst), so a dry-core run does
+    ! not depend on the ERA5 files its namelist defaults name.
     !
-    ! This module is ADDITIVE: the types, the loader, init and refresh are
-    ! defined and the boundary bundle is a new component on aeros_class, but
-    ! no existing physics module or driver consumes from it yet. That wiring
-    ! (routing aeros_land's albedo_clim, aeros_radiation's dust_clim /
-    ! so4_map, aeros_topography's phis_full and rce_long's sst_clim through
-    ! ams%bounds%<field>%buffer) is Wave 3, once aeros_lib_step is the entry
-    ! point that calls aeros_boundary_refresh at the start of each cycle.
-    ! Keeping the two waves separate preserves bit-for-bit trivially: the
-    ! existing code paths are untouched, and every aeros_defaults.nml default
-    ! written below matches today's paths and monthly conventions so a Wave-3
-    ! rewire also lands bit-for-bit.
+    ! `version`: bumped whenever the buffer is (re)written -- init, a monthly
+    ! refresh, an import copy, a restart read -- so a consumer that does
+    ! expensive work on a change (the phis band-limit) can tell a change from
+    ! a repeat.
+    !
+    ! Zonal tables: a BC_FILE variable with no longitude dimension is taken
+    ! as a zonal (lat[,month]) table already on the model latitudes and is
+    ! broadcast along longitude -- the legacy aquaplanet sst(lat,month) from
+    ! scripts/make_seasonal_sst.jl, available to any 2D field.
     !
     ! Bit-for-bit note: the daily interpolation kernel (mid-month centres,
-    ! cyclic, x = mod(day, 365)/365*12 - 0.5) matches aeros_land_set_albedo
-    ! (aeros_land.f90:430-435), aeros_radiation_set_dust (aeros_radiation.f90:
-    ! 496-504) and rce_long's set_seasonal_sst -- one shared kernel here so
-    ! Wave 3 is a one-line consumer rather than a re-derivation.
+    ! cyclic, x = mod(day, 365)/365*12 - 0.5) is the one rce_long's
+    ! set_seasonal_sst, aeros_land_set_albedo and aeros_radiation_set_dust
+    ! used before Wave 4b; the per-month regrid + max(floor, x*scale) matches
+    ! the module readers they replace.
 
     use aeros_defs,    only : dp, wp, io_unit_err, aeros_grid_class
     use aeros_bcinput, only : aeros_bcinput_read_field
     use nml,           only : nml_read
+    use ncio,          only : nc_read, nc_dims
 
     implicit none
 
     private
 
+    integer, parameter, public :: BC_NONE     = -1
     integer, parameter, public :: BC_CONSTANT = 0
     integer, parameter, public :: BC_FILE     = 1
     integer, parameter, public :: BC_EXTERNAL = 2
@@ -68,7 +79,9 @@ module aeros_boundary
     ! allocated after init (a physics reader never has to test allocated).
     ! `clim` is allocated only for monthly FILE fields.
     type, public :: aeros_bc_2d_t
-        integer               :: kind       = BC_CONSTANT
+        integer               :: kind       = BC_NONE
+        logical               :: active     = .TRUE.   ! a consumer is on (set by the library)
+        integer               :: version    = 0        ! bumped on every buffer write
         real(wp), allocatable :: buffer(:,:)           ! (nlon,nlat), physics reads
         character(len=256)    :: file       = ""       ! FILE
         character(len=64)     :: varname    = ""       ! FILE variable name
@@ -76,7 +89,7 @@ module aeros_boundary
         character(len=64)     :: lat_name   = "latitude"
         logical               :: is_monthly = .FALSE.  ! FILE: 12-month climatology
         real(wp), allocatable :: clim(:,:,:)           ! (nlon,nlat,12) FILE monthly
-        integer               :: itime      = 1        ! FILE single-slice: 1-based
+        integer               :: itime      = 1        ! FILE single-slice: 1-based; 0 = time-mean
         real(wp)              :: value      = 0.0_wp   ! CONSTANT (uniform fill)
         real(wp)              :: scale      = 1.0_wp   ! post-read multiplier (dust_scale et al.)
         real(wp)              :: floor      = -huge(1.0_wp) ! post-read floor (max(0, ...) et al.)
@@ -94,18 +107,17 @@ module aeros_boundary
         type(aeros_bc_2d_t) :: t_ice_sfc     ! sea-ice surface T [K]
         type(aeros_bc_2d_t) :: t_skin_land   ! land skin T [K]
         type(aeros_bc_2d_t) :: q_skin_land   ! land skin q [kg/kg]
-        type(aeros_bc_2d_t) :: albedo        ! broadband albedo [-]
+        type(aeros_bc_2d_t) :: albedo        ! bare land broadband albedo [-]
         type(aeros_bc_2d_t) :: z0m           ! momentum roughness [m]
-        type(aeros_bc_2d_t) :: phis          ! surface geopotential [m2 s-2]
+        type(aeros_bc_2d_t) :: phis          ! surface geopotential [m2 s-2]; band-limited IN PLACE by aeros_boundary_apply
         type(aeros_bc_2d_t) :: lsm           ! land-sea mask (0..1)
         type(aeros_bc_2d_t) :: dust          ! dust optical thickness
         type(aeros_bc_2d_t) :: so4           ! sulfate load [kg m-2]
         type(aeros_bc_2d_t) :: o3            ! ozone column (2D placeholder; 3D is Phase C)
 
-        ! Surface-geopotential spin-up ramp [days] (rce_long's topo_ramp_days:
-        ! phis is scaled linearly from 0 to full over this many days). Wave 4a
-        ! reads the key only; the ramp consumer moves into the library with
-        ! the phis provider in Wave 4b. 0 = no ramp.
+        ! Surface-geopotential spin-up ramp [days]: a driver scales phis
+        ! linearly from 0 to full over this many days (aeros_topography_scale;
+        ! rce_long). 0 = no ramp. The library applies the full field.
         real(wp) :: phis_ramp_days = 0.0_wp
 
         ! === Scalar (year-boundary) fields ================================
@@ -121,21 +133,20 @@ module aeros_boundary
     public :: aeros_boundary_refresh
     public :: aeros_boundary_end
     public :: aeros_boundary_interp_monthly
+    public :: aeros_boundary_kind_name
 
 contains
 
     subroutine aeros_boundary_load(bounds, filename, grd, defaults_file)
         ! Read the `&boundary` namelist group and populate each provider's
         ! kind / file / varname / value. Then init (allocate buffers and read
-        ! BC_FILE fields).
+        ! BC_FILE fields). The `active` flags are left as the caller set them.
         !
         ! Namelist convention: one key per provider field. For a 2D provider
         ! `X` the keys are X_kind, X_file, X_varname, X_is_monthly, X_itime,
         ! X_value, X_scale, X_floor, X_lon_name, X_lat_name; for a scalar,
         ! X_kind, X_value, X_file, X_year. Missing keys leave the compile-time
-        ! defaults (BC_CONSTANT with value = 0), which is bit-for-bit "no
-        ! provider" -- physics that hasn't been rewired to consume from
-        ! ams%bounds ignores the empty buffers.
+        ! defaults (BC_NONE for 2D fields: the consumer's own default).
 
         implicit none
 
@@ -252,8 +263,9 @@ contains
         ! assume `buffer` is allocated once init has run). For BC_FILE,
         ! either read the single time slice or read the 12-month clim into
         ! `clim` and seed `buffer` with the annual mean. For BC_CONSTANT,
-        ! fill the buffer with `value`. BC_EXTERNAL leaves the buffer at
-        ! zero -- a coupled host writes it in aeros_lib_step.
+        ! fill the buffer with `value`. BC_NONE and BC_EXTERNAL leave the
+        ! buffer at zero -- a coupled host writes the latter in aeros_lib_step.
+        ! An inactive provider (no consumer on) is not read.
 
         implicit none
         type(aeros_boundary_t), intent(inout) :: bounds
@@ -264,18 +276,18 @@ contains
         bounds%nlon = grd%nlon
         bounds%nlat = grd%nlat
 
-        call init_2d(bounds%sst,         grd)
-        call init_2d(bounds%sic,         grd)
-        call init_2d(bounds%t_ice_sfc,   grd)
-        call init_2d(bounds%t_skin_land, grd)
-        call init_2d(bounds%q_skin_land, grd)
-        call init_2d(bounds%albedo,      grd)
-        call init_2d(bounds%z0m,         grd)
-        call init_2d(bounds%phis,        grd)
-        call init_2d(bounds%lsm,         grd)
-        call init_2d(bounds%dust,        grd)
-        call init_2d(bounds%so4,         grd)
-        call init_2d(bounds%o3,          grd)
+        call init_2d(bounds%sst,         "sst",         grd)
+        call init_2d(bounds%sic,         "sic",         grd)
+        call init_2d(bounds%t_ice_sfc,   "t_ice_sfc",   grd)
+        call init_2d(bounds%t_skin_land, "t_skin_land", grd)
+        call init_2d(bounds%q_skin_land, "q_skin_land", grd)
+        call init_2d(bounds%albedo,      "albedo",      grd)
+        call init_2d(bounds%z0m,         "z0m",         grd)
+        call init_2d(bounds%phis,        "phis",        grd)
+        call init_2d(bounds%lsm,         "lsm",         grd)
+        call init_2d(bounds%dust,        "dust",        grd)
+        call init_2d(bounds%so4,         "so4",         grd)
+        call init_2d(bounds%o3,          "o3",          grd)
 
         ! Scalars: `current` reflects the CONSTANT value; FILE readers for
         ! CO2/CH4/N2O/TSI/time_bp are Phase C, so nothing to read at init.
@@ -288,40 +300,63 @@ contains
         return
     end subroutine aeros_boundary_init
 
-    subroutine init_2d(fld, grd)
+    subroutine init_2d(fld, name, grd)
         implicit none
         type(aeros_bc_2d_t),    intent(inout) :: fld
+        character(len=*),       intent(in)    :: name
         type(aeros_grid_class), intent(in)    :: grd
 
         integer :: mm
 
         allocate(fld%buffer(grd%nlon, grd%nlat))
-        fld%buffer = 0.0_wp
+        fld%buffer  = 0.0_wp
+        fld%version = fld%version + 1
+
+        if (.not. fld%active) return
 
         select case (fld%kind)
+        case (BC_NONE)
+            ! The consumer keeps its own default.
+
         case (BC_CONSTANT)
             fld%buffer = fld%value
 
         case (BC_FILE)
             if (len_trim(fld%file) == 0 .or. len_trim(fld%varname) == 0) then
-                write(io_unit_err,*) "aeros_boundary_init:: BC_FILE with empty file/varname; leaving buffer zero"
-                return
+                write(io_unit_err,*) "aeros_boundary_init:: error: "//trim(name)// &
+                    "_kind = 1 (file) with an empty "//trim(name)//"_file / _varname."
+                error stop 1
             end if
             if (fld%is_monthly) then
                 allocate(fld%clim(grd%nlon, grd%nlat, 12))
-                do mm = 1, 12
-                    call aeros_bcinput_read_field(trim(fld%file), trim(fld%varname), &
-                                                  grd%lon, grd%lat, fld%clim(:,:,mm), &
-                                                  lon_name=trim(fld%lon_name), &
-                                                  lat_name=trim(fld%lat_name), itime=mm)
-                end do
+                if (is_zonal_table(fld)) then
+                    call read_zonal(fld, name, grd, fld%clim)
+                else
+                    do mm = 1, 12
+                        call aeros_bcinput_read_field(trim(fld%file), trim(fld%varname), &
+                                                      grd%lon, grd%lat, fld%clim(:,:,mm), &
+                                                      lon_name=trim(fld%lon_name), &
+                                                      lat_name=trim(fld%lat_name), itime=mm)
+                    end do
+                end if
                 fld%clim   = max(fld%floor, fld%clim*fld%scale)
                 fld%buffer = sum(fld%clim, dim=3)/12.0_wp
             else
-                call aeros_bcinput_read_field(trim(fld%file), trim(fld%varname), &
-                                              grd%lon, grd%lat, fld%buffer, &
-                                              lon_name=trim(fld%lon_name), &
-                                              lat_name=trim(fld%lat_name), itime=fld%itime)
+                if (is_zonal_table(fld)) then
+                    call read_zonal(fld, name, grd, fld%buffer)
+                else if (fld%itime > 0) then
+                    call aeros_bcinput_read_field(trim(fld%file), trim(fld%varname), &
+                                                  grd%lon, grd%lat, fld%buffer, &
+                                                  lon_name=trim(fld%lon_name), &
+                                                  lat_name=trim(fld%lat_name), itime=fld%itime)
+                else
+                    ! itime = 0: the time-mean of the file (aeros_bcinput's
+                    ! default when no slice is named).
+                    call aeros_bcinput_read_field(trim(fld%file), trim(fld%varname), &
+                                                  grd%lon, grd%lat, fld%buffer, &
+                                                  lon_name=trim(fld%lon_name), &
+                                                  lat_name=trim(fld%lat_name))
+                end if
                 fld%buffer = max(fld%floor, fld%buffer*fld%scale)
             end if
 
@@ -330,20 +365,87 @@ contains
             fld%buffer = 0.0_wp
 
         case default
-            write(io_unit_err,*) "aeros_boundary_init:: unknown BC kind ", fld%kind
+            write(io_unit_err,*) "aeros_boundary_init:: unknown "//trim(name)//"_kind ", fld%kind
             error stop 1
         end select
 
         return
     end subroutine init_2d
 
+    logical function is_zonal_table(fld) result(zonal)
+        ! A BC_FILE variable with no longitude dimension is a zonal table
+        ! (lat[,month]) already on the model latitudes.
+        implicit none
+        type(aeros_bc_2d_t), intent(in) :: fld
+        character(len=64), allocatable :: names(:)
+        integer :: i
+        call nc_dims(trim(fld%file), trim(fld%varname), names=names)
+        zonal = .TRUE.
+        do i = 1, size(names)
+            if (trim(names(i)) == trim(fld%lon_name)) zonal = .FALSE.
+        end do
+        deallocate(names)
+        return
+    end function is_zonal_table
+
+    subroutine read_zonal(fld, name, grd, out)
+        ! Read a zonal table -- (lat) for a single slice into out(:,:), or
+        ! (lat,month) into out(:,:,1:12) -- and broadcast it along longitude.
+        ! The table must be on the model latitudes: nlat rows (and 12 months).
+        implicit none
+        type(aeros_bc_2d_t),    intent(in)  :: fld
+        character(len=*),       intent(in)  :: name
+        type(aeros_grid_class), intent(in)  :: grd
+        real(wp),               intent(out) :: out(..)
+
+        integer, allocatable  :: dims(:)
+        real(wp), allocatable :: zm1(:), zm2(:,:)
+        integer :: ii, mm
+
+        call nc_dims(trim(fld%file), trim(fld%varname), dims=dims)
+
+        select rank (out)
+        rank (2)
+            if (size(dims) /= 1 .or. dims(1) /= grd%nlat) then
+                write(io_unit_err,*) "aeros_boundary_init:: error: zonal "//trim(name)// &
+                    " table must be (nlat) on the model grid, got dims ", dims
+                error stop 1
+            end if
+            allocate(zm1(grd%nlat))
+            call nc_read(trim(fld%file), trim(fld%varname), zm1)
+            do ii = 1, grd%nlon
+                out(ii, :) = zm1(:)
+            end do
+            deallocate(zm1)
+        rank (3)
+            if (size(dims) /= 2 .or. dims(1) /= grd%nlat .or. dims(2) /= 12) then
+                write(io_unit_err,*) "aeros_boundary_init:: error: zonal monthly "//trim(name)// &
+                    " table must be (nlat, 12) on the model grid, got dims ", dims
+                error stop 1
+            end if
+            allocate(zm2(grd%nlat, 12))
+            call nc_read(trim(fld%file), trim(fld%varname), zm2)
+            do mm = 1, 12
+                do ii = 1, grd%nlon
+                    out(ii, :, mm) = zm2(:, mm)
+                end do
+            end do
+            deallocate(zm2)
+        rank default
+            write(io_unit_err,*) "aeros_boundary_init:: read_zonal: unsupported rank"
+            error stop 1
+        end select
+
+        deallocate(dims)
+        return
+    end subroutine read_zonal
+
     subroutine aeros_boundary_refresh(bounds, doy)
         ! Refresh every 2D provider for the running day-of-year:
-        !   BC_CONSTANT  -- no-op (buffer holds `value`).
-        !   BC_FILE monthly -- daily interp of `clim` into `buffer`.
-        !   BC_FILE single -- no-op (buffer was read at init).
-        !   BC_EXTERNAL  -- no-op (host writes at cycle start; done outside
-        !                   this routine, in aeros_lib_step's imports copy).
+        !   BC_FILE monthly -- daily interp of `clim` into `buffer` (version bump).
+        !   everything else -- no-op (CONSTANT holds `value`; FILE single-slice
+        !                   was read at init; EXTERNAL is written by the host
+        !                   in aeros_lib_step's imports copy; NONE is empty).
         implicit none
         type(aeros_boundary_t), intent(inout) :: bounds
         real(wp),               intent(in)    :: doy
@@ -369,21 +471,20 @@ contains
         type(aeros_bc_2d_t), intent(inout) :: fld
         real(wp),            intent(in)    :: doy
 
+        if (.not. fld%active) return
         if (fld%kind /= BC_FILE) return
         if (.not. fld%is_monthly) return
         if (.not. allocated(fld%clim)) return
 
         call aeros_boundary_interp_monthly(fld%clim, doy, fld%buffer)
+        fld%version = fld%version + 1
 
         return
     end subroutine refresh_2d
 
     pure subroutine aeros_boundary_interp_monthly(clim, doy, out)
         ! Mid-month-centred linear cyclic interpolation of a monthly
-        ! (nlon,nlat,12) climatology to day-of-year `doy`. Shared kernel
-        ! matching aeros_land_set_albedo (aeros_land.f90:430-435),
-        ! aeros_radiation_set_dust (aeros_radiation.f90:496-504) and
-        ! rce_long's set_seasonal_sst.
+        ! (nlon,nlat,12) climatology to day-of-year `doy`.
         implicit none
         real(wp), intent(in)  :: clim(:,:,:)
         real(wp), intent(in)  :: doy
@@ -402,6 +503,20 @@ contains
 
         return
     end subroutine aeros_boundary_interp_monthly
+
+    pure function aeros_boundary_kind_name(kind) result(s)
+        implicit none
+        integer, intent(in) :: kind
+        character(len=8) :: s
+        select case (kind)
+        case (BC_NONE);     s = "none"
+        case (BC_CONSTANT); s = "constant"
+        case (BC_FILE);     s = "file"
+        case (BC_EXTERNAL); s = "external"
+        case default;       s = "?"
+        end select
+        return
+    end function aeros_boundary_kind_name
 
     subroutine aeros_boundary_end(bounds)
         implicit none

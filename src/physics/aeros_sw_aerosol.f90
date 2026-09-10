@@ -7,7 +7,8 @@ module aeros_sw_aerosol
     ! background, equally valid for present day, climate change and paleo.
     ! A dust optical-thickness field (CLIMBER-X's dust_ot; here the monthly
     ! maps of scripts/dust_ot_from_deposition.py from its fake_dust_* files)
-    ! adds to the background per column (aeros_radiation dust_file).
+    ! adds to the background per column (the &boundary dust provider,
+    ! applied to rad%dust_ot by aeros_boundary_apply).
     !
     ! Two effects, both from the SESAM fits (Petoukhov et al. 2000):
     !

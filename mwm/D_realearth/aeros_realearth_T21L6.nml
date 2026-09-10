@@ -41,7 +41,7 @@
 /
 
 &ocean
-    mode       = 0         ! prescribed SST (the seasonal table below)
+    mode       = 0         ! prescribed SST (&boundary sst: the seasonal ERA5 table)
     depth      = 10.0
     ocn_albedo = 0.06
 /
@@ -52,14 +52,15 @@
     snow_dt     = 5.0
 /
 
+&boundary
+    phis_ramp_days = 20.0    ! orography spin-up ramp (rce_long)
+/
+
 &rce
     nstep             = 26280
     print_every       = 8760
     l_diag            = .false.
     l_uniform_insol   = .false.
-    sst_seasonal_file = "input/sst_seasonal_2d.nc"
     monthly_out       = "mwm/D_realearth/output/aeros_realearth_T21L6.nc"
     mon_spinup_days   = 730.0
-    topo_file         = "/Users/alrobi001/data/era5/era5_orography.nc"
-    topo_ramp_days    = 20.0
 /

@@ -54,6 +54,9 @@ module aeros_bundles
         real(wp), allocatable :: evp(:,:)          ! evaporation [kg m-2 s-1]
         real(wp), allocatable :: lwu(:,:)          ! upward LW from surface [W m-2]
         real(wp), allocatable :: so4_load(:,:)     ! sulfate load [kg m-2]
+        real(wp), allocatable :: dust(:,:)         ! dust optical thickness [-]
+        real(wp), allocatable :: lsm(:,:)          ! land-sea mask / land fraction [0-1]
+        real(wp), allocatable :: phis(:,:)         ! surface geopotential [m2 s-2] (raw; band-limited by aeros)
 
         ! Year-boundary scalar fields. Re-read only when year_boundary = T.
         logical  :: year_boundary = .false.

@@ -229,26 +229,26 @@ $(objdir)/aeros_ocean.o: $(physdir)/aeros_ocean.f90 \
 							$(objdir)/aeros_defs.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
-# M2.x: real surface topography (orography). Returns the surface geopotential
-# phis on the model grid from an ERA5 file, via the bcinput regridder. A column
-# boundary field, archived with the physics; needs aeros_bcinput.
+# M2.x: real surface topography (orography): the spectral band-limit of the
+# phis provider buffer and the spin-up ramp. Needs aeros_spectral for the
+# analysis/synthesis round-trip; the field itself comes from aeros_boundary.
 $(objdir)/aeros_topography.o: $(physdir)/aeros_topography.f90 \
-							$(objdir)/aeros_defs.o $(objdir)/aeros_bcinput.o
+							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 # M2.x: land surface (feat/land). The second lower-boundary type -- land-sea
 # mask, bucket soil moisture, slab soil temperature -- coupled under the same
-# flux seam as the ocean. Reads the mask and albedo maps via the bcinput
-# regridder, so it needs aeros_bcinput; a column/point process otherwise.
+# flux seam as the ocean. The mask and bare albedo arrive from the lsm /
+# albedo boundary providers (aeros_boundary_apply); a column/point process.
 $(objdir)/aeros_land.o: $(physdir)/aeros_land.f90 \
-							$(objdir)/aeros_defs.o $(objdir)/aeros_bcinput.o
+							$(objdir)/aeros_defs.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
-# Boundary-provider abstraction (Wave 2 of the coupling API,
-# docs/coupling_api.md sec. 5, 7). Owns the (BC_CONSTANT / BC_FILE /
-# BC_EXTERNAL) providers for every lower-boundary or forcing field, and the
-# aeros_boundary_t bundle carried on aeros_class. Reads I/O-backed fields
-# through aeros_bcinput; namelist-populated through nml.
+# Boundary-provider abstraction (docs/coupling_api.md sec. 5, 7). Owns the
+# (BC_NONE / BC_CONSTANT / BC_FILE / BC_EXTERNAL) providers for every
+# lower-boundary or forcing field, and the aeros_boundary_t bundle carried
+# on aeros_class. Reads I/O-backed fields through aeros_bcinput (and ncio
+# for zonal tables); namelist-populated through nml.
 $(objdir)/aeros_boundary.o: $(physdir)/aeros_boundary.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_bcinput.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
@@ -293,7 +293,8 @@ $(objdir)/aeros.o: $(srcdir)/aeros.f90 \
 							$(objdir)/aeros_grid.o $(objdir)/aeros_state.o \
 							$(objdir)/aeros_vertical.o $(objdir)/aeros_timestep.o \
 							$(objdir)/aeros_boundary.o $(objdir)/aeros_diag_acc.o \
-							$(objdir)/aeros_bundles.o
+							$(objdir)/aeros_bundles.o $(objdir)/aeros_ocean.o \
+							$(objdir)/aeros_land.o $(objdir)/aeros_topography.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ###############################################

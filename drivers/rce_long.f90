@@ -12,13 +12,19 @@ program rce_long
     ! &aeros_moisture, &surface, &radiation, &clouds, &ocean, &land, &vdiff,
     ! &bd, ...; schema and calibrated defaults in input/aeros_defaults.nml) --
     ! and this driver owns only its `&rce` group: run length, report cadence,
-    ! the monthly-climatology and restart paths, the topography ramp, the
-    ! prescribed seasonal SST table and two diagnostic probes (uniform
-    ! insolation, analytic heating). Everything it reads back (dt, level
-    ! count, the enabled flags, doy0, ...) comes from `ams%par`, `ams%phys`
-    ! and `ams%ts%<sub>` -- there are no shadow copies. The time loop, the
-    ! daily SST / land-albedo refresh, the phis ramp, the restart calls and
-    ! the dumps stay here (Waves 4b-4d move them behind the library).
+    ! the monthly-climatology and restart paths and two diagnostic probes
+    ! (uniform insolation, analytic heating). Everything it reads back (dt,
+    ! level count, the enabled flags, doy0, ...) comes from `ams%par`,
+    ! `ams%phys` and `ams%ts%<sub>` -- there are no shadow copies.
+    !
+    ! Wave 4b: every prescribed field -- the seasonal SST table, the
+    ! land-sea mask and bare albedo, the dust and sulfate maps, the
+    ! orography -- is a boundary provider (&boundary, ams%bounds) read by
+    ! the library; this driver only refreshes the providers once a day
+    ! (aeros_boundary_refresh + aeros_boundary_apply, the cadence the old
+    ! set_seasonal_sst had) and ramps the band-limited orography in over
+    ! &boundary phis_ramp_days. The time loop, the restart calls and the
+    ! dumps stay here (Waves 4c-4d move them behind the library).
     !
     ! Each report prints, per level: global-mean T, the global max T with its
     ! (i,j) location, and the global min T -- the max-location wandering and a
@@ -36,14 +42,14 @@ program rce_long
     use aeros_timestep, only : aeros_timestep_step, aeros_timestep_diagnose, &
                                 aeros_timestep_enable_diag, aeros_timestep_set_phis, &
                                 aeros_timestep_set_qforce, aeros_timestep_write_restart
-    use aeros_topography, only : aeros_topography_load, aeros_topography_scale
-    use aeros_land,     only : aeros_land_set_albedo
-    use aeros_bcinput,  only : aeros_bcinput_read_field
+    use aeros_topography, only : aeros_topography_scale
+    use aeros_boundary, only : aeros_boundary_refresh, aeros_boundary_kind_name, BC_NONE
     use aeros_diag_acc, only : aeros_diag_acc_init_monthly, AEROS_DIAG_NMON
     use aeros,          only : aeros_class, aeros_lib_init, aeros_lib_finalize, &
-                                aeros_lib_restart_read, aeros_set_rce_warm
+                                aeros_lib_restart_read, aeros_set_rce_warm, &
+                                aeros_boundary_apply
     use nml,            only : nml_read
-    use ncio,           only : nc_create, nc_write_dim, nc_write, nc_read, nc_size, nc_ndims
+    use ncio,           only : nc_create, nc_write_dim, nc_write
 
     implicit none
 
@@ -77,16 +83,6 @@ program rce_long
     ! only at the end).
     character(len=512) :: restart_in = "", restart_out = ""
     integer  :: restart_interval
-    ! Real surface topography (gated on &physics l_topography): phis from
-    ! topo_file (ERA5 surface geopotential, m2 s-2), band-limited to the model
-    ! truncation and ramped in over topo_ramp_days (a pure function of elapsed
-    ! time, aeros_topography_scale, hence restart-safe).
-    character(len=512) :: topo_file = ""
-    real(wp) :: topo_ramp_days
-    ! Prescribed seasonal SST table ("" = off): sst(lon,lat,month) on the ERA5
-    ! grid or the legacy sst(lat,month) model-grid table, overriding the
-    ! analytic profile daily in prescribed-SST mode (&ocean mode = 0).
-    character(len=512) :: sst_seasonal_file = ""
     ! Diagnostic probes: flatten the insolation to its global mean (with the
     ! gradient-free IC), and the analytic Q(lat,sigma) heating [K/day] coupled
     ! on the in-solve seam (run with all physics off).
@@ -94,11 +90,14 @@ program rce_long
     real(wp) :: qforce_amp
 
     ! --- driver state ---------------------------------------------------------
-    logical  :: l_sst_seasonal = .FALSE.
-    real(wp), allocatable :: sst_clim(:,:,:)  ! (nlon, nlat, 12) prescribed SST BC [K]
+    ! The orography ramp (&physics l_topography): the band-limited full field
+    ! is the library's phis provider buffer (ams%bounds%phis%buffer, set by
+    ! aeros_boundary_apply); it is ramped in linearly over &boundary
+    ! phis_ramp_days (a pure function of elapsed time, aeros_topography_scale,
+    ! hence restart-safe) and fed to the dynamics as phis2.
     real(wp), allocatable :: phis2(:,:)       ! surface geopotential fed to the dynamics
-    real(wp), allocatable :: phis_full(:,:)   ! full (unramped) topography [m2 s-2]
     real(wp) :: tscale, tscale_prev           ! current / previous ramp factor
+    integer  :: nstep_day                     ! steps per day: the boundary refresh cadence
     real(wp) :: restart_time = 0.0_wp
     integer  :: n0 = 0                        ! absolute step offset (nonzero on restart)
     integer, parameter :: NMON = AEROS_DIAG_NMON
@@ -140,61 +139,20 @@ program rce_long
         " rce_long:: lid Brewer-Dobson w* ON  scale ", ams%ts%bd%scale, &
         "  per_K ", ams%ts%bd%per_k, "  t_ref ", ams%ts%bd%t_ref
     if (ams%phys%l_land) then
-        write(*,"(a,a)") " rce_long:: land-sea mask from ", trim(ams%ts%land%lsm_file)
-        write(*,"(a,i0,a,i0,a)") " rce_long:: land cells ", count(ams%ts%land%mask), &
-            " of ", ams%grd%nlon*ams%grd%nlat, " (mask threshold 0.5)"
+        write(*,"(a,a,a,a)") " rce_long:: land-sea mask provider ", &
+            trim(aeros_boundary_kind_name(ams%bounds%lsm%kind)), " ", trim(ams%bounds%lsm%file)
+        write(*,"(a,i0,a,i0,a,f4.2,a)") " rce_long:: land cells ", count(ams%ts%land%mask), &
+            " of ", ams%grd%nlon*ams%grd%nlat, " (mask threshold ", ams%ts%land%lsm_threshold, ")"
     end if
 
-    ! Prescribed seasonal SST (feat/seasonal): load the SST climatology into
-    ! sst_clim(nlon,nlat,12) and seed the surface at doy0. Only in prescribed-SST
-    ! mode -- in slab mode the SST is prognostic and aeros_ocean_step owns it.
-    ! Two input formats, dispatched on the `sst` variable's rank:
-    !   3D sst(lon,lat,month) on the ERA5 grid -> bilinearly regridded per month
-    !     (aeros_bcinput_read_field, itime=month); the full 2D field.
-    !   2D sst(lat,month) already on the model grid -> broadcast zonally (the
-    !     legacy aquaplanet table from make_seasonal_sst.jl).
-    if (len_trim(sst_seasonal_file) > 0) then
-        if (ams%ts%ocn%mode /= 0) then
-            write(*,"(a)") " rce_long:: WARNING sst_seasonal_file ignored -- "// &
-                "prescribed seasonal SST needs &ocean mode=0 (slab SST is prognostic)."
-        else
-            block
-                integer :: sst_rank, nmon_f, nlat_f, mm, ii
-                real(wp), allocatable :: sst_zm(:,:)
-                allocate(sst_clim(ams%grd%nlon, ams%grd%nlat, 12))
-                sst_rank = nc_ndims(trim(sst_seasonal_file), "sst")
-                if (sst_rank == 3) then
-                    ! ERA5-grid (lon,lat,month): regrid each month to the model grid.
-                    do mm = 1, 12
-                        call aeros_bcinput_read_field(trim(sst_seasonal_file), "sst", &
-                            ams%grd%lon, ams%grd%lat, sst_clim(:,:,mm), itime=mm)
-                    end do
-                    write(*,"(a,a)") " rce_long:: prescribed seasonal SST (2D, regridded) from ", &
-                        trim(sst_seasonal_file)
-                else
-                    ! Legacy model-grid zonal table (lat,month): broadcast over lon.
-                    nlat_f = nc_size(trim(sst_seasonal_file), "lat")
-                    nmon_f = nc_size(trim(sst_seasonal_file), "month")
-                    if (nlat_f /= ams%grd%nlat .or. nmon_f /= 12) then
-                        write(*,"(a,i0,a,i0,a)") " rce_long:: error: sst_seasonal_file is (", &
-                            nlat_f, " lat, ", nmon_f, " month), expected (nlat, 12) on the model grid"
-                        error stop 1
-                    end if
-                    allocate(sst_zm(ams%grd%nlat, 12))
-                    call nc_read(trim(sst_seasonal_file), "sst", sst_zm)
-                    do mm = 1, 12
-                        do ii = 1, ams%grd%nlon
-                            sst_clim(ii, :, mm) = sst_zm(:, mm)
-                        end do
-                    end do
-                    deallocate(sst_zm)
-                    write(*,"(a,a)") " rce_long:: prescribed seasonal SST (zonal) from ", &
-                        trim(sst_seasonal_file)
-                end if
-                l_sst_seasonal = .TRUE.
-                call set_seasonal_sst(ams%ts%rad%doy0)   ! seed month at the start day
-            end block
-        end if
+    ! Prescribed SST (&ocean mode = 0): the sst provider (&boundary; the
+    ! seasonal ERA5 table by default, refreshed daily below) has already
+    ! been applied to ams%ts%ocn%sst by aeros_lib_init; BC_NONE leaves the
+    ! ocean module's analytic profile. In slab mode the SST is prognostic and
+    ! aeros_ocean_step owns it, whatever the provider says.
+    if (ams%ts%ocn%mode == 0 .and. ams%bounds%sst%kind /= BC_NONE) then
+        write(*,"(a,a,a,a)") " rce_long:: prescribed SST provider ", &
+            trim(aeros_boundary_kind_name(ams%bounds%sst%kind)), " ", trim(ams%bounds%sst%file)
     end if
 
     ! Per-term heating diagnostics: split the forward-split physics back into
@@ -230,48 +188,29 @@ program rce_long
     end if
 
     ! Surface geopotential (lower boundary). Aquaplanet phis = 0 by default; with
-    ! l_topography the real orography is read once and ramped in over the run.
-    allocate(phis2(ams%grd%nlon, ams%grd%nlat));     phis2 = 0.0_wp
-    allocate(phis_full(ams%grd%nlon, ams%grd%nlat)); phis_full = 0.0_wp
+    ! l_topography the phis provider (ERA5 orography by default) has been read
+    ! and band-limited to the model truncation by the library
+    ! (aeros_boundary_apply; ams%bounds%phis%buffer holds the band-limited
+    ! field) and is ramped in here over phis_ramp_days.
+    allocate(phis2(ams%grd%nlon, ams%grd%nlat)); phis2 = 0.0_wp
     if (ams%phys%l_topography) then
-        call aeros_topography_load(topo_file, ams%grd%lon, ams%grd%lat, phis_full)
-        write(*,"(a,a)") " rce_long:: topography from ", trim(topo_file)
-        write(*,"(a,es11.3,a,es11.3)") " rce_long:: raw   phis min ", &
-            minval(phis_full), "  max ", maxval(phis_full)
-        ! Spectrally truncate to the model resolution. A spectral core can
-        ! only carry the surface geopotential at its resolved scales: the raw
-        ! interpolated field still has grid-scale structure at coastlines and
-        ! mountain flanks, which aliases in the transforms and rings (Gibbs),
-        ! destabilizing the lowest layer. Band-limiting via one analysis ->
-        ! synthesis round-trip (SHTns truncates at the model truncation) gives
-        ! the smooth orography the dynamics is consistent with. Standard
-        ! spectral-model practice.
-        block
-            complex(wp_sh), allocatable :: phis_lm(:)
-            real(dp),       allocatable :: gwork(:,:)
-            allocate(phis_lm(ams%pool%sht(1)%nlm))
-            allocate(gwork(ams%grd%nlon, ams%grd%nlat))
-            gwork = real(phis_full, dp)
-            call aeros_sht_analysis(ams%pool%sht(1), gwork, phis_lm)   ! grid -> spectral (overwrites gwork)
-            call aeros_sht_synthesis(ams%pool%sht(1), phis_lm, gwork)  ! spectral -> band-limited grid
-            phis_full = real(gwork, wp)
-            deallocate(phis_lm, gwork)
-        end block
+        write(*,"(a,a,a,a)") " rce_long:: topography provider ", &
+            trim(aeros_boundary_kind_name(ams%bounds%phis%kind)), " ", trim(ams%bounds%phis%file)
         write(*,"(a,i0,a,es11.3,a,es11.3,a,f6.1,a)") " rce_long:: T", ams%par%trunc, &
-            "   phis min ", minval(phis_full), "  max ", maxval(phis_full), " m2/s2   ramp ", &
-            topo_ramp_days, " days"
+            "   phis min ", minval(ams%bounds%phis%buffer), "  max ", maxval(ams%bounds%phis%buffer), &
+            " m2/s2   ramp ", ams%bounds%phis_ramp_days, " days"
         ! Dump the band-limited orography on the model grid for a visual sanity
         ! check (correct continents/mountains, sane magnitude).
         call nc_create("output/rce_phis.nc")
         call nc_write_dim("output/rce_phis.nc", "lon", x=ams%grd%lon, units="degrees_east")
         call nc_write_dim("output/rce_phis.nc", "lat", x=ams%grd%lat, units="degrees_north")
-        call nc_write("output/rce_phis.nc", "phis", phis_full, dim1="lon", dim2="lat", &
+        call nc_write("output/rce_phis.nc", "phis", ams%bounds%phis%buffer, dim1="lon", dim2="lat", &
                       units="m2 s-2", long_name="surface geopotential (band-limited)")
     end if
     ! Initial feed at t = 0 (scale = 0 while ramping, so the run starts flat).
-    tscale      = aeros_topography_scale(ams%phys%l_topography, 0.0_wp, topo_ramp_days)
+    tscale      = aeros_topography_scale(ams%phys%l_topography, 0.0_wp, ams%bounds%phis_ramp_days)
     tscale_prev = tscale
-    phis2 = tscale*phis_full
+    phis2 = tscale*ams%bounds%phis%buffer
     call aeros_timestep_set_phis(ams%ts, phis2)
 
     ! Diagnostic prescribed heating: an analytic Q(lat,sigma), equatorial and
@@ -341,23 +280,25 @@ program rce_long
             " rce_long:: WARNING monthly_out set but &radiation seasonal=.FALSE. -- "// &
             "insolation is annual-mean, so all months bin the same forcing."
     end if
+    nstep_day = max(1, nint(86400.0_wp/ams%par%dt))
     do n = n0+1, n0+nstep
-        ! Prescribed seasonal SST (feat/seasonal): refresh the surface once a day
-        ! from the SST(lat,month) climatology at the running day-of-year, before
-        ! the step consumes it in the surface fluxes and radiation.
-        if (l_sst_seasonal .and. mod(n, max(1, nint(86400.0_wp/ams%par%dt))) == 0) &
-            call set_seasonal_sst(ams%ts%rad%doy0 + real(n,wp)*ams%par%dt/86400.0_wp)
-        ! Seasonal bare land albedo, same daily cadence (no-op unless enabled).
-        if (ams%phys%l_land .and. ams%ts%land%albedo_seasonal .and. mod(n, max(1, nint(86400.0_wp/ams%par%dt))) == 0) &
-            call aeros_land_set_albedo(ams%ts%land, ams%ts%rad%doy0 + real(n,wp)*ams%par%dt/86400.0_wp)
+        ! Boundary providers: once a day, interpolate the monthly fields (SST,
+        ! bare land albedo, dust) to the running day-of-year and hand every
+        ! buffer to its consumer, before the step reads them in the surface
+        ! fluxes and radiation (the cadence and the doy0 + n dt argument of the
+        ! old set_seasonal_sst / aeros_land_set_albedo).
+        if (mod(n, nstep_day) == 0) then
+            call aeros_boundary_refresh(ams%bounds, ams%ts%rad%doy0 + real(n,wp)*ams%par%dt/86400.0_wp)
+            call aeros_boundary_apply(ams)
+        end if
         ! Advance the topography ramp: a pure function of absolute elapsed time
         ! n*dt, so it is restart-safe -- a run resumed at n0 continues the ramp at
         ! the right amplitude. Only re-set phis while the factor is still changing
         ! (during the ramp); once it reaches 1 the surface is constant.
-        if (ams%phys%l_topography .and. topo_ramp_days > 0.0_wp .and. tscale_prev < 1.0_wp) then
-            tscale = aeros_topography_scale(.true., real(n,wp)*ams%par%dt, topo_ramp_days)
+        if (ams%phys%l_topography .and. ams%bounds%phis_ramp_days > 0.0_wp .and. tscale_prev < 1.0_wp) then
+            tscale = aeros_topography_scale(.true., real(n,wp)*ams%par%dt, ams%bounds%phis_ramp_days)
             if (tscale /= tscale_prev) then
-                phis2 = tscale*phis_full
+                phis2 = tscale*ams%bounds%phis%buffer
                 call aeros_timestep_set_phis(ams%ts, phis2)
                 tscale_prev = tscale
             end if
@@ -426,8 +367,7 @@ program rce_long
     if (len_trim(rh_out) > 0) call dump_rh(trim(rh_out))
     if (len_trim(monthly_out) > 0 .and. .not. blew_up) call dump_monthly(trim(monthly_out))
 
-    if (allocated(sst_clim)) deallocate(sst_clim)
-    deallocate(phis2, phis_full)
+    deallocate(phis2)
     call aeros_lib_finalize(ams, ierr)
 
 contains
@@ -621,26 +561,6 @@ contains
         deallocate(rh_zm, cf_zm, t_zm, q_zm, p_zm, u_zm, v_zm, cover, latout, levout)
         return
     end subroutine dump_rh
-
-    subroutine set_seasonal_sst(day)
-        ! Set the prescribed SST from the sst_clim(lon,lat,month) climatology at
-        ! day-of-year `day`. Monthly values are taken at mid-month centers
-        ! ((m-0.5)/12 of the year) and linearly interpolated cyclically, so the
-        ! surface carries a smooth seasonal cycle in phase with the insolation.
-        ! (A zonally-symmetric table is stored broadcast over lon at load, so this
-        ! one path serves both the 2D and the legacy aquaplanet cases.)
-        real(wp), intent(in) :: day
-        real(wp), parameter :: DAYS_YR = 365.0_wp
-        real(wp) :: dyr, x, w
-        integer  :: im0, m0, m1
-        dyr = modulo(day, DAYS_YR)
-        x   = dyr/DAYS_YR*12.0_wp - 0.5_wp        ! mid-month-centered month coordinate
-        im0 = floor(x)
-        w   = x - real(im0, wp)
-        m0  = modulo(im0,     12) + 1             ! 1..12
-        m1  = modulo(im0 + 1, 12) + 1
-        ams%ts%ocn%sst(:,:) = (1.0_wp - w)*sst_clim(:,:,m0) + w*sst_clim(:,:,m1)
-    end subroutine set_seasonal_sst
 
     subroutine accum_monthly(n)
         ! Bin the current zonal-mean state into its calendar-month slot
@@ -970,9 +890,6 @@ contains
         call nml_read(nmlfile, "rce", "restart_in",        restart_in,        defaults_file=defaults_file)
         call nml_read(nmlfile, "rce", "restart_out",       restart_out,       defaults_file=defaults_file)
         call nml_read(nmlfile, "rce", "restart_interval",  restart_interval,  defaults_file=defaults_file)
-        call nml_read(nmlfile, "rce", "topo_file",         topo_file,         defaults_file=defaults_file)
-        call nml_read(nmlfile, "rce", "topo_ramp_days",    topo_ramp_days,    defaults_file=defaults_file)
-        call nml_read(nmlfile, "rce", "sst_seasonal_file", sst_seasonal_file, defaults_file=defaults_file)
         call nml_read(nmlfile, "rce", "l_uniform_insol",   l_uniform_insol,   defaults_file=defaults_file)
         call nml_read(nmlfile, "rce", "l_qforce",          l_qforce,          defaults_file=defaults_file)
         call nml_read(nmlfile, "rce", "qforce_amp",        qforce_amp,        defaults_file=defaults_file)

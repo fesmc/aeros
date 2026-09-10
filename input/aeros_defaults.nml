@@ -275,14 +275,16 @@
     ! Brewer-Dobson term on; the boundary-layer scheme, land and topography
     ! are case choices (mwm/D_realearth turns them on). A dry-core run
     ! (par/held_suarez.nml) switches everything off explicitly.
-    ! l_topography is read by the rce_long driver (its &rce topo_file /
-    ! topo_ramp_days); the library phis provider is Wave 4b.
+    ! The flags also gate the boundary providers (&boundary): l_land reads
+    ! and applies lsm / albedo, l_rad dust / so4, l_topography phis (off =
+    ! flat, whatever the provider holds), and the sst provider is applied in
+    ! &ocean mode = 0 when the surface or radiation is on.
     l_surf        = .TRUE.      ! surface fluxes (&surface)
     l_cnv         = .TRUE.      ! moist convection (&aeros_moisture conv_*)
     l_cnd         = .TRUE.      ! large-scale condensation (&aeros_moisture)
     l_rad         = .TRUE.      ! radiation (&radiation)
-    l_land        = .FALSE.     ! land surface (&land); off = all-ocean aquaplanet
-    l_topography  = .FALSE.     ! real orography (rce_long &rce topo_*); off = flat
+    l_land        = .FALSE.     ! land surface (&land; &boundary lsm / albedo); off = all-ocean aquaplanet
+    l_topography  = .FALSE.     ! real orography (&boundary phis); off = flat
     l_seaice      = .FALSE.     ! thermodynamic sea ice (&ocean ice_*; needs mode=1)
     l_cloud_prog  = .FALSE.     ! prognostic cloud fraction (&aeros_cloud); forces &radiation clouds on
     l_bd          = .TRUE.      ! lid Brewer-Dobson w* (&bd; also needs a file)
@@ -427,19 +429,19 @@
 
 &land
     ! Land surface (src/physics/aeros_land.f90). Read by aeros_land_load; the
-    ! switch is &physics l_land (off -> all-ocean; the files are then not
-    ! read). Files are ERA5 climatologies; the tuning is the coupled real-Earth
-    ! calibration (formerly rce_defaults.nml).
-    lsm_file         = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_lsm_1991-2020_clim.nc"
-    albedo_file      = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_fal_1991-2020_clim.nc"
-    lsm_threshold    = 0.5      ! land where lsm >= threshold
+    ! switch is &physics l_land (off -> all-ocean). The land-sea mask and the
+    ! bare albedo are boundary fields (&boundary lsm / albedo: the ERA5
+    ! climatologies by default, or a coupler push); this group holds the
+    ! process tuning -- the coupled real-Earth calibration (formerly
+    ! rce_defaults.nml).
+    lsm_threshold    = 0.5      ! land where the lsm provider's fraction >= threshold
     w_field_capacity = 0.15     ! bucket capacity [m]
     w_crit           = -1.0     ! beta knee [m]; < 0 = 0.75 * w_field_capacity
     ! Effective seasonal soil heat capacity [J m-2 K-1] (~2.5e6 J m-3 K-1 over
     ! the ~2 m annual penetration depth). Recalibrated 2026-09-06 with the
     ! seasonal albedo: 2e6 -> 5e6 keeps JJA NH-land T within ~1 K of ERA5.
     c_soil           = 5.0e6
-    land_albedo      = 0.20     ! fallback land albedo [-] (no albedo file)
+    land_albedo      = 0.20     ! bare land albedo [-] when &boundary albedo_kind = -1 (no provider)
     c_h_land         = 1.5e-3   ! land sensible exchange coefficient
     c_e_land         = 1.5e-3   ! land moisture exchange coefficient
     freeze_floor     = .FALSE.  ! clamp t_soil >= T0 (no snow)
@@ -449,10 +451,6 @@
     ! 1 = off. 0.1 since 2026-09-08: the bucket evaporated 17-24 W/m2 from
     ! frozen NH winter land (ERA5 4-6), moistening the winter cap.
     beta_frozen      = 0.1
-    ! Monthly ERA5 fal as the bare land albedo (interpolated daily) instead of
-    ! its annual mean, which is snow-contaminated (0.36 at 65N) and leaves
-    ! summer high-latitude land ~6 K too cold.
-    albedo_seasonal  = .TRUE.
 /
 
 &radiation
@@ -482,26 +480,17 @@
     ! validate_era5 to close the clean 40-60S ocean clear-sky surface SW. 0 = off.
     aer_ot   = 0.12
     aer_im   = 0.02
-    ! Sulfate direct effect (CLIMBER-X l_so4_de, Bauer et al. 2008): the CMIP6
-    ! historical ensemble-mean SO4 load (CLIMBER-X input, 5x5, annual 1850-2014,
-    ! time = year - 2000) at so4_year; so4_file = "" and so4_const = 0 for
-    ! paleo. Present-day calibration year 2003 (ERA5 1991-2020 mid-point).
-    ! Read only when l_rad is on.
-    so4_file  = "/Users/alrobi001/models/climber-x/input/so4_historical_CMIP6_ensmean_ann_5x5.nc"
-    so4_year  = 2003
-    so4_const = 0.0
+    ! Sulfate direct effect (CLIMBER-X l_so4_de, Bauer et al. 2008) on the
+    ! sulfate load of the &boundary so4 provider (the CMIP6 historical
+    ! ensemble mean at a calendar year by default; so4_kind = -1 or a
+    ! so4_kind = 0 / so4_value = 0 constant for paleo).
     ! Sulfate indirect effect (CLIMBER-X l_so4_ie): liquid cloud water x
     ! f_mod^(1/3) from the sulfate number at cloud base (no-op at so4 = 0).
     so4_indirect = .true.
-    ! Dust optical thickness maps (monthly, 5x5) added to the background
-    ! aerosol: scripts/dust_ot_from_deposition.py on CLIMBER-X's fake_dust_*
-    ! deposition (Lambert et al. 2015 present day here; the _lgm file for the
-    ! LGM). "" = none. dust_scale 0.3 (2026-09-09): the inversion assumes the
-    ! fine, transported mode everywhere, but source-region deposition is coarse
-    ! fall-out, so the unscaled map is ~3x ERA5's Saharan clear-sky effect.
-    dust_file  = "input/dust_ot_lambert2015_present.nc"
-    dust_scale = 0.3
-    dust_im    = 0.01     ! dust imaginary refractive index (CLIMBER-X ars_im)
+    ! Dust optical thickness of the &boundary dust provider (monthly maps,
+    ! scaled there by dust_scale) added to the background aerosol per column;
+    ! dust_im its imaginary refractive index (CLIMBER-X ars_im).
+    dust_im    = 0.01
     tsi      = 1361.0
     seasonal = .FALSE.
     interval = 21600.0
@@ -598,31 +587,43 @@
 
 &boundary
     ! Boundary providers (docs/coupling_api.md sec 7,
-    ! src/physics/aeros_boundary.f90). One provider per lower-boundary /
-    ! forcing field: kind = 0 (BC_CONSTANT), 1 (BC_FILE), 2 (BC_EXTERNAL).
-    !
-    ! Wave-3.b scaffolds the default file/varname/scale/itime for every
-    ! provider that has a matching field today (albedo, phis, lsm, dust,
-    ! so4) so a per-case namelist that wants the bounds%<field>%buffer path
-    ! populated has only to flip <field>_kind = 1. Every <field>_kind stays
-    ! 0 (BC_CONSTANT, value=0) at default so the pre-wave-3 physics readers
-    ! -- aeros_land_init reading albedo_file, aeros_radiation_{so4,dust}_
-    ! load reading rad%so4_file / rad%dust_file, aeros_topography_load
-    ! reading rce_long's topo_file -- keep running and are the bit-for-bit
-    ! source of truth. Wave 4 (rce_long -> aeros_lib_step migration) flips
-    ! the physics-module consumers to bounds%<field>%buffer and this file's
-    ! defaults to <field>_kind = 1 in the same commit series.
+    ! src/physics/aeros_boundary.f90): the ONE source of every externally
+    ! prescribed field. One provider per lower-boundary / forcing field:
+    !   kind = -1 (BC_NONE)      no provider; the consumer keeps its own
+    !                            default (analytic SST, scalar land_albedo,
+    !                            all ocean, no dust / sulfate, flat surface)
+    !   kind =  0 (BC_CONSTANT)  uniform X_value
+    !   kind =  1 (BC_FILE)      X_file / X_varname regridded onto the model
+    !                            grid: 12 monthly slices interpolated to the
+    !                            day when X_is_monthly, else the slice X_itime
+    !                            (0 = the time-mean of the file); a variable
+    !                            with no longitude dimension is a zonal table
+    !                            (lat[,month]) on the model latitudes and is
+    !                            broadcast along longitude
+    !   kind =  2 (BC_EXTERNAL)  pushed by a coupler through
+    !                            aeros_lib_step(imports=...)
+    ! The library hands every buffer to its consumer (aeros_boundary_apply):
+    ! sst -> the prescribed SST (&ocean mode = 0), lsm / albedo -> the land
+    ! mask and bare albedo (&physics l_land), dust / so4 -> the radiation
+    ! aerosol maps (l_rad), phis -> the orography, band-limited to the model
+    ! truncation (l_topography). A provider whose consumer is off is neither
+    ! read nor applied, so the calibrated real-Earth files named below cost
+    ! an aquaplanet or dry-core run nothing.
     !
     ! Per-2D-provider keys:
     !   X_kind, X_file, X_varname, X_lon_name ("longitude"), X_lat_name
-    !   ("latitude"), X_is_monthly, X_itime (single-slice), X_value
-    !   (CONSTANT uniform fill), X_scale (post-read multiplier), X_floor
-    !   (post-read clamp; keep at large negative to disable).
+    !   ("latitude"), X_is_monthly, X_itime (single-slice; 0 = time-mean),
+    !   X_value (CONSTANT uniform fill), X_scale (post-read multiplier),
+    !   X_floor (post-read clamp, max(X_floor, X_scale*x); keep at large
+    !   negative to disable).
     ! Per-scalar-provider keys:
     !   X_kind, X_value, X_file, X_year.
 
-    sst_kind         = 0
-    sst_file         = ""
+    ! Prescribed SST (&ocean mode = 0): the ERA5 skt-derived seasonal table
+    ! (scripts; ocean-masked, land-filled), refreshed daily. -1 = the
+    ! analytic APE profile of &ocean (the aquaplanet control).
+    sst_kind         = 1
+    sst_file         = "input/sst_seasonal_2d.nc"
     sst_varname      = "sst"
     sst_lon_name     = "longitude"
     sst_lat_name     = "latitude"
@@ -676,15 +677,11 @@
     q_skin_land_scale      = 1.0
     q_skin_land_floor      = -1.0e30
 
-    ! Land forecast albedo (ERA5 fal): 12-month climatology. Path and varname
-    ! match aeros_land's albedo_file default (&land above).
-    ! Kind stays BC_CONSTANT here: the physics consumer (aeros_land) is not
-    ! wired to read from bounds%albedo%buffer yet -- that wire-up is Wave 4
-    ! alongside the driver -> aeros_lib_step migration (rce_long still calls
-    ! aeros_land_init(land, grd, l_land), which reads albedo_file directly).
-    ! Per-case files that want the bounds path populated in advance override
-    ! albedo_kind = 1 and albedo_file = "..." locally.
-    albedo_kind       = 0
+    ! Bare land albedo (&physics l_land): the monthly ERA5 forecast albedo
+    ! (fal), interpolated daily -- its annual mean is snow-contaminated (0.36
+    ! at 65N) and leaves summer high-latitude land ~6 K too cold. -1 = the
+    ! scalar &land land_albedo.
+    albedo_kind       = 1
     albedo_file       = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_fal_1991-2020_clim.nc"
     albedo_varname    = "fal"
     albedo_lon_name   = "longitude"
@@ -706,49 +703,47 @@
     z0m_scale      = 1.0
     z0m_floor      = -1.0e30
 
-    ! Surface geopotential (ERA5 z, m2 s-2, single slice). Path/varname match
-    ! rce_long's &rce topo_file default and aeros_topography_load convention.
-    ! Kind stays BC_CONSTANT: rce_long's l_topography path still calls
-    ! aeros_topography_load(topo_file, ...) directly -- Wave 4 flips both
-    ! the driver over to bounds%phis%buffer and this default to kind = 1.
-    phis_kind       = 0
+    ! Surface geopotential (&physics l_topography): ERA5 z [m2 s-2] -- already
+    ! a geopotential, no multiply by g -- time-mean of the (single-record)
+    ! file, spectrally band-limited to the model truncation by the library.
+    phis_kind       = 1
     phis_file       = "/Users/alrobi001/data/era5/era5_orography.nc"
     phis_varname    = "z"
     phis_lon_name   = "longitude"
     phis_lat_name   = "latitude"
     phis_is_monthly = .FALSE.
-    phis_itime      = 1
+    phis_itime      = 0
     phis_value      = 0.0
     phis_scale      = 1.0
     phis_floor      = -1.0e30
-    ! Surface-geopotential spin-up ramp [days] (rce_long topo_ramp_days): phis
-    ! scaled linearly from 0 to full over this many days; 0 = none. Read into
-    ! bounds%phis_ramp_days only -- the ramp consumer arrives with the phis
-    ! provider (Wave 4b).
-    phis_ramp_days  = 0.0
+    ! Orography spin-up ramp [days], applied by a driver (rce_long): the
+    ! dynamics sees phis scaled linearly from 0 to full over this many days
+    ! (aeros_topography_scale, a pure function of elapsed time, hence
+    ! restart-safe) to spread the spin-up shock; 0 = full from t = 0. The
+    ! library itself always applies the full field.
+    phis_ramp_days  = 20.0
 
-    ! Land-sea mask (ERA5 lsm, single slice). Path/varname match aeros_land's
-    ! lsm_file default (&land above). Kind stays BC_CONSTANT (see the
-    ! albedo note above for the wave-3/wave-4 sequencing).
-    lsm_kind       = 0
+    ! Land-sea mask (&physics l_land): the ERA5 land fraction, time-mean of
+    ! the file, thresholded at &land lsm_threshold.
+    lsm_kind       = 1
     lsm_file       = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_lsm_1991-2020_clim.nc"
     lsm_varname    = "lsm"
     lsm_lon_name   = "longitude"
     lsm_lat_name   = "latitude"
     lsm_is_monthly = .FALSE.
-    lsm_itime      = 1
+    lsm_itime      = 0
     lsm_value      = 0.0
     lsm_scale      = 1.0
     lsm_floor      = -1.0e30
 
-    ! Dust optical thickness (Lambert 2015, monthly). File/varname match
-    ! aeros_radiation's dust_file default (&radiation above); dust_scale =
-    ! 0.3 matches the &radiation default (present-day dust calibration,
-    ! 2026-09-09). Kind stays BC_CONSTANT here: the radiation
-    ! kernel still reads rad%dust_ot, populated by aeros_radiation_dust_load
-    ! -- Wave 4 flips it. dust_floor = 0 matches the max(0, ...) clamp in
-    ! aeros_radiation_dust_load.
-    dust_kind       = 0
+    ! Dust optical thickness (&physics l_rad): monthly 5x5 maps from
+    ! scripts/dust_ot_from_deposition.py on CLIMBER-X's fake_dust_*
+    ! deposition (Lambert et al. 2015 present day here; the _lgm file for
+    ! the LGM), interpolated daily, clamped at 0. dust_scale 0.3
+    ! (2026-09-09): the inversion assumes the fine, transported mode
+    ! everywhere, but source-region deposition is coarse fall-out, so the
+    ! unscaled map is ~3x ERA5's Saharan clear-sky effect. -1 = no dust.
+    dust_kind       = 1
     dust_file       = "input/dust_ot_lambert2015_present.nc"
     dust_varname    = "dust_ot"
     dust_lon_name   = "lon"
@@ -759,12 +754,13 @@
     dust_scale      = 0.3
     dust_floor      = 0.0
 
-    ! Sulfate load (CMIP6 CLIMBER-X ensmean, one record per year from 1850).
-    ! File/varname match aeros_radiation's so4_file default (&radiation above).
-    ! so4_itime = so4_year - 1850 + 1 = 2003 - 1850 + 1 = 154, matching
-    ! &radiation so4_year = 2003. Kind stays BC_CONSTANT: rad%so4_map is
-    ! populated directly by aeros_radiation_so4_load today.
-    so4_kind       = 0
+    ! Sulfate load [kg m-2] (&physics l_rad; the direct and indirect effects
+    ! of &radiation): the CMIP6 historical ensemble mean (CLIMBER-X input,
+    ! 5x5, one annual record per year 1850-2014), clamped at 0. The record
+    ! is selected by index: so4_itime = year - 1850 + 1, i.e. 154 = 2003, the
+    ! present-day calibration year (ERA5 1991-2020 mid-point). Paleo: -1
+    ! (none) or a constant, so4_kind = 0 with so4_value.
+    so4_kind       = 1
     so4_file       = "/Users/alrobi001/models/climber-x/input/so4_historical_CMIP6_ensmean_ann_5x5.nc"
     so4_varname    = "so4"
     so4_lon_name   = "lon"
@@ -844,20 +840,11 @@
     restart_out      = ""
     restart_interval = 0
 
-    ! Real surface topography (orography), gated on &physics l_topography:
-    ! phis read from topo_file (ERA5 surface geopotential, m2 s-2), spectrally
-    ! band-limited to the model truncation, dumped to output/rce_phis.nc and
-    ! ramped in linearly over topo_ramp_days (0 = full at t = 0) to spread the
-    ! spin-up shock. The ramp is a pure function of elapsed time, hence
-    ! restart-safe.
-    topo_file        = "/Users/alrobi001/data/era5/era5_orography.nc"
-    topo_ramp_days   = 20.0
-
-    ! Prescribed seasonal SST climatology, overriding the analytic profile
-    ! daily in prescribed-SST mode (&ocean mode = 0): sst(lon,lat,month) on the
-    ! ERA5 grid (regridded) or the legacy sst(lat,month) model-grid table
-    ! (scripts/make_seasonal_sst.jl). "" = off (the static analytic profile).
-    sst_seasonal_file = ""
+    ! The prescribed fields this driver used to read itself -- the orography
+    ! (topo_file) and the seasonal SST table (sst_seasonal_file) -- are
+    ! &boundary providers since Wave 4b (phis, sst); the orography ramp is
+    ! &boundary phis_ramp_days. With l_topography the band-limited orography
+    ! is dumped to output/rce_phis.nc.
 
     ! Diagnostic probes. l_uniform_insol flattens the insolation to its global
     ! mean (no meridional gradient; with &aeros l_nonrotating the single-column
