@@ -184,7 +184,8 @@ module aeros_defs
         ! the tuning (~20% slower transforms). The two are NOT bit-identical
         ! (round-off-level differences in analysis/synthesis), and "cache" can
         ! itself pick a different algorithm on a reload than on a fresh tune, so
-        ! "quick" is the reproducible choice and what rce_long uses.
+        ! "quick" is the reproducible choice and the schema default
+        ! (input/aeros_defaults.nml, Wave 4a.2); par/held_suarez.nml pins "cache".
         character(len=8) :: sht_mode = "cache"
         ! -- Time scheme (src/dynamics/aeros_timestep.f90, "The Lorenz N-cycle").
         ! "leapfrog": the RAW-filtered semi-implicit leapfrog (three time levels,

@@ -1,17 +1,24 @@
 program rce_long
     ! Long coupled radiative-convective integration, instrumented, for chasing
-    ! the lowest-layer hot-spot instability (m2_handoff.md task #7). This is the
-    ! scratch driver test_rce.f90 refers to but does not commit: same physics
-    ! stack, but run for model months with a per-level T trajectory so the blow
-    ! up can be localized in level, space and time, and with every relevant knob
-    ! exposed through a namelist so the hypothesis matrix can be run without
-    ! recompiling.
+    ! the lowest-layer hot-spot instability (m2_handoff.md task #7) and, since
+    ! feat/seasonal, the real-Earth climatology harness (mwm/D_realearth): run
+    ! for model years with a per-level T trajectory so a blow-up can be
+    ! localized in level, space and time, second-half diabatic/eddy
+    ! accumulators, and a monthly climatology dump for the ERA5 comparison.
     !
-    ! Namelist group "rce" (file = arg 1, default rce.nml; all optional):
-    !   trunc, nlev, nstep, dt, tau_diff, ndiff, eps_filter, raw_alpha
-    !   l_surf, l_cnv, l_cnd, l_rad, l_sponge      physics toggles
-    !   conv_tau, c_h, c_e, gust_speed             scheme knobs
-    !   print_every                                trajectory cadence [steps]
+    ! Wave 4a.2 of the coupling API (docs/coupling_api.md sec. 5, 8, 14): the
+    ! model is initialised through aeros_lib_init from ONE namelist file --
+    ! every dynamics / physics knob in its subsystem group (&aeros, &physics,
+    ! &aeros_moisture, &surface, &radiation, &clouds, &ocean, &land, &vdiff,
+    ! &bd, ...; schema and calibrated defaults in input/aeros_defaults.nml) --
+    ! and this driver owns only its `&rce` group: run length, report cadence,
+    ! the monthly-climatology and restart paths, the topography ramp, the
+    ! prescribed seasonal SST table and two diagnostic probes (uniform
+    ! insolation, analytic heating). Everything it reads back (dt, level
+    ! count, the enabled flags, doy0, ...) comes from `ams%par`, `ams%phys`
+    ! and `ams%ts%<sub>` -- there are no shadow copies. The time loop, the
+    ! daily SST / land-albedo refresh, the phis ramp, the restart calls and
+    ! the dumps stay here (Waves 4b-4d move them behind the library).
     !
     ! Each report prints, per level: global-mean T, the global max T with its
     ! (i,j) location, and the global min T -- the max-location wandering and a
@@ -21,247 +28,81 @@ program rce_long
     ! term driving a level is visible directly. Stops at the first NaN, naming
     ! the level and step.
 
-    use aeros_defs,     only : dp, wp, wp_sh, p0, R_d, grav, S0, cp_d, L_v, &
-                                aeros_param_class, aeros_grid_class, &
-                                aeros_state_class
-    use aeros_spectral
-    use aeros_grid
-    use aeros_state
-    use aeros_vertical
+    use aeros_defs,     only : dp, wp, wp_sh, R_d, grav, cp_d, year_seconds
+    use aeros_spectral, only : aeros_sht_analysis, aeros_sht_synthesis
+    use aeros_vertical, only : aeros_vgrid_pressure
     use aeros_condensation, only : aeros_qsat, aeros_latent
-    use aeros_cloud,    only : aeros_cloud_diagnose, aeros_cloud_configure
-    use aeros_sw_aerosol, only : aeros_sw_aerosol_configure
-    use aeros_convection, only : SCHEME_SBM, SCHEME_SBM_FRIERSON, SCHEME_MANABE
-    use aeros_timestep
-    use aeros_radiation, only : aeros_radiation_so4_load, aeros_radiation_dust_load, SCHEME_ECCKD
-    use aeros_bd,        only : aeros_bd_init, aeros_bd_read
-    use aeros_ocean,    only : aeros_ocean_init
+    use aeros_cloud,    only : aeros_cloud_diagnose
+    use aeros_timestep, only : aeros_timestep_step, aeros_timestep_diagnose, &
+                                aeros_timestep_enable_diag, aeros_timestep_set_phis, &
+                                aeros_timestep_set_qforce, aeros_timestep_write_restart
     use aeros_topography, only : aeros_topography_load, aeros_topography_scale
-    use aeros_land,     only : aeros_land_init, aeros_land_couple_radiation, aeros_land_set_albedo
+    use aeros_land,     only : aeros_land_set_albedo
     use aeros_bcinput,  only : aeros_bcinput_read_field
-    use aeros_diag_acc, only : aeros_diag_acc_t, aeros_diag_acc_init, &
-                                aeros_diag_acc_init_monthly, aeros_diag_acc_end, &
-                                AEROS_DIAG_NMON
+    use aeros_diag_acc, only : aeros_diag_acc_init_monthly, AEROS_DIAG_NMON
+    use aeros,          only : aeros_class, aeros_lib_init, aeros_lib_finalize, &
+                                aeros_lib_restart_read, aeros_set_rce_warm
     use nml,            only : nml_read
-    use ncio,           only : nc_create, nc_write_dim, nc_write, nc_write_attr, nc_read, nc_size, nc_ndims
+    use ncio,           only : nc_create, nc_write_dim, nc_write, nc_read, nc_size, nc_ndims
 
     implicit none
 
-    ! --- namelist-configurable, with test_rce defaults -----------------------
+    ! The model: parameters, physics flags, transforms, grids, state, integrator
+    ! and the diagnostic accumulators, all owned by the library (aeros_class).
+    type(aeros_class) :: ams
+
     character(len=512) :: nmlfile
-    ! End-of-run zonal-mean RH/cf dump (arg 2; "" = off). NOT a namelist key --
-    ! kept off the namelist so it needs no entry in every rce_*.nml (nml_read is
-    ! fatal on a missing key in this driver). The comparison against ERA5 is done
-    ! offline by scripts/rce_humidity_vs_era5.jl.
+    ! The parameter schema every read falls back to (nml_read defaults_file):
+    ! the calibrated real-Earth state, so a case file lists only its changes.
+    character(len=*), parameter :: defaults_file = "input/aeros_defaults.nml"
+
+    ! End-of-run zonal-mean RH/cf dump (arg 2; "" = off). NOT a namelist key.
+    ! The comparison against ERA5 is done offline by scripts/rce_humidity_vs_era5.jl.
     character(len=512) :: rh_out = "output/rce_rh.nc"
-    ! Monthly-mean climatology output (feat/seasonal). Optional &rce key: when
-    ! monthly_out /= "" the run bins zonal-mean T/u/RH/v (lat,lev,month) and
-    ! SST/precip (lat,month) by calendar month (from the seasonal day-of-year)
-    ! and writes a 12-month climatology for the ERA5 seasonal-cycle comparison.
-    ! "" (the rce_defaults.nml default) = off -> bit-for-bit unchanged.
+
+    ! --- &rce: the driver's own keys (defaults in input/aeros_defaults.nml) ---
+    ! The character keys are initialised to "": nml_read leaves the variable
+    ! untouched for an empty-string value, so "" in the schema means "off".
+    integer  :: nstep                       ! run length [steps]
+    integer  :: print_every                 ! trajectory-report cadence [steps]
+    logical  :: l_diag                      ! per-term heating split + 2nd-half accumulators
+    ! Monthly-mean climatology output ("" = off): zonal-mean T/u/RH/v
+    ! (lat,lev,month), the 2D surface fields and the eddy covariances binned by
+    ! calendar month (from the seasonal day-of-year) for the ERA5 comparison;
+    ! months are accumulated only once the elapsed day exceeds mon_spinup_days.
     character(len=512) :: monthly_out = ""
-    ! Spin-up days to exclude from the monthly climatology: accumulate a month
-    ! only once the elapsed model day exceeds this, so a single continuous run
-    ! can spin the slab up and then sample a clean climatology over its tail.
-    real(wp) :: mon_spinup_days = 0.0_wp
-    integer  :: trunc = 21, nlev = 6, nstep = 4800, ndiff = 8
-    integer  :: print_every = 96          ! ~2 model days at dt=1800
-    real(wp) :: dt = 3600.0_wp, tau_diff = 4.0_wp
-    real(wp) :: tau_diff_div = 0.0_wp     ! divergence-only diffusion timescale [h]; 0 => = tau_diff
-    real(wp) :: t_ref = 300.0_wp          ! isothermal semi-implicit reference [K]
-    logical  :: vert_vanleer = .FALSE.    ! van Leer (not donor-cell) vertical q transport
-    real(wp) :: eps_filter = 0.1_wp, raw_alpha = 0.53_wp   ! leapfrog only (SpeedyWeather values)
-    real(wp) :: si_alpha = 1.0_wp         ! semi-implicit decentering: 0.5 centered, 1.0 backward (SW)
-    ! Time scheme (aeros_timestep header, "The Lorenz N-cycle"): "leapfrog" or "ncycle".
-    character(len=16) :: time_scheme = "ncycle"
-    integer           :: ncycle = 4
-    character(len=8)  :: ncycle_variant = "A"
-    ! Speed-limit drag (aeros_timestep header): SpeedyWeather's default; drag_coef = 0 off.
-    real(wp) :: drag_vmax = 70.0_wp, drag_coef = 4.0e-7_wp
-    real(wp) :: conv_tau = 14400.0_wp, c_h = -1.0_wp, c_e = -1.0_wp   ! <= 0: bulk-Richardson log-law
-    real(wp) :: z0_ocean = 1.0e-4_wp, z0_land = 0.5_wp                ! roughness lengths [m]
-    real(wp) :: gust_speed = 5.0_wp, wind_slowdown = 0.95_wp   ! surface wind for the fluxes (SW)
-    character(len=32) :: conv_scheme = "sbm_frierson" ! "sbm" | "sbm_frierson" | "manabe"
-    real(wp) :: conv_rh_ref = 0.7_wp        ! SBM reference RH the moist adiabat is dried toward
-    real(wp) :: conv_rh_ref_bl = 0.85_wp    ! SBM sub-cloud (mixed-layer) reference RH
-    real(wp) :: conv_rh_hscale = -1.0_wp    ! CLIMBER-X RH-profile reference: scale height [m], <= 0 off
-    real(wp) :: conv_rh_zpbl = 1000.0_wp, conv_rh_ztop = 3000.0_wp
-    real(wp) :: conv_shallow_sig = -1.0_wp  ! shallow-branch depth as p/p_s; <= 0 = full layer
-    real(wp) :: c_d = -1.0_wp         ! surface momentum drag (0 = off; <= 0 log-law; brakes the low-level jet)
-    logical  :: l_surf = .TRUE., l_cnv = .TRUE., l_cnd = .TRUE.
-    logical  :: l_rad = .TRUE., l_sponge = .FALSE., l_vdiff = .FALSE.
-    logical  :: l_diag = .TRUE.       ! per-term heating split at the hot latitude
-    logical  :: l_dry_adjust = .TRUE. ! dry convective adjustment before the moist scheme
-    logical  :: l_rad_clouds = .FALSE. ! diagnostic all-sky clouds in the radiation
-    logical  :: l_o3 = .TRUE.          ! prescribed analytic ozone in the radiation (SW heating + LW)
-    logical  :: l_uniform_insol = .FALSE. ! flatten insolation to its global mean (no meridional gradient)
-    logical  :: l_nonrotating = .FALSE.   ! zero Coriolis (no jet organization; RCE vehicle)
-    ! Seasonal insolation (feat/seasonal): .FALSE. = annual-mean (bit-for-bit
-    ! default). When .TRUE. the TOA insolation is refreshed each radiation step
-    ! from the Laskar orbit at the running day-of-year (doy0 + elapsed days),
-    ! driving a seasonal cycle. Pair with monthly_out to sample the climatology.
-    logical  :: l_seasonal = .FALSE.
-    real(wp) :: doy0 = 0.0_wp             ! start day-of-year for seasonal mode
-    ! Prescribed *seasonal* SST (feat/seasonal): a zonally-symmetric SST(lat,month)
-    ! climatology (built from ERA5 by scripts/make_seasonal_sst.jl) that overrides
-    ! the static analytic profile in prescribed-SST mode (ocean_mode=0), updated
-    ! daily by interpolating the 12 monthly values at the running day-of-year. ""
-    ! = off. This is the stable stand-in for the slab, which is unstable on the
-    ! SW-faithful core (see docs/m2_handoff.md).
+    real(wp) :: mon_spinup_days
+    ! Checkpoint / restart: resume from restart_in ("" = cold start), write
+    ! checkpoints to restart_out ("" = none) every restart_interval steps (0 =
+    ! only at the end).
+    character(len=512) :: restart_in = "", restart_out = ""
+    integer  :: restart_interval
+    ! Real surface topography (gated on &physics l_topography): phis from
+    ! topo_file (ERA5 surface geopotential, m2 s-2), band-limited to the model
+    ! truncation and ramped in over topo_ramp_days (a pure function of elapsed
+    ! time, aeros_topography_scale, hence restart-safe).
+    character(len=512) :: topo_file = ""
+    real(wp) :: topo_ramp_days
+    ! Prescribed seasonal SST table ("" = off): sst(lon,lat,month) on the ERA5
+    ! grid or the legacy sst(lat,month) model-grid table, overriding the
+    ! analytic profile daily in prescribed-SST mode (&ocean mode = 0).
     character(len=512) :: sst_seasonal_file = ""
+    ! Diagnostic probes: flatten the insolation to its global mean (with the
+    ! gradient-free IC), and the analytic Q(lat,sigma) heating [K/day] coupled
+    ! on the in-solve seam (run with all physics off).
+    logical  :: l_uniform_insol, l_qforce
+    real(wp) :: qforce_amp
+
+    ! --- driver state ---------------------------------------------------------
     logical  :: l_sst_seasonal = .FALSE.
-    real(wp), allocatable :: sst_clim(:,:,:) ! (nlon, nlat, 12) prescribed SST BC [K]
-    ! Diagnostic prescribed heating (dry-core heating->ω isolation). When on, set
-    ! all physics off; an analytic Q(lat,sigma) = amp * [equatorial, zero-mean] *
-    ! sin(pi*sigma) is coupled on the in-solve seam. amp in K/day.
-    logical  :: l_qforce = .FALSE.
-    real(wp) :: qforce_amp = 2.0_wp       ! prescribed heating amplitude [K/day]
-    real(wp) :: vdiff_k0 = 10.0_wp, vdiff_sigma = 0.7_wp
-    logical  :: vdiff_richardson = .TRUE.    ! Ri-diagnosed BL depth (else fixed)
-    real(wp) :: vdiff_ri_crit = 10.0_wp      ! critical bulk Richardson number
-    real(wp) :: surf_ri_crit  = 10.0_wp      ! surface-layer critical bulk Richardson number (Frierson: 1)
-    real(wp) :: surf_r_s_land = 0.0_wp       ! land surface resistance to evaporation [s/m]
-    ! Model-top sponge knobs (defaults match aeros_timestep_class). Exposed to
-    ! test the top thermal-wind blow-up: a stronger/deeper sponge that delays or
-    ! removes it confirms the terminal event is model-top dynamical.
-    real(wp) :: sponge_kr = 1.0_wp/43200.0_wp   ! max Rayleigh rate [s-1]
-    real(wp) :: sponge_kt = 1.0_wp/86400.0_wp   ! max Newtonian rate [s-1]
-    real(wp) :: sponge_sigma = 0.12_wp          ! sponge ramp top [sigma]
-    ! Adaptive hyperdiffusion knobs (defaults match aeros_timestep_class; both
-    ! OFF => the fixed del^ndiff scheme, bit for bit). See the aeros_timestep
-    ! header. (1) vorticity-scaled strength, (2) sigma-tapered order.
-    logical  :: diff_adapt       = .FALSE.
-    real(wp) :: diff_zeta_ref    = 1.0e-4_wp    ! reference RMS |zeta| [s-1]
-    real(wp) :: diff_adapt_gain  = 1.0_wp       ! excess-vorticity gain [-]
-    real(wp) :: diff_adapt_max   = 10.0_wp      ! cap on the multiplier [-]
-    logical  :: diff_taper       = .FALSE.
-    integer  :: diff_ndiff_top   = 4            ! order at the model top
-    real(wp) :: diff_taper_sigma = 0.15_wp      ! taper ramp top [sigma]
-    real(wp) :: seed_asym = 0.0_wp    ! zonal-asymmetry seed amplitude [K-ish]
-    real(wp) :: albedo = 0.06_wp      ! surface broadband albedo (cloud proxy knob)
-    real(wp) :: co2_ppm = 280.0_wp
-    ! Critical RH for large-scale condensation: q relaxes to cond_rh_crit*q_sat,
-    ! so the column cannot equilibrate wetter than this where condensation is the
-    ! moisture sink. 1.0 = true saturation adjustment (the model default); a lower
-    ! value is the sub-grid-saturation stand-in for the missing subsidence drying
-    ! that otherwise leaves the free troposphere pinned at RH~100% (m2_results §23).
-    real(wp) :: cond_rh_crit = 0.95_wp
-    real(wp) :: cond_reevap  = 30.0_wp   ! reevaporation efficiency of falling precip
-    real(wp) :: cond_time_scale = 3.0_wp ! condensation adjustment time scale [steps] (SW: 3)
-    real(wp) :: cond_lid_q_max = 1.0e-5_wp ! lid cold trap: top-layer q ceiling [kg/kg] (<= 0 off)
-    real(wp) :: cond_rh_crit_ice = -1.0_wp ! condensation threshold for all-ice columns (< 0 = cond_rh_crit)
-    ! Prescribed Brewer-Dobson residual circulation in the lid (aeros_bd):
-    ! bd_file = w*(lat,month) climatology ("" = off), bd_scale amplitude,
-    ! bd_per_K fractional change per K of the running annual global-mean
-    ! lowest-level T anomaly from bd_t_ref, bd_tau_mean_days its time scale.
-    character(len=512) :: bd_file = ""
-    real(wp) :: bd_scale = 1.0_wp, bd_per_K = 0.0_wp, bd_t_ref = 285.0_wp, bd_tau_mean_days = 365.0_wp
-    integer  :: ocean_mode = 0       ! 0 prescribed SST, 1 slab
-    real(wp) :: ocean_depth = 10.0_wp
-    ! Prescribed-SST meridional profile knobs (default = APE Control). sst_shape=1.0
-    ! + sst_lat=90 gives SpeedyWeather's cos^2(lat) profile (gentler, more poleward
-    ! gradient) instead of the APE Control's steep-at-30 gradient.
-    real(wp) :: sst_eq = 27.0_wp, sst_lat = 60.0_wp, sst_shape = 1.5_wp
-    ! --- thermodynamic sea ice (feat/seaice) --------------------------------
-    ! Default .FALSE. keeps the freeze-floor slab, bit-for-bit unchanged. When on
-    ! (with a slab ocean) the mixed-layer deficit forms ice, ice grows/melts from
-    ! the Semtner 0-layer surface balance, and the ice albedo feeds back into the
-    ! radiation. Optional overrides like the rad/topo/restart knobs below.
-    logical  :: l_seaice   = .FALSE.
-    real(wp) :: ice_albedo = 0.60_wp   ! surface albedo over ice [-]
-    real(wp) :: k_ice      = 2.0_wp    ! ice thermal conductivity [W m-1 K-1]
-    real(wp) :: t_frz      = 271.35_wp ! seawater freezing point [K]
-    real(wp) :: rad_interval = 21600.0_wp   ! radiation recompute cadence [s]; default 6 h
-    integer  :: rad_scheme = SCHEME_ECCKD   ! LW/SW scheme (2=ecCKD default, 1=SESAM)
-    ! --- real surface topography (orography) --------------------------------
-    ! Default .FALSE. keeps the flat aquaplanet (phis = 0), bit-for-bit unchanged.
-    ! When on, phis is read from topo_file (ERA5 surface geopotential, m2 s-2) and
-    ! ramped in over topo_ramp_days to spread the spin-up shock. The ramp is a
-    ! pure function of elapsed time (see aeros_topography_scale), hence restart-safe.
-    logical  :: l_topography = .FALSE.
-    character(len=512) :: topo_file = "/Users/alrobi001/data/era5/era5_orography.nc"
-    real(wp) :: topo_ramp_days = 20.0_wp    ! linear 0->1 spin-up ramp [days]; 0 = full at t=0
-
-    ! --- land surface + land-sea mask (feat/land) ---------------------------
-    ! Default .FALSE. keeps the all-ocean aquaplanet, bit-for-bit unchanged. When
-    ! on, the land-sea mask and land albedo are read from ERA5 climatologies and
-    ! land points carry a prognostic bucket soil moisture and slab soil
-    ! temperature (the land skin temperature) instead of the ocean SST.
-    logical  :: l_land = .FALSE.
-    character(len=512) :: lsm_file = &
-        "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_lsm_1991-2020_clim.nc"
-    character(len=512) :: land_albedo_file = &
-        "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_fal_1991-2020_clim.nc"
-    real(wp) :: w_field_capacity = 0.15_wp  ! bucket capacity [m]
-    real(wp) :: w_crit           = -1.0_wp  ! beta knee [m]; <0 => 0.75*capacity
-    real(wp) :: c_soil           = 2.0e6_wp ! soil areal heat capacity [J m-2 K-1]
-    real(wp) :: land_albedo      = 0.20_wp  ! fallback land albedo (no albedo file)
-    real(wp) :: snow_albedo      = -1.0_wp  ! snow-albedo feedback cold endpoint [-]; <0 = off
-    logical  :: land_albedo_seasonal = .FALSE. ! monthly ERA5 fal (interpolated daily) instead of its mean
-    real(wp) :: snow_dt          = 5.0_wp   ! snow-albedo ramp width below T0 [K]
-    real(wp) :: beta_frozen      = 1.0_wp   ! frozen-ground evaporation factor (1 = off)
-
-    ! --- prognostic cloud fraction (feat/clouds) ----------------------------
-    ! Default off = the diagnostic RH->cover scheme, bit-for-bit unchanged. When
-    ! on, radiation consumes the Sundqvist prognostic cf (aeros_cloud_prog).
-    logical  :: l_cloud_prog   = .FALSE.
-    ! Diagnostic (RH-based) cloud scheme, aeros_cloud: critical-RH endpoints and
-    ! in-cloud water contents [kg m-3]; the coupled calibration (rce_defaults.nml).
-    real(wp) :: cld_rhc_sfc = 0.52_wp, cld_rhc_top = 1.07_wp, cld_rhc_ice = -1.0_wp
-    real(wp) :: cld_lwc = 0.020e-3_wp, cld_iwc = 0.014e-3_wp
-    real(wp) :: sw_aer_ot = 0.0_wp, sw_aer_im = 0.02_wp   ! background aerosol (aeros_sw_aerosol)
-    character(len=512) :: so4_file = ""                   ! sulfate load map (direct effect)
-    integer  :: so4_year = 2000
-    real(wp) :: so4_const = 0.0_wp
-    logical  :: so4_indirect = .TRUE.
-    character(len=512) :: dust_file = ""                  ! dust optical-thickness maps
-    real(wp) :: dust_scale = 1.0_wp, dust_im = 0.01_wp
-    real(wp) :: cloud_rhc_sfc  = 0.40_wp    ! critical RH at the surface (calibrated)
-    real(wp) :: cloud_rhc_top  = 0.60_wp    ! critical RH at the model top (higher aloft)
-    real(wp) :: cloud_tau_form = 10800.0_wp ! formation timescale [s] (~3 h; de-patchifies)
-    real(wp) :: cloud_tau_evap = 10800.0_wp ! evaporation timescale [s] (~3 h)
-    real(wp) :: cloud_c_detr   = 0.5_wp     ! convective detrainment anvil ceiling [-]
-
-    ! --- checkpoint / restart ------------------------------------------------
-    ! restart_in  : path to a restart file to resume from ("" = cold start).
-    ! restart_out : path to write checkpoints to ("" = none).
-    ! restart_interval : write a checkpoint every N steps (0 = only at end, if
-    !                    restart_out is set). Defaults preserve current behaviour.
-    character(len=512) :: restart_in  = ""
-    character(len=512) :: restart_out = ""
-    integer            :: restart_interval = 0
-    real(wp)           :: restart_time = 0.0_wp
-    integer            :: n0 = 0          ! absolute step offset (nonzero on restart)
-
-    type(aeros_sht_pool_class), target :: pool
-    type(aeros_grid_class)     :: grd
-    type(aeros_vgrid_class)    :: vg
-    type(aeros_param_class)    :: par
-    type(aeros_state_class)    :: now
-    type(aeros_timestep_class) :: ts
-
+    real(wp), allocatable :: sst_clim(:,:,:)  ! (nlon, nlat, 12) prescribed SST BC [K]
     real(wp), allocatable :: phis2(:,:)       ! surface geopotential fed to the dynamics
     real(wp), allocatable :: phis_full(:,:)   ! full (unramped) topography [m2 s-2]
-
-    ! Library-side diagnostic accumulators. Wave 2 of the coupling API
-    ! (docs/coupling_api.md sec. 5, 6.2, 6.3, 12): every module-scope
-    ! accumulator array that used to live at rce_long program scope --
-    ! dacc%w_tavg, cnv/cnd/rad/surf/vadv/dyn/vdf/dacc%bd_tavg (second-half diabatic
-    ! heating split), uv/ubar/dacc%vbar_tavg (zonal jet + eddy momentum flux),
-    ! dacc%ke_spec / dacc%mf_spec / dacc%ke_latm / dacc%ke_levm (eddy zonal-wavenumber
-    ! spectrum), mon_* (twelve-month climatology bins), and the
-    ! water/energy-budget scalars wb_* / tb_* -- now lives inside
-    ! aeros_diag_acc_t. Accessed through `dacc%<field>` at the same call
-    ! sites as before, so the accumulate arithmetic is unchanged and the
-    ! climatologies stay bit-for-bit. NMON is re-exported from
-    ! aeros_diag_acc under its qualified name.
-    type(aeros_diag_acc_t) :: dacc
-    integer, parameter     :: NMON = AEROS_DIAG_NMON
-
     real(wp) :: tscale, tscale_prev           ! current / previous ramp factor
-    real(wp) :: qs, dqsdt, tval
-    real(wp) :: phalf(0:64), pfull(64), dpc(64)
-    integer  :: i, j, k, n, m
+    real(wp) :: restart_time = 0.0_wp
+    integer  :: n0 = 0                        ! absolute step offset (nonzero on restart)
+    integer, parameter :: NMON = AEROS_DIAG_NMON
+    integer  :: n, k, ierr
     logical  :: blew_up
 
     nmlfile = "rce.nml"
@@ -269,146 +110,40 @@ program rce_long
     if (command_argument_count() >= 2) call get_command_argument(2, rh_out)
     call read_config()
 
-    call aeros_sht_pool_init(pool, trunc, quick=.TRUE.)
-    call aeros_grid_init(grd, pool%sht(1))
-    call aeros_vgrid_init(vg, nlev, t_ref=t_ref)
-
-    ! Non-rotating vehicle: with no Coriolis there is nothing to organise a
-    ! meridional asymmetry into a geostrophic/angular-momentum jet, so with
-    ! uniform insolation and a uniform IC every column runs the same RCE -- the
-    ! clean single-column validation vehicle, reusing the full physics stack.
-    if (l_nonrotating) grd%coriolis = 0.0_wp
-
-    write(*,"(a,i0,a,i0,a,i0,a,i0)") " rce_long:: T", trunc, " L", nlev, &
-                                       "  grid ", grd%nlon, "x", grd%nlat
-    write(*,"(a,i0,a,f6.1,a,f5.1,a,i0)") "   nstep=", nstep, " dt=", dt, &
-        " tau_diff=", tau_diff, " ndiff=", ndiff
-    write(*,"(a,5(l1,1x))") "   surf/cnv/cnd/rad/sponge = ", &
-        l_surf, l_cnv, l_cnd, l_rad, l_sponge
-
-    par%trunc = trunc; par%nlon = -1; par%nlat = -1; par%nlev = nlev
-    par%nthreads = -1
-    par%dt = dt
-    par%semi_implicit = .TRUE.
-    par%held_suarez   = .FALSE.
-    par%eps_filter = eps_filter
-    par%raw_alpha  = raw_alpha
-    par%si_alpha   = si_alpha
-    par%time_scheme    = time_scheme
-    par%ncycle         = ncycle
-    par%ncycle_variant = ncycle_variant
-    par%drag_vmax      = drag_vmax
-    par%drag_coef      = drag_coef
-    par%ndiff = ndiff; par%tau_diff = tau_diff
-    par%mass_fixer = .FALSE.
-
-    call aeros_state_alloc(now, grd, pool%sht(1)%nlm, nlev)
-    call aeros_timestep_init(ts, par, pool, grd, vg)
-
-    ts%mst%vert_vanleer = vert_vanleer
-
-    ts%cnd%enabled = l_cnd
-    ts%cnd%rh_crit = cond_rh_crit
-    ts%cnd%reevap  = cond_reevap
-    ts%cnd%time_scale = cond_time_scale
-    ts%cnd%lid_q_max = cond_lid_q_max
-    ts%cnd%rh_crit_ice = cond_rh_crit_ice
-    if (len_trim(bd_file) > 0) then
-        call aeros_bd_init(ts%bd, grd, .TRUE.)
-        ts%bd%scale = bd_scale; ts%bd%per_k = bd_per_K; ts%bd%t_ref = bd_t_ref
-        ts%bd%tau_mean = bd_tau_mean_days*86400.0_wp; ts%bd%tmean = bd_t_ref
-        call aeros_bd_read(ts%bd, trim(bd_file), grd)
-        write(*,"(a,a,a,f5.2,a,f6.3,a,f6.1)") " rce_long:: lid Brewer-Dobson w* from ", trim(bd_file), &
-            "  scale ", bd_scale, "  per_K ", bd_per_K, "  t_ref ", bd_t_ref
+    ! === Library init =======================================================
+    ! Dynamics parameters, the &physics flags, the transform pool, grids,
+    ! state, every physics subsystem from its own namelist group (in
+    ! aeros_timestep_init's fixed order, incl. the land-albedo composition),
+    ! the boundary providers and the diagnostic accumulators. The cold start
+    ! is the warm, humid, conditionally unstable RCE state (aeros_set_rce_warm,
+    ! seed from &aeros seed_asym); a restart installs the resting shape and
+    ! reads the checkpoint below, once the driver-side boundary state is set.
+    if (len_trim(restart_in) > 0) then
+        call aeros_lib_init(ams, nmlfile, defaults_file=defaults_file, &
+                            ic_source="restart", ierr=ierr)
+    else
+        call aeros_lib_init(ams, nmlfile, defaults_file=defaults_file, &
+                            ic_source="rce_warm", ierr=ierr)
     end if
-    ts%cnv%enabled = l_cnv
-    ts%cnv%tau = conv_tau
-    ts%cnv%rh_ref = conv_rh_ref
-    ts%cnv%rh_ref_bl = conv_rh_ref_bl
-    ts%cnv%rh_hscale = conv_rh_hscale
-    ts%cnv%rh_z_pbl  = conv_rh_zpbl
-    ts%cnv%rh_z_top  = conv_rh_ztop
-    ts%cnv%shallow_sig = conv_shallow_sig
-    ts%cnv%dry_adjust = l_dry_adjust
-    select case (trim(conv_scheme))
-    case ("sbm");          ts%cnv%scheme = SCHEME_SBM
-    case ("sbm_frierson"); ts%cnv%scheme = SCHEME_SBM_FRIERSON
-    case ("manabe");       ts%cnv%scheme = SCHEME_MANABE
-    case default
-        write(*,*) "rce_long:: error: unknown conv_scheme '"//trim(conv_scheme)// &
-                   "' (expected 'sbm', 'sbm_frierson' or 'manabe')"
+    if (ierr /= 0) then
+        write(*,"(a,i0)") " rce_long:: error: aeros_lib_init failed, ierr = ", ierr
         error stop 1
-    end select
-    ts%surf%enabled = l_surf
-    ts%surf%c_h = c_h; ts%surf%c_e = c_e
-    ts%surf%z0_ocean = z0_ocean; ts%surf%z0_land = z0_land
-    ts%surf%gust_speed = gust_speed; ts%surf%wind_slowdown = wind_slowdown
-    ts%surf%c_d = c_d
-    ts%rad%enabled  = l_rad
-    ts%rad%clouds   = l_rad_clouds
-    call aeros_cloud_configure(rhc_sfc=cld_rhc_sfc, rhc_top=cld_rhc_top, lwc=cld_lwc, iwc=cld_iwc, &
-                               rhc_ice=cld_rhc_ice)
-    ts%rad%l_o3     = l_o3
-    ! Seasonal insolation (feat/seasonal): read into ts%rad before init/apply.
-    ts%rad%seasonal = l_seasonal
-    ts%rad%doy0     = doy0
-    ! Prognostic cloud fraction: when on, force radiation's all-sky path on too
-    ! (clouds=.TRUE.) so it consumes the prognostic cf rather than clear-sky.
-    ts%cpr%enabled  = l_cloud_prog
-    ts%cpr%rhc_sfc  = cloud_rhc_sfc
-    ts%cpr%rhc_top  = cloud_rhc_top
-    ts%cpr%tau_form = cloud_tau_form
-    ts%cpr%tau_evap = cloud_tau_evap
-    ts%cpr%c_detr   = cloud_c_detr
-    if (l_cloud_prog) ts%rad%clouds = .TRUE.
-    ts%sponge_on    = l_sponge
-    call aeros_timestep_set_sponge(ts, vg, sponge_kr, sponge_kt, sponge_sigma)
-    ! Adaptive hyperdiffusion (numerical safety net for the top thermal-wind /
-    ! jet blow-up). (1) vorticity-scaled strength: scalar fields set directly.
-    ts%diff_adapt      = diff_adapt
-    ts%diff_zeta_ref   = diff_zeta_ref
-    ts%diff_adapt_gain = diff_adapt_gain
-    ts%diff_adapt_max  = diff_adapt_max
-    ! (2) sigma-tapered order: the setter rebuilds the per-level ratios.
-    if (diff_taper) call aeros_timestep_set_diff_taper(ts, vg, .TRUE., &
-                            ndiff_top=diff_ndiff_top, taper_sigma=diff_taper_sigma)
-    ! Divergence-only diffusion timescale (SpeedyWeather-style). Namelist is in
-    ! hours; 0 => keep tau_diff (bit-for-bit single-timescale scheme).
-    ts%tau_diff_div = tau_diff_div*3600.0_wp
-    ts%vd%enabled    = l_vdiff
-    ts%vd%k0         = vdiff_k0
-    ts%vd%sigma      = vdiff_sigma
-    ts%vd%richardson = vdiff_richardson
-    ts%vd%ri_crit    = vdiff_ri_crit
-    ts%surf%ri_crit  = surf_ri_crit
-    ts%surf%r_s_land = surf_r_s_land
-    ts%rad%albedo   = albedo
-    ts%rad%co2_ppm  = co2_ppm
-    ts%rad%interval = rad_interval
-    ts%rad%scheme   = rad_scheme
-    ts%rad%aer_ot   = sw_aer_ot
-    ts%rad%aer_im   = sw_aer_im
-    call aeros_sw_aerosol_configure(ot=sw_aer_ot, im=sw_aer_im)
-    ts%rad%so4_file  = so4_file
-    ts%rad%so4_year  = so4_year
-    ts%rad%so4_const = so4_const
-    ts%rad%so4_indirect = so4_indirect
-    call aeros_radiation_so4_load(ts%rad, grd)
-    ts%rad%dust_file  = dust_file
-    ts%rad%dust_scale = dust_scale
-    ts%rad%dust_im    = dust_im
-    call aeros_radiation_dust_load(ts%rad, grd)
-    ts%ocn%mode     = ocean_mode
-    ts%ocn%depth    = ocean_depth
-    ts%ocn%sst_eq    = sst_eq
-    ts%ocn%sst_lat   = sst_lat
-    ts%ocn%sst_shape = sst_shape
-    ts%ocn%l_seaice   = l_seaice
-    ts%ocn%ice_albedo = ice_albedo
-    ts%ocn%ocn_albedo = albedo        ! open-water albedo = the `albedo` knob (one source of truth)
-    ts%ocn%k_ice      = k_ice
-    ts%ocn%t_frz      = t_frz
-    call aeros_ocean_init(ts%ocn, grd)   ! recompute C, (re)allocate ice state
+    end if
+
+    write(*,"(a,i0,a,i0,a,i0,a,i0)") " rce_long:: T", ams%par%trunc, " L", ams%par%nlev, &
+                                       "  grid ", ams%grd%nlon, "x", ams%grd%nlat
+    write(*,"(a,i0,a,f6.1,a,f5.1,a,i0)") "   nstep=", nstep, " dt=", ams%par%dt, &
+        " tau_diff=", ams%par%tau_diff, " ndiff=", ams%par%ndiff
+    write(*,"(a,5(l1,1x))") "   surf/cnv/cnd/rad/sponge = ", &
+        ams%phys%l_surf, ams%phys%l_cnv, ams%phys%l_cnd, ams%phys%l_rad, ams%par%l_sponge
+    if (ams%ts%bd%enabled) write(*,"(a,f5.2,a,f6.3,a,f6.1)") &
+        " rce_long:: lid Brewer-Dobson w* ON  scale ", ams%ts%bd%scale, &
+        "  per_K ", ams%ts%bd%per_k, "  t_ref ", ams%ts%bd%t_ref
+    if (ams%phys%l_land) then
+        write(*,"(a,a)") " rce_long:: land-sea mask from ", trim(ams%ts%land%lsm_file)
+        write(*,"(a,i0,a,i0,a)") " rce_long:: land cells ", count(ams%ts%land%mask), &
+            " of ", ams%grd%nlon*ams%grd%nlat, " (mask threshold 0.5)"
+    end if
 
     ! Prescribed seasonal SST (feat/seasonal): load the SST climatology into
     ! sst_clim(nlon,nlat,12) and seed the surface at doy0. Only in prescribed-SST
@@ -419,20 +154,20 @@ program rce_long
     !   2D sst(lat,month) already on the model grid -> broadcast zonally (the
     !     legacy aquaplanet table from make_seasonal_sst.jl).
     if (len_trim(sst_seasonal_file) > 0) then
-        if (ocean_mode /= 0) then
+        if (ams%ts%ocn%mode /= 0) then
             write(*,"(a)") " rce_long:: WARNING sst_seasonal_file ignored -- "// &
-                "prescribed seasonal SST needs ocean_mode=0 (slab SST is prognostic)."
+                "prescribed seasonal SST needs &ocean mode=0 (slab SST is prognostic)."
         else
             block
                 integer :: sst_rank, nmon_f, nlat_f, mm, ii
                 real(wp), allocatable :: sst_zm(:,:)
-                allocate(sst_clim(grd%nlon, grd%nlat, 12))
+                allocate(sst_clim(ams%grd%nlon, ams%grd%nlat, 12))
                 sst_rank = nc_ndims(trim(sst_seasonal_file), "sst")
                 if (sst_rank == 3) then
                     ! ERA5-grid (lon,lat,month): regrid each month to the model grid.
                     do mm = 1, 12
                         call aeros_bcinput_read_field(trim(sst_seasonal_file), "sst", &
-                            grd%lon, grd%lat, sst_clim(:,:,mm), itime=mm)
+                            ams%grd%lon, ams%grd%lat, sst_clim(:,:,mm), itime=mm)
                     end do
                     write(*,"(a,a)") " rce_long:: prescribed seasonal SST (2D, regridded) from ", &
                         trim(sst_seasonal_file)
@@ -440,15 +175,15 @@ program rce_long
                     ! Legacy model-grid zonal table (lat,month): broadcast over lon.
                     nlat_f = nc_size(trim(sst_seasonal_file), "lat")
                     nmon_f = nc_size(trim(sst_seasonal_file), "month")
-                    if (nlat_f /= grd%nlat .or. nmon_f /= 12) then
+                    if (nlat_f /= ams%grd%nlat .or. nmon_f /= 12) then
                         write(*,"(a,i0,a,i0,a)") " rce_long:: error: sst_seasonal_file is (", &
                             nlat_f, " lat, ", nmon_f, " month), expected (nlat, 12) on the model grid"
                         error stop 1
                     end if
-                    allocate(sst_zm(grd%nlat, 12))
+                    allocate(sst_zm(ams%grd%nlat, 12))
                     call nc_read(trim(sst_seasonal_file), "sst", sst_zm)
                     do mm = 1, 12
-                        do ii = 1, grd%nlon
+                        do ii = 1, ams%grd%nlon
                             sst_clim(ii, :, mm) = sst_zm(:, mm)
                         end do
                     end do
@@ -457,273 +192,206 @@ program rce_long
                         trim(sst_seasonal_file)
                 end if
                 l_sst_seasonal = .TRUE.
-                call set_seasonal_sst(doy0)   ! seed month at the start day
+                call set_seasonal_sst(ams%ts%rad%doy0)   ! seed month at the start day
             end block
         end if
-    end if
-
-    ! Land surface (feat/land). Configure the land state from the namelist and
-    ! init it (reads the land-sea mask and albedo maps when on). Then compose the
-    ! radiation surface-albedo map: the ocean scalar albedo (set just above) over
-    ! sea, the land albedo on land. Off by default -> all-ocean, bit-for-bit.
-    ts%land%enabled          = l_land
-    ts%land%lsm_file         = lsm_file
-    ts%land%albedo_file      = land_albedo_file
-    ts%land%w_field_capacity = w_field_capacity
-    ts%land%w_crit           = w_crit
-    ts%land%c_soil           = c_soil
-    ts%land%land_albedo      = land_albedo
-    ts%land%snow_albedo      = snow_albedo
-    ts%land%snow_dt          = snow_dt
-    ts%land%beta_frozen      = beta_frozen
-    ts%land%albedo_seasonal  = land_albedo_seasonal
-    call aeros_land_init(ts%land, grd, l_land)
-    if (l_land) then
-        call aeros_land_set_albedo(ts%land, doy0)      ! seed the seasonal bare albedo
-        call aeros_land_couple_radiation(ts%land, ts%rad%alb_map, ts%rad%albedo)
-        write(*,"(a,a)") " rce_long:: land-sea mask from ", trim(lsm_file)
-        write(*,"(a,i0,a,i0,a)") " rce_long:: land cells ", count(ts%land%mask), &
-            " of ", grd%nlon*grd%nlat, " (mask threshold 0.5)"
     end if
 
     ! Per-term heating diagnostics: split the forward-split physics back into
     ! surface/convection/condensation/radiation, capture vdiff's implicit change,
     ! and separate the vertical-advective (ventilation) part of the dynamical
     ! heating -- reported zonal-mean at the hot latitude by term_table below.
-    if (l_diag) call aeros_timestep_enable_diag(ts)
+    if (l_diag) call aeros_timestep_enable_diag(ams%ts)
 
     ! Uniform-insolation test: flatten sw_toa and coszen to their area-weighted
     ! global means, removing the equator-pole gradient (hence the Hadley jet and
     ! thermal wind) while keeping the global energy input (~S0/4). If the RCE
     ! bounds only here, the runaway is the axisymmetric meridional dynamics, not
-    ! the column physics.
+    ! the column physics. The cold start is then re-installed WITHOUT the l=2
+    ! equator-pole gradient: with no insolation gradient the intended state is
+    ! horizontally uniform, so every latitude runs the identical column RCE.
     if (l_uniform_insol) then
         block
             real(wp) :: sw_m, cz_m, wsum, w
             integer  :: jj
             sw_m = 0.0_wp; cz_m = 0.0_wp; wsum = 0.0_wp
-            do jj = 1, grd%nlat
-                w = sum(grd%area(:,jj))
-                sw_m = sw_m + ts%rad%sw_toa(jj)*w
-                cz_m = cz_m + ts%rad%coszen(jj)*w
+            do jj = 1, ams%grd%nlat
+                w = sum(ams%grd%area(:,jj))
+                sw_m = sw_m + ams%ts%rad%sw_toa(jj)*w
+                cz_m = cz_m + ams%ts%rad%coszen(jj)*w
                 wsum = wsum + w
             end do
-            ts%rad%sw_toa(:)  = sw_m/wsum
-            ts%rad%coszen(:)  = cz_m/wsum
+            ams%ts%rad%sw_toa(:)  = sw_m/wsum
+            ams%ts%rad%coszen(:)  = cz_m/wsum
             write(*,"(a,f7.2,a,f6.3)") " rce_long:: uniform insolation SWin ", &
                 sw_m/wsum, " W/m2  coszen ", cz_m/wsum
         end block
+        if (len_trim(restart_in) == 0) call aeros_set_rce_warm(ams, gradient=.FALSE.)
     end if
 
     ! Surface geopotential (lower boundary). Aquaplanet phis = 0 by default; with
     ! l_topography the real orography is read once and ramped in over the run.
-    allocate(phis2(grd%nlon, grd%nlat));     phis2 = 0.0_wp
-    allocate(phis_full(grd%nlon, grd%nlat)); phis_full = 0.0_wp
-    if (l_topography) then
-        call aeros_topography_load(topo_file, grd%lon, grd%lat, phis_full)
+    allocate(phis2(ams%grd%nlon, ams%grd%nlat));     phis2 = 0.0_wp
+    allocate(phis_full(ams%grd%nlon, ams%grd%nlat)); phis_full = 0.0_wp
+    if (ams%phys%l_topography) then
+        call aeros_topography_load(topo_file, ams%grd%lon, ams%grd%lat, phis_full)
         write(*,"(a,a)") " rce_long:: topography from ", trim(topo_file)
         write(*,"(a,es11.3,a,es11.3)") " rce_long:: raw   phis min ", &
             minval(phis_full), "  max ", maxval(phis_full)
-        ! Spectrally truncate to the model resolution (T21). A spectral core can
+        ! Spectrally truncate to the model resolution. A spectral core can
         ! only carry the surface geopotential at its resolved scales: the raw
         ! interpolated field still has grid-scale structure at coastlines and
         ! mountain flanks, which aliases in the transforms and rings (Gibbs),
         ! destabilizing the lowest layer. Band-limiting via one analysis ->
-        ! synthesis round-trip (SHTns truncates at T21) gives the smooth
-        ! orography the dynamics is consistent with. Standard spectral-model
-        ! practice.
+        ! synthesis round-trip (SHTns truncates at the model truncation) gives
+        ! the smooth orography the dynamics is consistent with. Standard
+        ! spectral-model practice.
         block
             complex(wp_sh), allocatable :: phis_lm(:)
             real(dp),       allocatable :: gwork(:,:)
-            allocate(phis_lm(pool%sht(1)%nlm))
-            allocate(gwork(grd%nlon, grd%nlat))
+            allocate(phis_lm(ams%pool%sht(1)%nlm))
+            allocate(gwork(ams%grd%nlon, ams%grd%nlat))
             gwork = real(phis_full, dp)
-            call aeros_sht_analysis(pool%sht(1), gwork, phis_lm)   ! grid -> T21 spectral (overwrites gwork)
-            call aeros_sht_synthesis(pool%sht(1), phis_lm, gwork)  ! T21 spectral -> band-limited grid
+            call aeros_sht_analysis(ams%pool%sht(1), gwork, phis_lm)   ! grid -> spectral (overwrites gwork)
+            call aeros_sht_synthesis(ams%pool%sht(1), phis_lm, gwork)  ! spectral -> band-limited grid
             phis_full = real(gwork, wp)
             deallocate(phis_lm, gwork)
         end block
-        write(*,"(a,es11.3,a,es11.3,a,f6.1,a)") " rce_long:: T21   phis min ", &
-            minval(phis_full), "  max ", maxval(phis_full), " m2/s2   ramp ", &
+        write(*,"(a,i0,a,es11.3,a,es11.3,a,f6.1,a)") " rce_long:: T", ams%par%trunc, &
+            "   phis min ", minval(phis_full), "  max ", maxval(phis_full), " m2/s2   ramp ", &
             topo_ramp_days, " days"
         ! Dump the band-limited orography on the model grid for a visual sanity
         ! check (correct continents/mountains, sane magnitude).
         call nc_create("output/rce_phis.nc")
-        call nc_write_dim("output/rce_phis.nc", "lon", x=grd%lon, units="degrees_east")
-        call nc_write_dim("output/rce_phis.nc", "lat", x=grd%lat, units="degrees_north")
+        call nc_write_dim("output/rce_phis.nc", "lon", x=ams%grd%lon, units="degrees_east")
+        call nc_write_dim("output/rce_phis.nc", "lat", x=ams%grd%lat, units="degrees_north")
         call nc_write("output/rce_phis.nc", "phis", phis_full, dim1="lon", dim2="lat", &
-                      units="m2 s-2", long_name="surface geopotential (T21)")
+                      units="m2 s-2", long_name="surface geopotential (band-limited)")
     end if
     ! Initial feed at t = 0 (scale = 0 while ramping, so the run starts flat).
-    tscale      = aeros_topography_scale(l_topography, 0.0_wp, topo_ramp_days)
+    tscale      = aeros_topography_scale(ams%phys%l_topography, 0.0_wp, topo_ramp_days)
     tscale_prev = tscale
     phis2 = tscale*phis_full
-    call aeros_timestep_set_phis(ts, phis2)
+    call aeros_timestep_set_phis(ams%ts, phis2)
 
     ! Diagnostic prescribed heating: an analytic Q(lat,sigma), equatorial and
     ! area-weighted zero-mean in latitude (no net global heating -> no drift),
     ! sin(pi*sigma) in the vertical (mid-troposphere peak, zero at top/surface).
-    ! Coupled on the in-solve seam to isolate the dry core's heating->ω response
-    ! from moist physics. Run with all physics off.
+    ! Coupled on the in-solve seam to isolate the dry core's heating->omega
+    ! response from moist physics. Run with all physics off.
     if (l_qforce) then
         block
             real(wp), allocatable :: q3(:,:,:), slat(:)
             real(wp) :: amp, mlat, wsum, latr, pi
             integer  :: iq, jq, kq
             pi = 4.0_wp*atan(1.0_wp)
-            allocate(q3(grd%nlon, grd%nlat, nlev), slat(grd%nlat))
+            allocate(q3(ams%grd%nlon, ams%grd%nlat, ams%par%nlev), slat(ams%grd%nlat))
             amp = qforce_amp/86400.0_wp                     ! K/day -> K/s
             wsum = 0.0_wp; mlat = 0.0_wp
-            do jq = 1, grd%nlat
-                latr    = grd%lat(jq)
+            do jq = 1, ams%grd%nlat
+                latr    = ams%grd%lat(jq)
                 slat(jq) = exp(-(latr/15.0_wp)**2)          ! equatorial heating
                 mlat    = mlat + slat(jq)*cos(latr*pi/180.0_wp)
                 wsum    = wsum + cos(latr*pi/180.0_wp)
             end do
             mlat = mlat/wsum                                ! area-weighted mean
-            do kq = 1, nlev
-                do jq = 1, grd%nlat
-                    do iq = 1, grd%nlon
+            do kq = 1, ams%par%nlev
+                do jq = 1, ams%grd%nlat
+                    do iq = 1, ams%grd%nlon
                         q3(iq,jq,kq) = amp*(slat(jq) - mlat) &
-                                        *sin(pi*vg%sigma_full(kq))
+                                        *sin(pi*ams%vgrid%sigma_full(kq))
                     end do
                 end do
             end do
-            call aeros_timestep_set_qforce(ts, q3)
+            call aeros_timestep_set_qforce(ams%ts, q3)
             write(*,'(a,f6.2,a)') " rce_long:: prescribed Q ON, amp=", qforce_amp, &
                                     " K/day (physics MUST be off for a clean dry test)"
             deallocate(q3, slat)
         end block
     end if
 
-    ! === Restart branch: load state instead of constructing an IC ===========
-    ! When restart_in is set, the timestep and state are already allocated by
-    ! the init/config above (same trunc/nlev/grid); read_restart overwrites them
-    ! with the saved leapfrog levels, humidity, ocean and radiation cache, and
-    ! the run resumes from the saved nstep. The whole IC-construction block is
-    ! skipped in that case.
+    ! === Restart: load the checkpoint over the initialised shapes ============
+    ! Overwrites the time levels, humidity, ocean and radiation cache with the
+    ! saved state and resumes from the saved nstep. The cold start (rce_warm)
+    ! was installed by aeros_lib_init above.
     if (len_trim(restart_in) > 0) then
-        call aeros_timestep_read_restart(ts, now, restart_time, restart_in)
-        n0 = ts%nstep
+        call aeros_lib_restart_read(ams, restart_in, ierr)
+        if (ierr /= 0) then
+            write(*,"(a,i0)") " rce_long:: error: aeros_lib_restart_read failed, ierr = ", ierr
+            error stop 1
+        end if
+        n0 = ams%ts%nstep
+        restart_time = ams%time*real(year_seconds, wp)
         write(*,"(a,a,a,i0,a,f10.1,a)") " rce_long:: restarted from ", &
             trim(restart_in), "  (nstep=", n0, ", time=", restart_time, " s)"
         call report(n0)
     else
-
-    ! Warm, humid, conditionally-unstable start (as test_rce/test_moist_run).
-    call aeros_spec_zero(now%spec)
-    do k = 1, nlev
-        tval = 300.0_wp - 90.0_wp*(1.0_wp - ((real(k,wp) - 0.5_wp)/real(nlev,wp))**0.6_wp)
-        now%spec%temp(aeros_sht_lm(pool%sht(1),0,0),k) = &
-                cmplx(real(tval,dp)*sqrt(16.0_dp*atan(1.0_dp)), 0.0_dp, wp_sh)
-    end do
-    now%spec%lnps(aeros_sht_lm(pool%sht(1),0,0)) = &
-            cmplx(log(real(p0,dp))*sqrt(16.0_dp*atan(1.0_dp)), 0.0_dp, wp_sh)
-    ! Initial equator-pole gradient (l=2). Skipped under uniform insolation: with
-    ! no insolation gradient the intended state is horizontally uniform, so every
-    ! latitude runs the identical column RCE with nothing to spin up a jet -- the
-    ! clean single-column validation vehicle.
-    if (.not. l_uniform_insol) &
-        now%spec%temp(aeros_sht_lm(pool%sht(1),2,0),:) = cmplx(-5.0_dp, 0.0_dp, wp_sh)
-
-    ! Optional zonal-asymmetry seed: a small perturbation in a few m>0 modes so
-    ! baroclinic instability can grow eddies. Without it the run is trapped in
-    ! the axisymmetric (m=0) manifold -- with zonally symmetric forcing and an
-    ! m=0-only start, the nonlinear terms never populate m>0, so there are no
-    ! eddies to flux heat meridionally. Tests whether the residual subtropical
-    ! warming is that artifact.
-    if (seed_asym > 0.0_wp) then
-        do k = 1, nlev
-            do m = 1, 6
-                now%spec%temp(aeros_sht_lm(pool%sht(1), m+2, m), k) = &
-                    cmplx(real(seed_asym,dp), real(seed_asym,dp), wp_sh)
-            end do
-        end do
+        call report(0)
     end if
-
-    call aeros_timestep_diagnose(ts, pool, vg, grd, now)
-    do j = 1, grd%nlat
-        do i = 1, grd%nlon
-            call aeros_vgrid_pressure(vg, now%ps(i,j), phalf(0:nlev), pfull(1:nlev), dpc(1:nlev))
-            do k = 1, nlev
-                call aeros_qsat(now%temp_g(i,j,k), pfull(k), qs, dqsdt)
-                now%qv_g(i,j,k) = 0.9_wp*qs
-            end do
-        end do
-    end do
-
-    call report(0)
-
-    end if   ! restart_in vs cold-start IC
 
     blew_up = .FALSE.
 
-    ! Library-side diagnostic accumulators. This one call allocates and zeros
-    ! the always-on second-half tavg buffers, the (nlat,nlev) zonal-mean
-    ! jet/MMC/eddy accumulators, the eddy zonal-wavenumber spectrum plus its
-    ! precomputed DFT trig table, and every water/energy-budget scalar --
-    ! preserving today's storage and initial state exactly. The monthly
-    ! climatology bins are allocated in a separate call below, gated on the
-    ! monthly_out namelist knob so a run without a monthly dump does not pay
-    ! for their storage.
-    call aeros_diag_acc_init(dacc, grd%nlon, grd%nlat, nlev, mmax_spec=trunc, dt=dt)
+    ! The twelve-month climatology bins are an output choice, so they are
+    ! allocated here (on the library's accumulator container, which
+    ! aeros_lib_init already sized for the always-on buffers) only when a
+    ! monthly dump was asked for.
     if (len_trim(monthly_out) > 0) then
-        call aeros_diag_acc_init_monthly(dacc, grd%nlon, grd%nlat, nlev)
-        if (.not. ts%rad%seasonal) write(*,"(a)") &
-            " rce_long:: WARNING monthly_out set but radiation%seasonal=.FALSE. -- "// &
+        call aeros_diag_acc_init_monthly(ams%diag_acc, ams%grd%nlon, ams%grd%nlat, ams%par%nlev)
+        if (.not. ams%ts%rad%seasonal) write(*,"(a)") &
+            " rce_long:: WARNING monthly_out set but &radiation seasonal=.FALSE. -- "// &
             "insolation is annual-mean, so all months bin the same forcing."
     end if
     do n = n0+1, n0+nstep
         ! Prescribed seasonal SST (feat/seasonal): refresh the surface once a day
         ! from the SST(lat,month) climatology at the running day-of-year, before
         ! the step consumes it in the surface fluxes and radiation.
-        if (l_sst_seasonal .and. mod(n, max(1, nint(86400.0_wp/dt))) == 0) &
-            call set_seasonal_sst(doy0 + real(n,wp)*dt/86400.0_wp)
+        if (l_sst_seasonal .and. mod(n, max(1, nint(86400.0_wp/ams%par%dt))) == 0) &
+            call set_seasonal_sst(ams%ts%rad%doy0 + real(n,wp)*ams%par%dt/86400.0_wp)
         ! Seasonal bare land albedo, same daily cadence (no-op unless enabled).
-        if (l_land .and. land_albedo_seasonal .and. mod(n, max(1, nint(86400.0_wp/dt))) == 0) &
-            call aeros_land_set_albedo(ts%land, doy0 + real(n,wp)*dt/86400.0_wp)
+        if (ams%phys%l_land .and. ams%ts%land%albedo_seasonal .and. mod(n, max(1, nint(86400.0_wp/ams%par%dt))) == 0) &
+            call aeros_land_set_albedo(ams%ts%land, ams%ts%rad%doy0 + real(n,wp)*ams%par%dt/86400.0_wp)
         ! Advance the topography ramp: a pure function of absolute elapsed time
         ! n*dt, so it is restart-safe -- a run resumed at n0 continues the ramp at
         ! the right amplitude. Only re-set phis while the factor is still changing
         ! (during the ramp); once it reaches 1 the surface is constant.
-        if (l_topography .and. topo_ramp_days > 0.0_wp .and. tscale_prev < 1.0_wp) then
-            tscale = aeros_topography_scale(.true., real(n,wp)*dt, topo_ramp_days)
+        if (ams%phys%l_topography .and. topo_ramp_days > 0.0_wp .and. tscale_prev < 1.0_wp) then
+            tscale = aeros_topography_scale(.true., real(n,wp)*ams%par%dt, topo_ramp_days)
             if (tscale /= tscale_prev) then
                 phis2 = tscale*phis_full
-                call aeros_timestep_set_phis(ts, phis2)
+                call aeros_timestep_set_phis(ams%ts, phis2)
                 tscale_prev = tscale
             end if
         end if
-        call aeros_timestep_step(ts, pool, vg, grd, now)
-        if (any(ts%wrk%t_g /= ts%wrk%t_g) .or. any(now%qv_g /= now%qv_g)) then
+        call aeros_timestep_step(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
+        if (any(ams%ts%wrk%t_g /= ams%ts%wrk%t_g) .or. any(ams%now%qv_g /= ams%now%qv_g)) then
             write(*,"(a,i0,a,f7.2,a)") " *** NaN at step ", n, "  (day ", &
-                real(n,wp)*dt/86400.0_wp, ")"
+                real(n,wp)*ams%par%dt/86400.0_wp, ")"
             call locate_nan()
             blew_up = .TRUE.
             exit
         end if
-        if (l_surf .and. allocated(ts%cnv%precip) .and. allocated(ts%cnd%precip)) then
-            dacc%wb_p_acc = dacc%wb_p_acc + gmean2((ts%cnv%precip + ts%cnd%precip)*86400.0_wp)
-            dacc%wb_e_acc = dacc%wb_e_acc + gmean2(ts%surf%evap*86400.0_wp)
-            dacc%wb_n_acc = dacc%wb_n_acc + 1
+        if (ams%phys%l_surf .and. allocated(ams%ts%cnv%precip) .and. allocated(ams%ts%cnd%precip)) then
+            ams%diag_acc%wb_p_acc = ams%diag_acc%wb_p_acc + gmean2((ams%ts%cnv%precip + ams%ts%cnd%precip)*86400.0_wp)
+            ams%diag_acc%wb_e_acc = ams%diag_acc%wb_e_acc + gmean2(ams%ts%surf%evap*86400.0_wp)
+            ams%diag_acc%wb_n_acc = ams%diag_acc%wb_n_acc + 1
         end if
         call energy_accumulate()
         if (mod(n, print_every) == 0) call report(n)
         ! Time-mean omega over the run's second half (equilibrium) for a robust
         ! zonal-mean subsidence diagnostic -- a single snapshot is too noisy.
         if (l_diag .and. n > n0 + nstep/2) then
-            dacc%w_tavg = dacc%w_tavg + ts%wrk%omega
-            dacc%cnv_tavg  = dacc%cnv_tavg  + ts%wrk%dt_cnv
-            dacc%cnd_tavg  = dacc%cnd_tavg  + ts%wrk%dt_cnd
-            dacc%rad_tavg  = dacc%rad_tavg  + ts%wrk%dt_rad
-            dacc%surf_tavg = dacc%surf_tavg + ts%wrk%dt_surf
-            dacc%vadv_tavg = dacc%vadv_tavg + ts%wrk%dt_vadv*dt      ! rates [K/s] -> [K/step]
-            dacc%dyn_tavg  = dacc%dyn_tavg  + ts%wrk%dtdt*dt
-            dacc%vdf_tavg  = dacc%vdf_tavg  + ts%wrk%dt_vdiff
-            dacc%bd_tavg   = dacc%bd_tavg   + ts%wrk%dt_bd
+            ams%diag_acc%w_tavg = ams%diag_acc%w_tavg + ams%ts%wrk%omega
+            ams%diag_acc%cnv_tavg  = ams%diag_acc%cnv_tavg  + ams%ts%wrk%dt_cnv
+            ams%diag_acc%cnd_tavg  = ams%diag_acc%cnd_tavg  + ams%ts%wrk%dt_cnd
+            ams%diag_acc%rad_tavg  = ams%diag_acc%rad_tavg  + ams%ts%wrk%dt_rad
+            ams%diag_acc%surf_tavg = ams%diag_acc%surf_tavg + ams%ts%wrk%dt_surf
+            ams%diag_acc%vadv_tavg = ams%diag_acc%vadv_tavg + ams%ts%wrk%dt_vadv*ams%par%dt      ! rates [K/s] -> [K/step]
+            ams%diag_acc%dyn_tavg  = ams%diag_acc%dyn_tavg  + ams%ts%wrk%dtdt*ams%par%dt
+            ams%diag_acc%vdf_tavg  = ams%diag_acc%vdf_tavg  + ams%ts%wrk%dt_vdiff
+            ams%diag_acc%bd_tavg   = ams%diag_acc%bd_tavg   + ams%ts%wrk%dt_bd
             call accum_zmflux()
             call accum_espec()
-            dacc%n_wacc = dacc%n_wacc + 1
+            ams%diag_acc%n_wacc = ams%diag_acc%n_wacc + 1
         end if
         ! Monthly-mean climatology sampling (feat/seasonal): bin the zonal-mean
         ! state by calendar month on a ~daily cadence, once past the spin-up
@@ -732,16 +400,16 @@ program rce_long
         ! aeros_timestep_diagnose refreshes -- refresh them here, or the sample
         ! is the state at the last report (which is what silently happened up to
         ! 2026-09: months identical between prints).
-        if (len_trim(monthly_out) > 0 .and. mod(n, dacc%nacc_mon) == 0 .and. &
-            real(n,wp)*dt/86400.0_wp >= mon_spinup_days) then
-            call aeros_timestep_diagnose(ts, pool, vg, grd, now)
+        if (len_trim(monthly_out) > 0 .and. mod(n, ams%diag_acc%nacc_mon) == 0 .and. &
+            real(n,wp)*ams%par%dt/86400.0_wp >= mon_spinup_days) then
+            call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
             call accum_monthly(n)
         end if
         ! Periodic checkpoint (restart_interval > 0). The model time carried into
         ! the file is the absolute elapsed time n*dt.
         if (len_trim(restart_out) > 0 .and. restart_interval > 0) then
             if (mod(n, restart_interval) == 0) &
-                call aeros_timestep_write_restart(ts, now, real(n,wp)*dt, restart_out)
+                call aeros_timestep_write_restart(ams%ts, ams%now, real(n,wp)*ams%par%dt, restart_out)
         end if
     end do
 
@@ -751,19 +419,16 @@ program rce_long
     ! only checkpoint when restart_interval = 0). Skipped on a blow-up, which
     ! would only persist a NaN state.
     if (len_trim(restart_out) > 0 .and. .not. blew_up) then
-        call aeros_timestep_write_restart(ts, now, real(n0+nstep,wp)*dt, restart_out)
+        call aeros_timestep_write_restart(ams%ts, ams%now, real(n0+nstep,wp)*ams%par%dt, restart_out)
         write(*,"(a,a)") " rce_long:: wrote restart -> ", trim(restart_out)
     end if
 
     if (len_trim(rh_out) > 0) call dump_rh(trim(rh_out))
     if (len_trim(monthly_out) > 0 .and. .not. blew_up) call dump_monthly(trim(monthly_out))
 
-    call aeros_diag_acc_end(dacc)
-    call aeros_timestep_end(ts)
-    call aeros_state_end(now)
-    call aeros_vgrid_end(vg)
-    call aeros_grid_end(grd)
-    call aeros_sht_pool_end(pool)
+    if (allocated(sst_clim)) deallocate(sst_clim)
+    deallocate(phis2, phis_full)
+    call aeros_lib_finalize(ams, ierr)
 
 contains
 
@@ -779,8 +444,8 @@ contains
         ! diagnostic, not the inputs). `cover` is the max-overlap total cloud cover
         ! per latitude -- the quantity the overcast TOA reflects directly.
         character(len=*), intent(in) :: fname
-        real(wp) :: phc(0:nlev), pfc(nlev), dpcc(nlev)
-        real(wp) :: cf(nlev), clwc(nlev), ciwc(nlev)
+        real(wp) :: phc(0:ams%par%nlev), pfc(ams%par%nlev), dpcc(ams%par%nlev)
+        real(wp) :: cf(ams%par%nlev), clwc(ams%par%nlev), ciwc(ams%par%nlev)
         real(wp) :: qsl, dqsl, colcov, rnlon
         real(wp), allocatable :: rh_zm(:,:), cf_zm(:,:), t_zm(:,:), q_zm(:,:), p_zm(:,:)
         real(wp), allocatable :: u_zm(:,:), v_zm(:,:), w_zm(:,:)
@@ -791,52 +456,52 @@ contains
         real(wp) :: kday
         integer :: ii, jj, kk
 
-        rnlon = real(grd%nlon, wp)
-        allocate(rh_zm(grd%nlat,nlev), cf_zm(grd%nlat,nlev), t_zm(grd%nlat,nlev), &
-                 q_zm(grd%nlat,nlev), p_zm(grd%nlat,nlev), &
-                 u_zm(grd%nlat,nlev), v_zm(grd%nlat,nlev), w_zm(grd%nlat,nlev), &
-                 cover(grd%nlat), latout(grd%nlat), levout(nlev))
+        rnlon = real(ams%grd%nlon, wp)
+        allocate(rh_zm(ams%grd%nlat,ams%par%nlev), cf_zm(ams%grd%nlat,ams%par%nlev), t_zm(ams%grd%nlat,ams%par%nlev), &
+                 q_zm(ams%grd%nlat,ams%par%nlev), p_zm(ams%grd%nlat,ams%par%nlev), &
+                 u_zm(ams%grd%nlat,ams%par%nlev), v_zm(ams%grd%nlat,ams%par%nlev), w_zm(ams%grd%nlat,ams%par%nlev), &
+                 cover(ams%grd%nlat), latout(ams%grd%nlat), levout(ams%par%nlev))
         rh_zm = 0.0_wp; cf_zm = 0.0_wp; t_zm = 0.0_wp; q_zm = 0.0_wp
         p_zm = 0.0_wp; u_zm = 0.0_wp; v_zm = 0.0_wp; w_zm = 0.0_wp; cover = 0.0_wp
-        allocate(cnv_zm(grd%nlat,nlev), cnd_zm(grd%nlat,nlev), rad_zm(grd%nlat,nlev), &
-                 surf_zm(grd%nlat,nlev), qnet_zm(grd%nlat,nlev), vadv_zm(grd%nlat,nlev), &
-                 dyn_zm(grd%nlat,nlev), vdf_zm(grd%nlat,nlev), bd_zm(grd%nlat,nlev))
+        allocate(cnv_zm(ams%grd%nlat,ams%par%nlev), cnd_zm(ams%grd%nlat,ams%par%nlev), rad_zm(ams%grd%nlat,ams%par%nlev), &
+                 surf_zm(ams%grd%nlat,ams%par%nlev), qnet_zm(ams%grd%nlat,ams%par%nlev), vadv_zm(ams%grd%nlat,ams%par%nlev), &
+                 dyn_zm(ams%grd%nlat,ams%par%nlev), vdf_zm(ams%grd%nlat,ams%par%nlev), bd_zm(ams%grd%nlat,ams%par%nlev))
         cnv_zm = 0.0_wp; cnd_zm = 0.0_wp; rad_zm = 0.0_wp; surf_zm = 0.0_wp
         vadv_zm = 0.0_wp; dyn_zm = 0.0_wp; vdf_zm = 0.0_wp; bd_zm = 0.0_wp
-        latout = grd%lat(1:grd%nlat)
-        levout = vg%sigma_full(1:nlev)
+        latout = ams%grd%lat(1:ams%grd%nlat)
+        levout = ams%vgrid%sigma_full(1:ams%par%nlev)
         ! [K/step] time-mean -> [K/day]: /dacc%n_wacc (time), /nlon (zonal), *86400/dt.
-        kday = 86400.0_wp/dt
+        kday = 86400.0_wp/ams%par%dt
 
-        do jj = 1, grd%nlat
-            do ii = 1, grd%nlon
-                call aeros_vgrid_pressure(vg, now%ps(ii,jj), phc, pfc, dpcc)
-                call aeros_cloud_diagnose(nlev, now%temp_g(ii,jj,:), &
-                    now%qv_g(ii,jj,:), pfc, now%ps(ii,jj), cf, clwc, ciwc)
+        do jj = 1, ams%grd%nlat
+            do ii = 1, ams%grd%nlon
+                call aeros_vgrid_pressure(ams%vgrid, ams%now%ps(ii,jj), phc, pfc, dpcc)
+                call aeros_cloud_diagnose(ams%par%nlev, ams%now%temp_g(ii,jj,:), &
+                    ams%now%qv_g(ii,jj,:), pfc, ams%now%ps(ii,jj), cf, clwc, ciwc)
                 colcov = 0.0_wp
-                do kk = 1, nlev
-                    call aeros_qsat(now%temp_g(ii,jj,kk), pfc(kk), qsl, dqsl)
+                do kk = 1, ams%par%nlev
+                    call aeros_qsat(ams%now%temp_g(ii,jj,kk), pfc(kk), qsl, dqsl)
                     rh_zm(jj,kk) = rh_zm(jj,kk) + &
-                        now%qv_g(ii,jj,kk)/max(qsl,1.0e-12_wp)*100.0_wp
+                        ams%now%qv_g(ii,jj,kk)/max(qsl,1.0e-12_wp)*100.0_wp
                     cf_zm(jj,kk) = cf_zm(jj,kk) + cf(kk)
-                    t_zm(jj,kk)  = t_zm(jj,kk)  + now%temp_g(ii,jj,kk)
-                    q_zm(jj,kk)  = q_zm(jj,kk)  + now%qv_g(ii,jj,kk)*1000.0_wp
+                    t_zm(jj,kk)  = t_zm(jj,kk)  + ams%now%temp_g(ii,jj,kk)
+                    q_zm(jj,kk)  = q_zm(jj,kk)  + ams%now%qv_g(ii,jj,kk)*1000.0_wp
                     p_zm(jj,kk)  = p_zm(jj,kk)  + pfc(kk)/100.0_wp
-                    u_zm(jj,kk)  = u_zm(jj,kk)  + now%u(ii,jj,kk)
-                    v_zm(jj,kk)  = v_zm(jj,kk)  + now%v(ii,jj,kk)
+                    u_zm(jj,kk)  = u_zm(jj,kk)  + ams%now%u(ii,jj,kk)
+                    v_zm(jj,kk)  = v_zm(jj,kk)  + ams%now%v(ii,jj,kk)
                     ! time-mean vertical pressure velocity [hPa/day], >0 = subsidence
-                    if (dacc%n_wacc > 0) w_zm(jj,kk) = w_zm(jj,kk) &
-                        + dacc%w_tavg(ii,jj,kk)/real(dacc%n_wacc,wp)*864.0_wp
+                    if (ams%diag_acc%n_wacc > 0) w_zm(jj,kk) = w_zm(jj,kk) &
+                        + ams%diag_acc%w_tavg(ii,jj,kk)/real(ams%diag_acc%n_wacc,wp)*864.0_wp
                     ! per-term diabatic heating, time-mean [K/day]
-                    if (dacc%n_wacc > 0) then
-                        cnv_zm(jj,kk)  = cnv_zm(jj,kk)  + dacc%cnv_tavg(ii,jj,kk) /real(dacc%n_wacc,wp)*kday
-                        cnd_zm(jj,kk)  = cnd_zm(jj,kk)  + dacc%cnd_tavg(ii,jj,kk) /real(dacc%n_wacc,wp)*kday
-                        rad_zm(jj,kk)  = rad_zm(jj,kk)  + dacc%rad_tavg(ii,jj,kk) /real(dacc%n_wacc,wp)*kday
-                        surf_zm(jj,kk) = surf_zm(jj,kk) + dacc%surf_tavg(ii,jj,kk)/real(dacc%n_wacc,wp)*kday
-                        vadv_zm(jj,kk) = vadv_zm(jj,kk) + dacc%vadv_tavg(ii,jj,kk)/real(dacc%n_wacc,wp)*kday
-                        dyn_zm(jj,kk)  = dyn_zm(jj,kk)  + dacc%dyn_tavg(ii,jj,kk) /real(dacc%n_wacc,wp)*kday
-                        vdf_zm(jj,kk)  = vdf_zm(jj,kk)  + dacc%vdf_tavg(ii,jj,kk) /real(dacc%n_wacc,wp)*kday
-                        bd_zm(jj,kk)   = bd_zm(jj,kk)   + dacc%bd_tavg(ii,jj,kk)  /real(dacc%n_wacc,wp)*kday
+                    if (ams%diag_acc%n_wacc > 0) then
+                        cnv_zm(jj,kk)  = cnv_zm(jj,kk)  + ams%diag_acc%cnv_tavg(ii,jj,kk) /real(ams%diag_acc%n_wacc,wp)*kday
+                        cnd_zm(jj,kk)  = cnd_zm(jj,kk)  + ams%diag_acc%cnd_tavg(ii,jj,kk) /real(ams%diag_acc%n_wacc,wp)*kday
+                        rad_zm(jj,kk)  = rad_zm(jj,kk)  + ams%diag_acc%rad_tavg(ii,jj,kk) /real(ams%diag_acc%n_wacc,wp)*kday
+                        surf_zm(jj,kk) = surf_zm(jj,kk) + ams%diag_acc%surf_tavg(ii,jj,kk)/real(ams%diag_acc%n_wacc,wp)*kday
+                        vadv_zm(jj,kk) = vadv_zm(jj,kk) + ams%diag_acc%vadv_tavg(ii,jj,kk)/real(ams%diag_acc%n_wacc,wp)*kday
+                        dyn_zm(jj,kk)  = dyn_zm(jj,kk)  + ams%diag_acc%dyn_tavg(ii,jj,kk) /real(ams%diag_acc%n_wacc,wp)*kday
+                        vdf_zm(jj,kk)  = vdf_zm(jj,kk)  + ams%diag_acc%vdf_tavg(ii,jj,kk) /real(ams%diag_acc%n_wacc,wp)*kday
+                        bd_zm(jj,kk)   = bd_zm(jj,kk)   + ams%diag_acc%bd_tavg(ii,jj,kk)  /real(ams%diag_acc%n_wacc,wp)*kday
                     end if
                     colcov = max(colcov, cf(kk))     ! max-overlap column cover
                 end do
@@ -882,12 +547,12 @@ contains
             long_name="zonal-mean zonal wind")
         call nc_write(fname, "v",     v_zm,  dim1="lat", dim2="lev", units="m/s", &
             long_name="zonal-mean meridional wind")
-        if (dacc%n_wacc > 0) then
-            call nc_write(fname, "ubar", dacc%ubar_tavg/real(dacc%n_wacc,wp), dim1="lat", dim2="lev", &
+        if (ams%diag_acc%n_wacc > 0) then
+            call nc_write(fname, "ubar", ams%diag_acc%ubar_tavg/real(ams%diag_acc%n_wacc,wp), dim1="lat", dim2="lev", &
                 units="m/s", long_name="time-mean zonal-mean zonal wind (2nd half)")
-            call nc_write(fname, "vbar", dacc%vbar_tavg/real(dacc%n_wacc,wp), dim1="lat", dim2="lev", &
+            call nc_write(fname, "vbar", ams%diag_acc%vbar_tavg/real(ams%diag_acc%n_wacc,wp), dim1="lat", dim2="lev", &
                 units="m/s", long_name="time-mean zonal-mean meridional wind (2nd half)")
-            call nc_write(fname, "uvpr", dacc%uv_tavg/real(dacc%n_wacc,wp), dim1="lat", dim2="lev", &
+            call nc_write(fname, "uvpr", ams%diag_acc%uv_tavg/real(ams%diag_acc%n_wacc,wp), dim1="lat", dim2="lev", &
                 units="m2/s2", long_name="time-mean zonal-mean eddy momentum flux [u*v*]")
         end if
         call nc_write(fname, "cover", cover, dim1="lat", units="1", &
@@ -912,19 +577,19 @@ contains
             long_name="zonal-mean total dynamical heating (horizontal advection = q_dyn - q_vadv)")
         write(*,"(a)") " rce_long:: wrote zonal-mean RH/cf dump -> "//trim(fname)
 
-        if (dacc%n_wacc > 0 .and. allocated(dacc%ke_spec)) then
+        if (ams%diag_acc%n_wacc > 0 .and. allocated(ams%diag_acc%ke_spec)) then
             block
                 integer  :: m
                 real(wp) :: ket, mft
-                ket = sum(dacc%ke_spec)/real(dacc%n_wacc,wp); mft = sum(dacc%mf_spec)/real(dacc%n_wacc,wp)
+                ket = sum(ams%diag_acc%ke_spec)/real(ams%diag_acc%n_wacc,wp); mft = sum(ams%diag_acc%mf_spec)/real(ams%diag_acc%n_wacc,wp)
                 write(*,"(a)") " eddy zonal-wavenumber spectrum (mass+area wtd, 2nd-half mean):"
                 write(*,"(a,es10.3,a,es10.3)") "   total eddy KE ", ket, "   total [u*v*] ", mft
                 write(*,"(a)") "     m    KE(m)      KE%     [u*v*](m)   flux%"
-                do m = 1, dacc%mmax_spec
-                    write(*,"(i6,es11.3,f8.1,es12.3,f8.1)") m, dacc%ke_spec(m)/real(dacc%n_wacc,wp), &
-                        100.0_wp*dacc%ke_spec(m)/max(sum(dacc%ke_spec),tiny(1.0_wp)), &
-                        dacc%mf_spec(m)/real(dacc%n_wacc,wp), &
-                        100.0_wp*dacc%mf_spec(m)/max(abs(sum(dacc%mf_spec)),tiny(1.0_wp))
+                do m = 1, ams%diag_acc%mmax_spec
+                    write(*,"(i6,es11.3,f8.1,es12.3,f8.1)") m, ams%diag_acc%ke_spec(m)/real(ams%diag_acc%n_wacc,wp), &
+                        100.0_wp*ams%diag_acc%ke_spec(m)/max(sum(ams%diag_acc%ke_spec),tiny(1.0_wp)), &
+                        ams%diag_acc%mf_spec(m)/real(ams%diag_acc%n_wacc,wp), &
+                        100.0_wp*ams%diag_acc%mf_spec(m)/max(abs(sum(ams%diag_acc%mf_spec)),tiny(1.0_wp))
                 end do
             end block
             ! Where the m=8 spike lives vs a transporting mode (m=4): KE by
@@ -936,18 +601,18 @@ contains
                 real(wp) :: tot
                 do mi = 1, 2
                     mm = ms(mi)
-                    if (mm > dacc%mmax_spec) cycle
+                    if (mm > ams%diag_acc%mmax_spec) cycle
                     write(*,"(a,i0,a)") " m=", mm, " eddy KE by latitude (%, N+S folded):"
-                    tot = max(sum(dacc%ke_latm(:,mm)), tiny(1.0_wp))
-                    do j = 1, grd%nlat
-                        if (100.0_wp*dacc%ke_latm(j,mm)/tot > 3.0_wp) &
-                            write(*,"(a,f6.1,a,f6.1)") "    lat ", grd%lat(j), " : ", &
-                                100.0_wp*dacc%ke_latm(j,mm)/tot
+                    tot = max(sum(ams%diag_acc%ke_latm(:,mm)), tiny(1.0_wp))
+                    do j = 1, ams%grd%nlat
+                        if (100.0_wp*ams%diag_acc%ke_latm(j,mm)/tot > 3.0_wp) &
+                            write(*,"(a,f6.1,a,f6.1)") "    lat ", ams%grd%lat(j), " : ", &
+                                100.0_wp*ams%diag_acc%ke_latm(j,mm)/tot
                     end do
                     write(*,"(a,i0,a)") " m=", mm, " eddy KE by level (%, top=1):"
-                    tot = max(sum(dacc%ke_levm(:,mm)), tiny(1.0_wp))
-                    do k = 1, nlev
-                        write(*,"(a,i3,a,f6.1)") "    lev ", k, " : ", 100.0_wp*dacc%ke_levm(k,mm)/tot
+                    tot = max(sum(ams%diag_acc%ke_levm(:,mm)), tiny(1.0_wp))
+                    do k = 1, ams%par%nlev
+                        write(*,"(a,i3,a,f6.1)") "    lev ", k, " : ", 100.0_wp*ams%diag_acc%ke_levm(k,mm)/tot
                     end do
                 end do
             end block
@@ -974,7 +639,7 @@ contains
         w   = x - real(im0, wp)
         m0  = modulo(im0,     12) + 1             ! 1..12
         m1  = modulo(im0 + 1, 12) + 1
-        ts%ocn%sst(:,:) = (1.0_wp - w)*sst_clim(:,:,m0) + w*sst_clim(:,:,m1)
+        ams%ts%ocn%sst(:,:) = (1.0_wp - w)*sst_clim(:,:,m0) + w*sst_clim(:,:,m1)
     end subroutine set_seasonal_sst
 
     subroutine accum_monthly(n)
@@ -985,62 +650,62 @@ contains
         integer, intent(in) :: n
         real(wp), parameter :: DAYS_YR = 365.0_wp   ! radiative year (aeros_insol_day wrap)
         real(wp), parameter :: P500 = 50000.0_wp    ! [Pa] level of the geopotential diagnostic
-        real(wp) :: phc(0:nlev), pfc(nlev), dpcc(nlev)
+        real(wp) :: phc(0:ams%par%nlev), pfc(ams%par%nlev), dpcc(ams%par%nlev)
         real(wp) :: qsl, dqsl, day, frac, rnlon
         integer  :: ii, jj, kk, imon
-        real(wp) :: tzm(grd%nlat,nlev), uzm(grd%nlat,nlev), vzm(grd%nlat,nlev), rzm(grd%nlat,nlev)
-        real(wp) :: sstz(grd%nlat), prz(grd%nlat)
-        real(wp) :: phif(nlev), phih, alph, pr_ij, wgt
-        real(wp) :: cfz(grd%nlat,nlev), cfc(nlev), clwc(nlev), ciwc(nlev)
-        real(wp) :: qzm(grd%nlat,nlev), vtzm(grd%nlat,nlev), vqzm(grd%nlat,nlev), uvzm(grd%nlat,nlev)
-        real(wp) :: u2zm(grd%nlat,nlev), v2zm(grd%nlat,nlev)
-        real(wp) :: mrzm(grd%nlat,nlev), mrtzm(grd%nlat,nlev), mrqzm(grd%nlat,nlev), mr
+        real(wp) :: tzm(ams%grd%nlat,ams%par%nlev), uzm(ams%grd%nlat,ams%par%nlev), vzm(ams%grd%nlat,ams%par%nlev), rzm(ams%grd%nlat,ams%par%nlev)
+        real(wp) :: sstz(ams%grd%nlat), prz(ams%grd%nlat)
+        real(wp) :: phif(ams%par%nlev), phih, alph, pr_ij, wgt
+        real(wp) :: cfz(ams%grd%nlat,ams%par%nlev), cfc(ams%par%nlev), clwc(ams%par%nlev), ciwc(ams%par%nlev)
+        real(wp) :: qzm(ams%grd%nlat,ams%par%nlev), vtzm(ams%grd%nlat,ams%par%nlev), vqzm(ams%grd%nlat,ams%par%nlev), uvzm(ams%grd%nlat,ams%par%nlev)
+        real(wp) :: u2zm(ams%grd%nlat,ams%par%nlev), v2zm(ams%grd%nlat,ams%par%nlev)
+        real(wp) :: mrzm(ams%grd%nlat,ams%par%nlev), mrtzm(ams%grd%nlat,ams%par%nlev), mrqzm(ams%grd%nlat,ams%par%nlev), mr
         logical  :: have_pr
 
-        day  = ts%rad%doy0 + real(n,wp)*dt/86400.0_wp
+        day  = ams%ts%rad%doy0 + real(n,wp)*ams%par%dt/86400.0_wp
         frac = modulo(day - 1.0_wp, DAYS_YR)                 ! 0-based day within year
         imon = min(NMON, int(frac/(DAYS_YR/real(NMON,wp))) + 1)
 
-        have_pr = allocated(ts%cnv%precip) .and. allocated(ts%cnd%precip)
-        rnlon = real(grd%nlon, wp)
+        have_pr = allocated(ams%ts%cnv%precip) .and. allocated(ams%ts%cnd%precip)
+        rnlon = real(ams%grd%nlon, wp)
         tzm = 0.0_wp; uzm = 0.0_wp; vzm = 0.0_wp; rzm = 0.0_wp
         sstz = 0.0_wp; prz = 0.0_wp; cfz = 0.0_wp
         qzm = 0.0_wp; vtzm = 0.0_wp; vqzm = 0.0_wp; u2zm = 0.0_wp; v2zm = 0.0_wp; uvzm = 0.0_wp
         mrzm = 0.0_wp; mrtzm = 0.0_wp; mrqzm = 0.0_wp
-        do jj = 1, grd%nlat
-            do ii = 1, grd%nlon
-                call aeros_vgrid_pressure(vg, now%ps(ii,jj), phc, pfc, dpcc)
+        do jj = 1, ams%grd%nlat
+            do ii = 1, ams%grd%nlon
+                call aeros_vgrid_pressure(ams%vgrid, ams%now%ps(ii,jj), phc, pfc, dpcc)
                 ! per-level cloud fraction as radiation sees it
-                if (ts%cpr%enabled) then
-                    cfc = now%cf_g(ii,jj,:)
+                if (ams%ts%cpr%enabled) then
+                    cfc = ams%now%cf_g(ii,jj,:)
                 else
-                    call aeros_cloud_diagnose(nlev, now%temp_g(ii,jj,:), &
-                        now%qv_g(ii,jj,:), pfc, now%ps(ii,jj), cfc, clwc, ciwc)
+                    call aeros_cloud_diagnose(ams%par%nlev, ams%now%temp_g(ii,jj,:), &
+                        ams%now%qv_g(ii,jj,:), pfc, ams%now%ps(ii,jj), cfc, clwc, ciwc)
                 end if
                 cfz(jj,:) = cfz(jj,:) + cfc
-                do kk = 1, nlev
-                    call aeros_qsat(now%temp_g(ii,jj,kk), pfc(kk), qsl, dqsl)
-                    tzm(jj,kk) = tzm(jj,kk) + now%temp_g(ii,jj,kk)
-                    uzm(jj,kk) = uzm(jj,kk) + now%u(ii,jj,kk)
-                    vzm(jj,kk) = vzm(jj,kk) + now%v(ii,jj,kk)
+                do kk = 1, ams%par%nlev
+                    call aeros_qsat(ams%now%temp_g(ii,jj,kk), pfc(kk), qsl, dqsl)
+                    tzm(jj,kk) = tzm(jj,kk) + ams%now%temp_g(ii,jj,kk)
+                    uzm(jj,kk) = uzm(jj,kk) + ams%now%u(ii,jj,kk)
+                    vzm(jj,kk) = vzm(jj,kk) + ams%now%v(ii,jj,kk)
                     rzm(jj,kk) = rzm(jj,kk) + &
-                        now%qv_g(ii,jj,kk)/max(qsl,1.0e-12_wp)*100.0_wp
-                    qzm(jj,kk)  = qzm(jj,kk)  + now%qv_g(ii,jj,kk)
-                    vtzm(jj,kk) = vtzm(jj,kk) + now%v(ii,jj,kk)*now%temp_g(ii,jj,kk)
-                    uvzm(jj,kk) = uvzm(jj,kk) + now%u(ii,jj,kk)*now%v(ii,jj,kk)
-                    vqzm(jj,kk) = vqzm(jj,kk) + now%v(ii,jj,kk)*now%qv_g(ii,jj,kk)
-                    u2zm(jj,kk) = u2zm(jj,kk) + now%u(ii,jj,kk)**2
-                    v2zm(jj,kk) = v2zm(jj,kk) + now%v(ii,jj,kk)**2
-                    mr = ts%mst%mass_ratio(ii,jj,kk) - 1.0_wp
+                        ams%now%qv_g(ii,jj,kk)/max(qsl,1.0e-12_wp)*100.0_wp
+                    qzm(jj,kk)  = qzm(jj,kk)  + ams%now%qv_g(ii,jj,kk)
+                    vtzm(jj,kk) = vtzm(jj,kk) + ams%now%v(ii,jj,kk)*ams%now%temp_g(ii,jj,kk)
+                    uvzm(jj,kk) = uvzm(jj,kk) + ams%now%u(ii,jj,kk)*ams%now%v(ii,jj,kk)
+                    vqzm(jj,kk) = vqzm(jj,kk) + ams%now%v(ii,jj,kk)*ams%now%qv_g(ii,jj,kk)
+                    u2zm(jj,kk) = u2zm(jj,kk) + ams%now%u(ii,jj,kk)**2
+                    v2zm(jj,kk) = v2zm(jj,kk) + ams%now%v(ii,jj,kk)**2
+                    mr = ams%ts%mst%mass_ratio(ii,jj,kk) - 1.0_wp
                     mrzm(jj,kk)  = mrzm(jj,kk)  + mr
-                    mrtzm(jj,kk) = mrtzm(jj,kk) + mr*now%temp_g(ii,jj,kk)
-                    mrqzm(jj,kk) = mrqzm(jj,kk) + mr*now%qv_g(ii,jj,kk)
+                    mrtzm(jj,kk) = mrtzm(jj,kk) + mr*ams%now%temp_g(ii,jj,kk)
+                    mrqzm(jj,kk) = mrqzm(jj,kk) + mr*ams%now%qv_g(ii,jj,kk)
                 end do
-                sstz(jj) = sstz(jj) + ts%ocn%sst(ii,jj)
+                sstz(jj) = sstz(jj) + ams%ts%ocn%sst(ii,jj)
                 if (have_pr) then
-                    pr_ij = (ts%cnv%precip(ii,jj) + ts%cnd%precip(ii,jj))*86400.0_wp  ! kg/m2/s -> mm/day
+                    pr_ij = (ams%ts%cnv%precip(ii,jj) + ams%ts%cnd%precip(ii,jj))*86400.0_wp  ! kg/m2/s -> mm/day
                     prz(jj) = prz(jj) + pr_ij
-                    dacc%mon_pr2d(ii,jj,imon) = dacc%mon_pr2d(ii,jj,imon) + pr_ij
+                    ams%diag_acc%mon_pr2d(ii,jj,imon) = ams%diag_acc%mon_pr2d(ii,jj,imon) + pr_ij
                 end if
                 ! Hydrostatic geopotential on the full levels, integrated up from
                 ! the surface (Simmons-Burridge layer alpha; ln 2 in the top
@@ -1048,69 +713,69 @@ contains
                 ! log-p interpolation (the lowest layer extrapolated where the
                 ! surface is above 500 hPa).
                 phih = phis2(ii,jj)
-                do kk = nlev, 1, -1
+                do kk = ams%par%nlev, 1, -1
                     if (kk == 1) then
                         alph = log(2.0_wp)
                     else
                         alph = 1.0_wp - phc(kk-1)/dpcc(kk)*log(phc(kk)/phc(kk-1))
                     end if
-                    phif(kk) = phih + real(R_d,wp)*now%temp_g(ii,jj,kk)*alph
-                    if (kk > 1) phih = phih + real(R_d,wp)*now%temp_g(ii,jj,kk)*log(phc(kk)/phc(kk-1))
+                    phif(kk) = phih + real(R_d,wp)*ams%now%temp_g(ii,jj,kk)*alph
+                    if (kk > 1) phih = phih + real(R_d,wp)*ams%now%temp_g(ii,jj,kk)*log(phc(kk)/phc(kk-1))
                 end do
-                kk = nlev - 1
+                kk = ams%par%nlev - 1
                 do while (kk > 1 .and. pfc(kk) > P500)
                     kk = kk - 1
                 end do
                 wgt = (log(P500) - log(pfc(kk)))/(log(pfc(kk+1)) - log(pfc(kk)))
-                dacc%mon_z500(ii,jj,imon) = dacc%mon_z500(ii,jj,imon) + &
+                ams%diag_acc%mon_z500(ii,jj,imon) = ams%diag_acc%mon_z500(ii,jj,imon) + &
                     (phif(kk) + wgt*(phif(kk+1) - phif(kk)))/real(grav,wp)
             end do
         end do
-        dacc%mon_t(:,:,imon)  = dacc%mon_t(:,:,imon)  + tzm/rnlon
-        dacc%mon_u(:,:,imon)  = dacc%mon_u(:,:,imon)  + uzm/rnlon
-        dacc%mon_v(:,:,imon)  = dacc%mon_v(:,:,imon)  + vzm/rnlon
-        dacc%mon_rh(:,:,imon) = dacc%mon_rh(:,:,imon) + rzm/rnlon
-        dacc%mon_sst(:,imon)  = dacc%mon_sst(:,imon)  + sstz/rnlon
-        dacc%mon_pr(:,imon)   = dacc%mon_pr(:,imon)   + prz/rnlon
-        dacc%mon_cf(:,:,imon) = dacc%mon_cf(:,:,imon) + cfz/rnlon
+        ams%diag_acc%mon_t(:,:,imon)  = ams%diag_acc%mon_t(:,:,imon)  + tzm/rnlon
+        ams%diag_acc%mon_u(:,:,imon)  = ams%diag_acc%mon_u(:,:,imon)  + uzm/rnlon
+        ams%diag_acc%mon_v(:,:,imon)  = ams%diag_acc%mon_v(:,:,imon)  + vzm/rnlon
+        ams%diag_acc%mon_rh(:,:,imon) = ams%diag_acc%mon_rh(:,:,imon) + rzm/rnlon
+        ams%diag_acc%mon_sst(:,imon)  = ams%diag_acc%mon_sst(:,imon)  + sstz/rnlon
+        ams%diag_acc%mon_pr(:,imon)   = ams%diag_acc%mon_pr(:,imon)   + prz/rnlon
+        ams%diag_acc%mon_cf(:,:,imon) = ams%diag_acc%mon_cf(:,:,imon) + cfz/rnlon
         ! eddy covariances of this sample: [vT] - [v][T] etc.
-        dacc%mon_vt(:,:,imon)  = dacc%mon_vt(:,:,imon)  + (vtzm - vzm*tzm/rnlon)/rnlon
-        dacc%mon_uv(:,:,imon)  = dacc%mon_uv(:,:,imon)  + (uvzm - uzm*vzm/rnlon)/rnlon
-        dacc%mon_vq(:,:,imon)  = dacc%mon_vq(:,:,imon)  + (vqzm - vzm*qzm/rnlon)/rnlon
-        dacc%mon_eke(:,:,imon) = dacc%mon_eke(:,:,imon) + 0.5_wp*(u2zm + v2zm - (uzm**2 + vzm**2)/rnlon)/rnlon
-        dacc%mon_mr(:,:,imon)  = dacc%mon_mr(:,:,imon)  + mrzm/rnlon
-        dacc%mon_mrt(:,:,imon) = dacc%mon_mrt(:,:,imon) + (mrtzm - mrzm*tzm/rnlon)/rnlon
-        dacc%mon_mrq(:,:,imon) = dacc%mon_mrq(:,:,imon) + (mrqzm - mrzm*qzm/rnlon)/rnlon
-        dacc%mon_mr2(:,:,imon) = dacc%mon_mr2(:,:,imon) + ts%mst%mass_ratio(:,:,nlev) - 1.0_wp
-        dacc%mon_u3(:,:,:,imon) = dacc%mon_u3(:,:,:,imon) + now%u(:,:,1:nlev)
-        dacc%mon_v3(:,:,:,imon) = dacc%mon_v3(:,:,:,imon) + now%v(:,:,1:nlev)
-        dacc%mon_t3(:,:,:,imon) = dacc%mon_t3(:,:,:,imon) + now%temp_g(:,:,1:nlev)
-        dacc%mon_q3(:,:,:,imon) = dacc%mon_q3(:,:,:,imon) + now%qv_g(:,:,1:nlev)
-        if (ts%land%enabled .and. allocated(ts%land%skin)) then
-            dacc%mon_skin(:,:,imon) = dacc%mon_skin(:,:,imon) + ts%land%skin
+        ams%diag_acc%mon_vt(:,:,imon)  = ams%diag_acc%mon_vt(:,:,imon)  + (vtzm - vzm*tzm/rnlon)/rnlon
+        ams%diag_acc%mon_uv(:,:,imon)  = ams%diag_acc%mon_uv(:,:,imon)  + (uvzm - uzm*vzm/rnlon)/rnlon
+        ams%diag_acc%mon_vq(:,:,imon)  = ams%diag_acc%mon_vq(:,:,imon)  + (vqzm - vzm*qzm/rnlon)/rnlon
+        ams%diag_acc%mon_eke(:,:,imon) = ams%diag_acc%mon_eke(:,:,imon) + 0.5_wp*(u2zm + v2zm - (uzm**2 + vzm**2)/rnlon)/rnlon
+        ams%diag_acc%mon_mr(:,:,imon)  = ams%diag_acc%mon_mr(:,:,imon)  + mrzm/rnlon
+        ams%diag_acc%mon_mrt(:,:,imon) = ams%diag_acc%mon_mrt(:,:,imon) + (mrtzm - mrzm*tzm/rnlon)/rnlon
+        ams%diag_acc%mon_mrq(:,:,imon) = ams%diag_acc%mon_mrq(:,:,imon) + (mrqzm - mrzm*qzm/rnlon)/rnlon
+        ams%diag_acc%mon_mr2(:,:,imon) = ams%diag_acc%mon_mr2(:,:,imon) + ams%ts%mst%mass_ratio(:,:,ams%par%nlev) - 1.0_wp
+        ams%diag_acc%mon_u3(:,:,:,imon) = ams%diag_acc%mon_u3(:,:,:,imon) + ams%now%u(:,:,1:ams%par%nlev)
+        ams%diag_acc%mon_v3(:,:,:,imon) = ams%diag_acc%mon_v3(:,:,:,imon) + ams%now%v(:,:,1:ams%par%nlev)
+        ams%diag_acc%mon_t3(:,:,:,imon) = ams%diag_acc%mon_t3(:,:,:,imon) + ams%now%temp_g(:,:,1:ams%par%nlev)
+        ams%diag_acc%mon_q3(:,:,:,imon) = ams%diag_acc%mon_q3(:,:,:,imon) + ams%now%qv_g(:,:,1:ams%par%nlev)
+        if (ams%ts%land%enabled .and. allocated(ams%ts%land%skin)) then
+            ams%diag_acc%mon_skin(:,:,imon) = ams%diag_acc%mon_skin(:,:,imon) + ams%ts%land%skin
         else
-            dacc%mon_skin(:,:,imon) = dacc%mon_skin(:,:,imon) + ts%ocn%sst
+            ams%diag_acc%mon_skin(:,:,imon) = ams%diag_acc%mon_skin(:,:,imon) + ams%ts%ocn%sst
         end if
-        if (allocated(ts%rad%olr)) then
-            dacc%mon_lwd(:,:,imon)   = dacc%mon_lwd(:,:,imon)   + ts%rad%lw_dw_sur
-            dacc%mon_olr(:,:,imon)   = dacc%mon_olr(:,:,imon)   + ts%rad%olr
-            dacc%mon_olrcs(:,:,imon) = dacc%mon_olrcs(:,:,imon) + ts%rad%olr_cs
-            dacc%mon_cover(:,:,imon) = dacc%mon_cover(:,:,imon) + ts%rad%cover
-            dacc%mon_swn(:,:,imon)   = dacc%mon_swn(:,:,imon)   + ts%rad%sw_net_sur
-            dacc%mon_swup(:,:,imon)  = dacc%mon_swup(:,:,imon)  + ts%rad%sw_up_toa
+        if (allocated(ams%ts%rad%olr)) then
+            ams%diag_acc%mon_lwd(:,:,imon)   = ams%diag_acc%mon_lwd(:,:,imon)   + ams%ts%rad%lw_dw_sur
+            ams%diag_acc%mon_olr(:,:,imon)   = ams%diag_acc%mon_olr(:,:,imon)   + ams%ts%rad%olr
+            ams%diag_acc%mon_olrcs(:,:,imon) = ams%diag_acc%mon_olrcs(:,:,imon) + ams%ts%rad%olr_cs
+            ams%diag_acc%mon_cover(:,:,imon) = ams%diag_acc%mon_cover(:,:,imon) + ams%ts%rad%cover
+            ams%diag_acc%mon_swn(:,:,imon)   = ams%diag_acc%mon_swn(:,:,imon)   + ams%ts%rad%sw_net_sur
+            ams%diag_acc%mon_swup(:,:,imon)  = ams%diag_acc%mon_swup(:,:,imon)  + ams%ts%rad%sw_up_toa
         end if
-        dacc%mon_tlow(:,:,imon) = dacc%mon_tlow(:,:,imon) + now%temp_g(:,:,nlev)  ! lowest level (~350 m)
-        if (ts%surf%enabled) then
-            dacc%mon_t2m(:,:,imon) = dacc%mon_t2m(:,:,imon) + ts%surf%t2m          ! surface-layer 2 m T
+        ams%diag_acc%mon_tlow(:,:,imon) = ams%diag_acc%mon_tlow(:,:,imon) + ams%now%temp_g(:,:,ams%par%nlev)  ! lowest level (~350 m)
+        if (ams%ts%surf%enabled) then
+            ams%diag_acc%mon_t2m(:,:,imon) = ams%diag_acc%mon_t2m(:,:,imon) + ams%ts%surf%t2m          ! surface-layer 2 m T
         else
-            dacc%mon_t2m(:,:,imon) = dacc%mon_t2m(:,:,imon) + now%temp_g(:,:,nlev)
+            ams%diag_acc%mon_t2m(:,:,imon) = ams%diag_acc%mon_t2m(:,:,imon) + ams%now%temp_g(:,:,ams%par%nlev)
         end if
-        dacc%mon_vlow(:,:,imon) = dacc%mon_vlow(:,:,imon) + sqrt(now%u(:,:,nlev)**2 + now%v(:,:,nlev)**2)
-        if (allocated(ts%surf%evap)) then
-            dacc%mon_evap(:,:,imon) = dacc%mon_evap(:,:,imon) + ts%surf%evap*86400.0_wp
-            dacc%mon_shf(:,:,imon)  = dacc%mon_shf(:,:,imon)  + ts%surf%shf
+        ams%diag_acc%mon_vlow(:,:,imon) = ams%diag_acc%mon_vlow(:,:,imon) + sqrt(ams%now%u(:,:,ams%par%nlev)**2 + ams%now%v(:,:,ams%par%nlev)**2)
+        if (allocated(ams%ts%surf%evap)) then
+            ams%diag_acc%mon_evap(:,:,imon) = ams%diag_acc%mon_evap(:,:,imon) + ams%ts%surf%evap*86400.0_wp
+            ams%diag_acc%mon_shf(:,:,imon)  = ams%diag_acc%mon_shf(:,:,imon)  + ams%ts%surf%shf
         end if
-        dacc%mon_cnt(imon)    = dacc%mon_cnt(imon) + 1
+        ams%diag_acc%mon_cnt(imon)    = ams%diag_acc%mon_cnt(imon) + 1
     end subroutine accum_monthly
 
     subroutine dump_monthly(fname)
@@ -1129,70 +794,70 @@ contains
                                  vts_o(:,:,:), vqs_o(:,:,:), ekes_o(:,:,:), uv_o(:,:,:), uvs_o(:,:,:)
         real(wp), allocatable :: mr_o(:,:,:), mrt_o(:,:,:), mrq_o(:,:,:), mr2_o(:,:,:)
         real(wp), allocatable :: swn_o(:,:,:), swup_o(:,:,:)
-        real(wp) :: ub(grd%nlon), vb(grd%nlon), tb(grd%nlon), qb(grd%nlon), rn
+        real(wp) :: ub(ams%grd%nlon), vb(ams%grd%nlon), tb(ams%grd%nlon), qb(ams%grd%nlon), rn
         integer :: m, jj, kk
-        allocate(latout(grd%nlat), lonout(grd%nlon), levout(nlev), monout(NMON))
-        allocate(t_o(grd%nlat,nlev,NMON), u_o(grd%nlat,nlev,NMON), &
-                 v_o(grd%nlat,nlev,NMON), rh_o(grd%nlat,nlev,NMON), &
-                 sst_o(grd%nlat,NMON), pr_o(grd%nlat,NMON), &
-                 t2m_o(grd%nlon,grd%nlat,NMON), tlow_o(grd%nlon,grd%nlat,NMON), pr2d_o(grd%nlon,grd%nlat,NMON), &
-                 z500_o(grd%nlon,grd%nlat,NMON), vlow_o(grd%nlon,grd%nlat,NMON), &
-                 evap_o(grd%nlon,grd%nlat,NMON), shf_o(grd%nlon,grd%nlat,NMON))
-        allocate(mr_o(grd%nlat,nlev,NMON), mrt_o(grd%nlat,nlev,NMON), mrq_o(grd%nlat,nlev,NMON))
-        allocate(mr2_o(grd%nlon,grd%nlat,NMON))
-        allocate(swn_o(grd%nlon,grd%nlat,NMON), swup_o(grd%nlon,grd%nlat,NMON))
-        allocate(vt_o(grd%nlat,nlev,NMON), vq_o(grd%nlat,nlev,NMON), eke_o(grd%nlat,nlev,NMON), &
-                 vts_o(grd%nlat,nlev,NMON), vqs_o(grd%nlat,nlev,NMON), ekes_o(grd%nlat,nlev,NMON), &
-                 uv_o(grd%nlat,nlev,NMON), uvs_o(grd%nlat,nlev,NMON))
-        allocate(cf_o(grd%nlat,nlev,NMON), skin_o(grd%nlon,grd%nlat,NMON), &
-                 lwd_o(grd%nlon,grd%nlat,NMON), olr_o(grd%nlon,grd%nlat,NMON), &
-                 olrcs_o(grd%nlon,grd%nlat,NMON), cover_o(grd%nlon,grd%nlat,NMON))
-        latout = grd%lat(1:grd%nlat)
-        lonout = grd%lon(1:grd%nlon)
-        levout = vg%sigma_full(1:nlev)
+        allocate(latout(ams%grd%nlat), lonout(ams%grd%nlon), levout(ams%par%nlev), monout(NMON))
+        allocate(t_o(ams%grd%nlat,ams%par%nlev,NMON), u_o(ams%grd%nlat,ams%par%nlev,NMON), &
+                 v_o(ams%grd%nlat,ams%par%nlev,NMON), rh_o(ams%grd%nlat,ams%par%nlev,NMON), &
+                 sst_o(ams%grd%nlat,NMON), pr_o(ams%grd%nlat,NMON), &
+                 t2m_o(ams%grd%nlon,ams%grd%nlat,NMON), tlow_o(ams%grd%nlon,ams%grd%nlat,NMON), pr2d_o(ams%grd%nlon,ams%grd%nlat,NMON), &
+                 z500_o(ams%grd%nlon,ams%grd%nlat,NMON), vlow_o(ams%grd%nlon,ams%grd%nlat,NMON), &
+                 evap_o(ams%grd%nlon,ams%grd%nlat,NMON), shf_o(ams%grd%nlon,ams%grd%nlat,NMON))
+        allocate(mr_o(ams%grd%nlat,ams%par%nlev,NMON), mrt_o(ams%grd%nlat,ams%par%nlev,NMON), mrq_o(ams%grd%nlat,ams%par%nlev,NMON))
+        allocate(mr2_o(ams%grd%nlon,ams%grd%nlat,NMON))
+        allocate(swn_o(ams%grd%nlon,ams%grd%nlat,NMON), swup_o(ams%grd%nlon,ams%grd%nlat,NMON))
+        allocate(vt_o(ams%grd%nlat,ams%par%nlev,NMON), vq_o(ams%grd%nlat,ams%par%nlev,NMON), eke_o(ams%grd%nlat,ams%par%nlev,NMON), &
+                 vts_o(ams%grd%nlat,ams%par%nlev,NMON), vqs_o(ams%grd%nlat,ams%par%nlev,NMON), ekes_o(ams%grd%nlat,ams%par%nlev,NMON), &
+                 uv_o(ams%grd%nlat,ams%par%nlev,NMON), uvs_o(ams%grd%nlat,ams%par%nlev,NMON))
+        allocate(cf_o(ams%grd%nlat,ams%par%nlev,NMON), skin_o(ams%grd%nlon,ams%grd%nlat,NMON), &
+                 lwd_o(ams%grd%nlon,ams%grd%nlat,NMON), olr_o(ams%grd%nlon,ams%grd%nlat,NMON), &
+                 olrcs_o(ams%grd%nlon,ams%grd%nlat,NMON), cover_o(ams%grd%nlon,ams%grd%nlat,NMON))
+        latout = ams%grd%lat(1:ams%grd%nlat)
+        lonout = ams%grd%lon(1:ams%grd%nlon)
+        levout = ams%vgrid%sigma_full(1:ams%par%nlev)
         do m = 1, NMON
             monout(m) = real(m, wp)
-            if (dacc%mon_cnt(m) > 0) then
-                t_o(:,:,m)  = dacc%mon_t(:,:,m) /real(dacc%mon_cnt(m),wp)
-                u_o(:,:,m)  = dacc%mon_u(:,:,m) /real(dacc%mon_cnt(m),wp)
-                v_o(:,:,m)  = dacc%mon_v(:,:,m) /real(dacc%mon_cnt(m),wp)
-                rh_o(:,:,m) = dacc%mon_rh(:,:,m)/real(dacc%mon_cnt(m),wp)
-                sst_o(:,m)  = dacc%mon_sst(:,m) /real(dacc%mon_cnt(m),wp)
-                pr_o(:,m)   = dacc%mon_pr(:,m)  /real(dacc%mon_cnt(m),wp)
-                t2m_o(:,:,m) = dacc%mon_t2m(:,:,m)/real(dacc%mon_cnt(m),wp)
-                tlow_o(:,:,m) = dacc%mon_tlow(:,:,m)/real(dacc%mon_cnt(m),wp)
-                pr2d_o(:,:,m) = dacc%mon_pr2d(:,:,m)/real(dacc%mon_cnt(m),wp)
-                z500_o(:,:,m) = dacc%mon_z500(:,:,m)/real(dacc%mon_cnt(m),wp)
-                vlow_o(:,:,m) = dacc%mon_vlow(:,:,m)/real(dacc%mon_cnt(m),wp)
-                evap_o(:,:,m) = dacc%mon_evap(:,:,m)/real(dacc%mon_cnt(m),wp)
-                shf_o(:,:,m)  = dacc%mon_shf(:,:,m) /real(dacc%mon_cnt(m),wp)
-                cf_o(:,:,m)   = dacc%mon_cf(:,:,m)  /real(dacc%mon_cnt(m),wp)
-                skin_o(:,:,m) = dacc%mon_skin(:,:,m)/real(dacc%mon_cnt(m),wp)
-                lwd_o(:,:,m)  = dacc%mon_lwd(:,:,m) /real(dacc%mon_cnt(m),wp)
-                olr_o(:,:,m)  = dacc%mon_olr(:,:,m) /real(dacc%mon_cnt(m),wp)
-                olrcs_o(:,:,m) = dacc%mon_olrcs(:,:,m)/real(dacc%mon_cnt(m),wp)
-                cover_o(:,:,m) = dacc%mon_cover(:,:,m)/real(dacc%mon_cnt(m),wp)
-                rn = real(dacc%mon_cnt(m),wp)
-                vt_o(:,:,m)  = dacc%mon_vt(:,:,m) /rn
-                uv_o(:,:,m)  = dacc%mon_uv(:,:,m) /rn
-                vq_o(:,:,m)  = dacc%mon_vq(:,:,m) /rn*1000.0_wp
-                eke_o(:,:,m) = dacc%mon_eke(:,:,m)/rn
-                mr_o(:,:,m)  = dacc%mon_mr(:,:,m) /rn
-                mrt_o(:,:,m) = dacc%mon_mrt(:,:,m)/rn
-                mrq_o(:,:,m) = dacc%mon_mrq(:,:,m)/rn*1000.0_wp
-                mr2_o(:,:,m) = dacc%mon_mr2(:,:,m)/rn
-                swn_o(:,:,m) = dacc%mon_swn(:,:,m)/rn; swup_o(:,:,m) = dacc%mon_swup(:,:,m)/rn
+            if (ams%diag_acc%mon_cnt(m) > 0) then
+                t_o(:,:,m)  = ams%diag_acc%mon_t(:,:,m) /real(ams%diag_acc%mon_cnt(m),wp)
+                u_o(:,:,m)  = ams%diag_acc%mon_u(:,:,m) /real(ams%diag_acc%mon_cnt(m),wp)
+                v_o(:,:,m)  = ams%diag_acc%mon_v(:,:,m) /real(ams%diag_acc%mon_cnt(m),wp)
+                rh_o(:,:,m) = ams%diag_acc%mon_rh(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                sst_o(:,m)  = ams%diag_acc%mon_sst(:,m) /real(ams%diag_acc%mon_cnt(m),wp)
+                pr_o(:,m)   = ams%diag_acc%mon_pr(:,m)  /real(ams%diag_acc%mon_cnt(m),wp)
+                t2m_o(:,:,m) = ams%diag_acc%mon_t2m(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                tlow_o(:,:,m) = ams%diag_acc%mon_tlow(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                pr2d_o(:,:,m) = ams%diag_acc%mon_pr2d(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                z500_o(:,:,m) = ams%diag_acc%mon_z500(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                vlow_o(:,:,m) = ams%diag_acc%mon_vlow(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                evap_o(:,:,m) = ams%diag_acc%mon_evap(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                shf_o(:,:,m)  = ams%diag_acc%mon_shf(:,:,m) /real(ams%diag_acc%mon_cnt(m),wp)
+                cf_o(:,:,m)   = ams%diag_acc%mon_cf(:,:,m)  /real(ams%diag_acc%mon_cnt(m),wp)
+                skin_o(:,:,m) = ams%diag_acc%mon_skin(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                lwd_o(:,:,m)  = ams%diag_acc%mon_lwd(:,:,m) /real(ams%diag_acc%mon_cnt(m),wp)
+                olr_o(:,:,m)  = ams%diag_acc%mon_olr(:,:,m) /real(ams%diag_acc%mon_cnt(m),wp)
+                olrcs_o(:,:,m) = ams%diag_acc%mon_olrcs(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                cover_o(:,:,m) = ams%diag_acc%mon_cover(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                rn = real(ams%diag_acc%mon_cnt(m),wp)
+                vt_o(:,:,m)  = ams%diag_acc%mon_vt(:,:,m) /rn
+                uv_o(:,:,m)  = ams%diag_acc%mon_uv(:,:,m) /rn
+                vq_o(:,:,m)  = ams%diag_acc%mon_vq(:,:,m) /rn*1000.0_wp
+                eke_o(:,:,m) = ams%diag_acc%mon_eke(:,:,m)/rn
+                mr_o(:,:,m)  = ams%diag_acc%mon_mr(:,:,m) /rn
+                mrt_o(:,:,m) = ams%diag_acc%mon_mrt(:,:,m)/rn
+                mrq_o(:,:,m) = ams%diag_acc%mon_mrq(:,:,m)/rn*1000.0_wp
+                mr2_o(:,:,m) = ams%diag_acc%mon_mr2(:,:,m)/rn
+                swn_o(:,:,m) = ams%diag_acc%mon_swn(:,:,m)/rn; swup_o(:,:,m) = ams%diag_acc%mon_swup(:,:,m)/rn
                 ! stationary part from the monthly-mean fields: [v*T*] etc.
-                do kk = 1, nlev
-                    do jj = 1, grd%nlat
-                        ub = dacc%mon_u3(:,jj,kk,m)/rn; vb = dacc%mon_v3(:,jj,kk,m)/rn
-                        tb = dacc%mon_t3(:,jj,kk,m)/rn; qb = dacc%mon_q3(:,jj,kk,m)/rn
-                        ub = ub - sum(ub)/real(grd%nlon,wp); vb = vb - sum(vb)/real(grd%nlon,wp)
-                        tb = tb - sum(tb)/real(grd%nlon,wp); qb = qb - sum(qb)/real(grd%nlon,wp)
-                        vts_o(jj,kk,m)  = sum(vb*tb)/real(grd%nlon,wp)
-                        uvs_o(jj,kk,m)  = sum(ub*vb)/real(grd%nlon,wp)
-                        vqs_o(jj,kk,m)  = sum(vb*qb)/real(grd%nlon,wp)*1000.0_wp
-                        ekes_o(jj,kk,m) = 0.5_wp*sum(ub*ub + vb*vb)/real(grd%nlon,wp)
+                do kk = 1, ams%par%nlev
+                    do jj = 1, ams%grd%nlat
+                        ub = ams%diag_acc%mon_u3(:,jj,kk,m)/rn; vb = ams%diag_acc%mon_v3(:,jj,kk,m)/rn
+                        tb = ams%diag_acc%mon_t3(:,jj,kk,m)/rn; qb = ams%diag_acc%mon_q3(:,jj,kk,m)/rn
+                        ub = ub - sum(ub)/real(ams%grd%nlon,wp); vb = vb - sum(vb)/real(ams%grd%nlon,wp)
+                        tb = tb - sum(tb)/real(ams%grd%nlon,wp); qb = qb - sum(qb)/real(ams%grd%nlon,wp)
+                        vts_o(jj,kk,m)  = sum(vb*tb)/real(ams%grd%nlon,wp)
+                        uvs_o(jj,kk,m)  = sum(ub*vb)/real(ams%grd%nlon,wp)
+                        vqs_o(jj,kk,m)  = sum(vb*qb)/real(ams%grd%nlon,wp)*1000.0_wp
+                        ekes_o(jj,kk,m) = 0.5_wp*sum(ub*ub + vb*vb)/real(ams%grd%nlon,wp)
                     end do
                 end do
             else
@@ -1281,252 +946,36 @@ contains
         call nc_write(fname, "swup", swup_o, dim1="lon", dim2="lat", dim3="month", &
             units="W/m2", long_name="monthly reflected shortwave at TOA")
         write(*,"(a,i0,a,a)") " rce_long:: wrote monthly climatology (", &
-            count(dacc%mon_cnt>0), " months populated) -> ", trim(fname)
+            count(ams%diag_acc%mon_cnt>0), " months populated) -> ", trim(fname)
         deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o, tlow_o, &
                    pr2d_o, z500_o, vlow_o, evap_o, shf_o, cf_o, skin_o, lwd_o, olr_o, &
                    olrcs_o, cover_o, vt_o, vq_o, eke_o, vts_o, vqs_o, ekes_o, mr_o, mrt_o, mrq_o, mr2_o, swn_o, swup_o, &
                    uv_o, uvs_o)
     end subroutine dump_monthly
-
     subroutine read_config()
+        ! The driver's own `&rce` keys. Every one is optional in the case file
+        ! and falls back to input/aeros_defaults.nml (&rce there is the schema).
+        ! The model's own configuration is read by aeros_lib_init.
         logical :: ex
         inquire(file=trim(nmlfile), exist=ex)
         if (.not. ex) then
-            write(*,"(a)") " rce_long:: no "//trim(nmlfile)//", using defaults"
-            return
+            write(*,"(a)") " rce_long:: error: namelist file not found: "//trim(nmlfile)
+            error stop 1
         end if
-        call nml_read(nmlfile, "rce", "trunc", trunc)
-        call nml_read(nmlfile, "rce", "nlev", nlev)
-        call nml_read(nmlfile, "rce", "nstep", nstep)
-        call nml_read(nmlfile, "rce", "dt", dt)
-        call nml_read(nmlfile, "rce", "t_ref", t_ref, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "vert_vanleer", vert_vanleer, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "tau_diff", tau_diff, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "ndiff", ndiff, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "eps_filter", eps_filter, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "raw_alpha", raw_alpha, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "conv_tau", conv_tau)
-        call nml_read(nmlfile, "rce", "conv_rh_ref", conv_rh_ref, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "conv_rh_ref_bl", conv_rh_ref_bl, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "conv_rh_hscale", conv_rh_hscale, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "conv_rh_zpbl", conv_rh_zpbl, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "conv_rh_ztop", conv_rh_ztop, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "conv_shallow_sig", conv_shallow_sig, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "c_h", c_h, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "c_e", c_e, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "c_d", c_d, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "z0_ocean", z0_ocean, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "z0_land", z0_land, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "gust_speed", gust_speed, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "wind_slowdown", wind_slowdown, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "print_every", print_every)
-        call nml_read(nmlfile, "rce", "l_surf", l_surf)
-        call nml_read(nmlfile, "rce", "l_cnv", l_cnv)
-        call nml_read(nmlfile, "rce", "l_dry_adjust", l_dry_adjust)
-        call nml_read(nmlfile, "rce", "l_uniform_insol", l_uniform_insol)
-        call nml_read(nmlfile, "rce", "l_nonrotating", l_nonrotating)
-        call nml_read(nmlfile, "rce", "l_qforce", l_qforce, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "qforce_amp", qforce_amp, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "sponge_kr", sponge_kr, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "sponge_kt", sponge_kt, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "sponge_sigma", sponge_sigma, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "l_cnd", l_cnd)
-        call nml_read(nmlfile, "rce", "l_rad", l_rad)
-        call nml_read(nmlfile, "rce", "l_rad_clouds", l_rad_clouds)
-        call nml_read(nmlfile, "rce", "l_o3", l_o3, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cld_rhc_sfc", cld_rhc_sfc, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cld_rhc_top", cld_rhc_top, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cld_rhc_ice", cld_rhc_ice, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cld_lwc", cld_lwc, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cld_iwc", cld_iwc, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "sw_aer_ot", sw_aer_ot, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "sw_aer_im", sw_aer_im, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "so4_file", so4_file, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "so4_year", so4_year, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "so4_const", so4_const, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "so4_indirect", so4_indirect, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "dust_file", dust_file, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "dust_scale", dust_scale, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "dust_im", dust_im, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "l_sponge", l_sponge, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "l_vdiff", l_vdiff)
-        call nml_read(nmlfile, "rce", "l_diag", l_diag)
-        call nml_read(nmlfile, "rce", "vdiff_k0", vdiff_k0)
-        call nml_read(nmlfile, "rce", "vdiff_sigma", vdiff_sigma)
-        ! Boundary-layer scheme (optional; inherits input/rce_defaults.nml).
-        call nml_read(nmlfile, "rce", "vdiff_richardson", vdiff_richardson, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "surf_ri_crit", surf_ri_crit, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "surf_r_s_land", surf_r_s_land, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "vdiff_ri_crit", vdiff_ri_crit, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "seed_asym", seed_asym)
-        call nml_read(nmlfile, "rce", "albedo", albedo)
-        call nml_read(nmlfile, "rce", "co2_ppm", co2_ppm)
-        call nml_read(nmlfile, "rce", "cond_rh_crit", cond_rh_crit)
-        call nml_read(nmlfile, "rce", "cond_reevap", cond_reevap, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cond_time_scale", cond_time_scale, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cond_lid_q_max", cond_lid_q_max, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cond_rh_crit_ice", cond_rh_crit_ice, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "bd_file", bd_file, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "bd_scale", bd_scale, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "bd_per_K", bd_per_K, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "bd_t_ref", bd_t_ref, defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "bd_tau_mean_days", bd_tau_mean_days, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "ocean_mode", ocean_mode)
-        call nml_read(nmlfile, "rce", "ocean_depth", ocean_depth)
-        ! Sea-ice knobs (feat/seaice): optional (inherit input/rce_defaults.nml)
-        ! so existing rce_*.nml files that omit them keep the freeze-floor slab.
-        call nml_read(nmlfile, "rce", "l_seaice", l_seaice, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "ice_albedo", ice_albedo, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "k_ice", k_ice, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "t_frz", t_frz, &
-                      defaults_file="input/rce_defaults.nml")
-        ! Optional overrides: a namelist that omits these inherits input/rce_defaults.nml
-        ! (6 h / ecCKD) instead of erroring. Every other key above stays required.
-        call nml_read(nmlfile, "rce", "rad_interval", rad_interval, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "rad_scheme", rad_scheme, &
-                      defaults_file="input/rce_defaults.nml")
-        ! Topography (feat/topography). Optional overrides like the rad knobs
-        ! above: a namelist that omits them inherits input/rce_defaults.nml
-        ! (l_topography off), so existing run namelists are unaffected.
-        ! Convection scheme selector. Optional (inherits input/rce_defaults.nml =
-        ! "sbm"), so existing namelists that omit it keep the default scheme.
-        call nml_read(nmlfile, "rce", "conv_scheme", conv_scheme, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "l_topography", l_topography, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "topo_file", topo_file, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "topo_ramp_days", topo_ramp_days, &
-                      defaults_file="input/rce_defaults.nml")
-        ! Land (feat/land). Optional overrides like the topo knobs above: a
-        ! namelist that omits them inherits input/rce_defaults.nml (l_land off),
-        ! so existing run namelists are unaffected.
-        call nml_read(nmlfile, "rce", "l_land", l_land, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "lsm_file", lsm_file, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "land_albedo_file", land_albedo_file, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "w_field_capacity", w_field_capacity, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "w_crit", w_crit, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "c_soil", c_soil, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "land_albedo", land_albedo, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "land_albedo_seasonal", land_albedo_seasonal, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "snow_albedo", snow_albedo, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "snow_dt", snow_dt, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "beta_frozen", beta_frozen, &
-                      defaults_file="input/rce_defaults.nml")
-        ! Restart knobs (feat/restart): optional (inherit input/rce_defaults.nml)
-        ! so existing rce_*.nml files that omit them keep cold-starting, not erroring.
-        call nml_read(nmlfile, "rce", "restart_in", restart_in, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "restart_out", restart_out, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "restart_interval", restart_interval, &
-                      defaults_file="input/rce_defaults.nml")
-        ! Prognostic cloud knobs (feat/clouds): optional (inherit rce_defaults.nml)
-        ! so existing rce_*.nml files that omit them keep the diagnostic scheme.
-        call nml_read(nmlfile, "rce", "l_cloud_prog", l_cloud_prog, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cloud_rhc_sfc", cloud_rhc_sfc, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cloud_rhc_top", cloud_rhc_top, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cloud_tau_form", cloud_tau_form, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cloud_tau_evap", cloud_tau_evap, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "cloud_c_detr", cloud_c_detr, &
-                      defaults_file="input/rce_defaults.nml")
-        ! Adaptive hyperdiffusion knobs (feat/adaptive-diff): optional (inherit
-        ! rce_defaults.nml, both OFF) so existing rce_*.nml files that omit them
-        ! keep the fixed del^ndiff scheme, bit for bit.
-        call nml_read(nmlfile, "rce", "diff_adapt", diff_adapt, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "diff_zeta_ref", diff_zeta_ref, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "diff_adapt_gain", diff_adapt_gain, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "diff_adapt_max", diff_adapt_max, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "diff_taper", diff_taper, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "diff_ndiff_top", diff_ndiff_top, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "diff_taper_sigma", diff_taper_sigma, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "tau_diff_div", tau_diff_div, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "si_alpha", si_alpha, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "time_scheme", time_scheme, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "ncycle", ncycle, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "ncycle_variant", ncycle_variant, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "drag_vmax", drag_vmax, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "drag_coef", drag_coef, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "sst_eq", sst_eq, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "sst_lat", sst_lat, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "sst_shape", sst_shape, &
-                      defaults_file="input/rce_defaults.nml")
-        ! Seasonal insolation + monthly-mean climatology output (feat/seasonal):
-        ! optional (inherit input/rce_defaults.nml = off / ""), so existing
-        ! rce_*.nml keep working unchanged.
-        call nml_read(nmlfile, "rce", "l_seasonal", l_seasonal, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "doy0", doy0, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "monthly_out", monthly_out, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "mon_spinup_days", mon_spinup_days, &
-                      defaults_file="input/rce_defaults.nml")
-        call nml_read(nmlfile, "rce", "sst_seasonal_file", sst_seasonal_file, &
-                      defaults_file="input/rce_defaults.nml")
+        call nml_read(nmlfile, "rce", "nstep",             nstep,             defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "print_every",       print_every,       defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "l_diag",            l_diag,            defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "monthly_out",       monthly_out,       defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "mon_spinup_days",   mon_spinup_days,   defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "restart_in",        restart_in,        defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "restart_out",       restart_out,       defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "restart_interval",  restart_interval,  defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "topo_file",         topo_file,         defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "topo_ramp_days",    topo_ramp_days,    defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "sst_seasonal_file", sst_seasonal_file, defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "l_uniform_insol",   l_uniform_insol,   defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "l_qforce",          l_qforce,          defaults_file=defaults_file)
+        call nml_read(nmlfile, "rce", "qforce_amp",        qforce_amp,        defaults_file=defaults_file)
         return
     end subroutine read_config
 
@@ -1535,25 +984,25 @@ contains
         real(wp) :: tmx, tmn, tmean, umax
         real(wp) :: hphys, hcnd
         integer  :: imx, jmx, imn, jmn, kum, jum, ium
-        call aeros_timestep_diagnose(ts, pool, vg, grd, now)
+        call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
         ! max|u| with its location: if it lives at the top level and migrates
         ! poleward as it grows, the terminal blow-up is a top thermal-wind jet.
         call locate_umax(umax, ium, jum, kum)
         write(*,"(a)") ""
         write(*,"(a,i0,a,f8.2,a,f7.1,a,i0,a,f6.1,a)") " -- step ", n, "  day ", &
-            real(n,wp)*dt/86400.0_wp, "   max|u| ", umax, " m/s @ lev ", kum, &
-            " lat ", grd%lat(jum), " N"
+            real(n,wp)*ams%par%dt/86400.0_wp, "   max|u| ", umax, " m/s @ lev ", kum, &
+            " lat ", ams%grd%lat(jum), " N"
         write(*,"(a)") "   lev    Tmean     Tmax  @(i,j)        Tmin    " // &
                        "Hfwd[K/d] Hcnd[K/d]"
-        do k = 1, nlev
+        do k = 1, ams%par%nlev
             call level_stats(k, tmean, tmx, imx, jmx, tmn, imn, jmn)
             ! forward-split (surf+cnv+rad) and centered (cnd) heating, K/day
-            hphys = gmean_lev(ts%wrk%dt_phys, k)/dt*86400.0_wp
-            hcnd  = gmean_lev(ts%wrk%dtdt, k)*86400.0_wp
+            hphys = gmean_lev(ams%ts%wrk%dt_phys, k)/ams%par%dt*86400.0_wp
+            hcnd  = gmean_lev(ams%ts%wrk%dtdt, k)*86400.0_wp
             write(*,"(i6,f9.2,f9.2,a,i0,a,i0,a,f9.2,f10.3,f10.3)") &
                 k, tmean, tmx, "  (", imx, ",", jmx, ")", tmn, hphys, hcnd
         end do
-        call hotspot_split(nlev)
+        call hotspot_split(ams%par%nlev)
         call eddy_diag()
         call baroclinicity_diag()
         if (l_diag) then
@@ -1561,7 +1010,7 @@ contains
             call term_table(lat_index_near(45.0_wp))  ! midlatitude
         end if
         call energy_balance()
-        if (l_cloud_prog) call cloud_prog_cover()
+        if (ams%ts%cpr%enabled) call cloud_prog_cover()
         return
     end subroutine report
 
@@ -1573,13 +1022,13 @@ contains
         real(wp) :: colcov, wsum, cov, w, cfmax
         integer  :: ii, jj, kk
         cov = 0.0_wp; wsum = 0.0_wp; cfmax = 0.0_wp
-        do jj = 1, grd%nlat
-            do ii = 1, grd%nlon
+        do jj = 1, ams%grd%nlat
+            do ii = 1, ams%grd%nlon
                 colcov = 0.0_wp
-                do kk = 1, nlev
-                    colcov = max(colcov, now%cf_g(ii,jj,kk))
+                do kk = 1, ams%par%nlev
+                    colcov = max(colcov, ams%now%cf_g(ii,jj,kk))
                 end do
-                w = grd%area(ii,jj)
+                w = ams%grd%area(ii,jj)
                 cov  = cov + colcov*w
                 wsum = wsum + w
                 cfmax = max(cfmax, colcov)
@@ -1595,8 +1044,8 @@ contains
         real(wp) :: zm, zmax
         integer  :: j
         zmax = -1.0e30_wp; jstar = 1
-        do j = 1, grd%nlat
-            zm = sum(now%temp_g(:,j,nlev))/real(grd%nlon, wp)
+        do j = 1, ams%grd%nlat
+            zm = sum(ams%now%temp_g(:,j,ams%par%nlev))/real(ams%grd%nlon, wp)
             if (zm > zmax) then; zmax = zm; jstar = j; end if
         end do
         return
@@ -1608,8 +1057,8 @@ contains
         real(wp) :: d, dbest
         integer  :: j
         dbest = 1.0e30_wp; jbest = 1
-        do j = 1, grd%nlat
-            d = abs(grd%lat(j) - target)
+        do j = 1, ams%grd%nlat
+            d = abs(ams%grd%lat(j) - target)
             if (d < dbest) then; dbest = d; jbest = j; end if
         end do
         return
@@ -1629,33 +1078,33 @@ contains
         real(wp) :: hs, hcv, hcd, hr, hvd, hva, hdyn
         real(wp) :: olrj, swupj, swinj
         integer  :: k
-        zmax = sum(now%temp_g(:,jstar,nlev))/real(grd%nlon, wp)
+        zmax = sum(ams%now%temp_g(:,jstar,ams%par%nlev))/real(ams%grd%nlon, wp)
         write(*,"(a,i0,a,f6.1,a,f7.2,a)") &
             "   per-term heating [K/day] at j=", jstar, &
-            " (lat ", grd%lat(jstar), " N, T_low ", zmax, " K):"
+            " (lat ", ams%grd%lat(jstar), " N, T_low ", zmax, " K):"
         write(*,"(a)") "   lev    Tzm    qzm[g/kg]    surf     cnv     cnd" // &
                        "     rad   vdiff    vadv    hadv"
-        do k = 1, nlev
-            hs  = zmean_at(ts%wrk%dt_surf,  k, jstar)/dt*86400.0_wp
-            hcv = zmean_at(ts%wrk%dt_cnv,   k, jstar)/dt*86400.0_wp
-            hcd = zmean_at(ts%wrk%dt_cnd,   k, jstar)/dt*86400.0_wp
-            hr  = zmean_at(ts%wrk%dt_rad,   k, jstar)/dt*86400.0_wp
-            hvd = zmean_at(ts%wrk%dt_vdiff, k, jstar)/dt*86400.0_wp
-            hva = zmean_at(ts%wrk%dt_vadv,  k, jstar)*86400.0_wp
-            hdyn= zmean_at(ts%wrk%dtdt,     k, jstar)*86400.0_wp
+        do k = 1, ams%par%nlev
+            hs  = zmean_at(ams%ts%wrk%dt_surf,  k, jstar)/ams%par%dt*86400.0_wp
+            hcv = zmean_at(ams%ts%wrk%dt_cnv,   k, jstar)/ams%par%dt*86400.0_wp
+            hcd = zmean_at(ams%ts%wrk%dt_cnd,   k, jstar)/ams%par%dt*86400.0_wp
+            hr  = zmean_at(ams%ts%wrk%dt_rad,   k, jstar)/ams%par%dt*86400.0_wp
+            hvd = zmean_at(ams%ts%wrk%dt_vdiff, k, jstar)/ams%par%dt*86400.0_wp
+            hva = zmean_at(ams%ts%wrk%dt_vadv,  k, jstar)*86400.0_wp
+            hdyn= zmean_at(ams%ts%wrk%dtdt,     k, jstar)*86400.0_wp
             ! Tzm/qzm: the zonal-mean T and q at j* that RADIATION sees -- a
             ! vertical sawtooth here is the garbage-in behind the huge rad column.
             write(*,"(i6,f8.2,f10.4,3x,7f8.2)") k, &
-                sum(now%temp_g(:,jstar,k))/real(grd%nlon,wp), &
-                sum(now%qv_g(:,jstar,k))/real(grd%nlon,wp)*1000.0_wp, &
+                sum(ams%now%temp_g(:,jstar,k))/real(ams%grd%nlon,wp), &
+                sum(ams%now%qv_g(:,jstar,k))/real(ams%grd%nlon,wp)*1000.0_wp, &
                 hs, hcv, hcd, hr, hvd, hva, hdyn - hva
         end do
         ! LOCAL TOA at the hot latitude: does OLR rise as T_low climbs, or does it
         ! saturate (runaway-greenhouse signature -- absorbed SW can't be shed)?
-        if (l_rad) then
-            olrj  = sum(ts%rad%olr(:,jstar))/real(grd%nlon,wp)
-            swupj = sum(ts%rad%sw_up_toa(:,jstar))/real(grd%nlon,wp)
-            swinj = ts%rad%sw_toa(jstar)
+        if (ams%phys%l_rad) then
+            olrj  = sum(ams%ts%rad%olr(:,jstar))/real(ams%grd%nlon,wp)
+            swupj = sum(ams%ts%rad%sw_up_toa(:,jstar))/real(ams%grd%nlon,wp)
+            swinj = ams%ts%rad%sw_toa(jstar)
             write(*,"(a,f7.2,a,f7.2,a,f7.2,a,f7.2,a)") &
                 "   hot-lat TOA: SWin ", swinj, "  SWabs ", swinj-swupj, &
                 "  OLR ", olrj, "  net ", swinj-swupj-olrj, " W/m2"
@@ -1672,25 +1121,25 @@ contains
         ! the surface heat cannot be carried up to the radiating levels and it
         ! traps. RH shows whether the boundary layer is drying out of buoyancy.
         integer, intent(in) :: jstar
-        real(wp) :: phalf(0:nlev), pfull(nlev), dpc(nlev), phi(nlev)
-        real(wp) :: tzm(nlev), qzm(nlev), qs, dqs, hb, hstar, rh, psj, cp
+        real(wp) :: phalf(0:ams%par%nlev), pfull(ams%par%nlev), dpc(ams%par%nlev), phi(ams%par%nlev)
+        real(wp) :: tzm(ams%par%nlev), qzm(ams%par%nlev), qs, dqs, hb, hstar, rh, psj, cp
         integer  :: k
         cp = real(cp_d, wp)
-        psj = sum(now%ps(:,jstar))/real(grd%nlon, wp)
-        call aeros_vgrid_pressure(vg, psj, phalf, pfull, dpc)
-        do k = 1, nlev
-            tzm(k) = sum(now%temp_g(:,jstar,k))/real(grd%nlon, wp)
-            qzm(k) = sum(now%qv_g(:,jstar,k))/real(grd%nlon, wp)
+        psj = sum(ams%now%ps(:,jstar))/real(ams%grd%nlon, wp)
+        call aeros_vgrid_pressure(ams%vgrid, psj, phalf, pfull, dpc)
+        do k = 1, ams%par%nlev
+            tzm(k) = sum(ams%now%temp_g(:,jstar,k))/real(ams%grd%nlon, wp)
+            qzm(k) = sum(ams%now%qv_g(:,jstar,k))/real(ams%grd%nlon, wp)
         end do
-        phi(nlev) = 0.0_wp
-        do k = nlev-1, 1, -1
+        phi(ams%par%nlev) = 0.0_wp
+        do k = ams%par%nlev-1, 1, -1
             phi(k) = phi(k+1) + R_d*0.5_wp*(tzm(k)+tzm(k+1))*log(pfull(k+1)/pfull(k))
         end do
-        hb = cp*tzm(nlev) + phi(nlev) + aeros_latent(tzm(nlev))*qzm(nlev)
+        hb = cp*tzm(ams%par%nlev) + phi(ams%par%nlev) + aeros_latent(tzm(ams%par%nlev))*qzm(ams%par%nlev)
         write(*,"(a,f8.1,a)") "   BL parcel h_b = ", hb/1000.0_wp, &
             " kJ/kg;  buoyancy hb-h*_env (>0 = convecting band):"
         write(*,"(a)") "   lev   RH[%]   h*_env[kJ/kg]   hb-h*[kJ/kg]"
-        do k = 1, nlev
+        do k = 1, ams%par%nlev
             call aeros_qsat(tzm(k), pfull(k), qs, dqs)
             rh = qzm(k)/max(qs, 1.0e-12_wp)*100.0_wp
             hstar = cp*tzm(k) + phi(k) + aeros_latent(tzm(k))*qs
@@ -1703,7 +1152,7 @@ contains
         ! Zonal mean of grid field f at level k, latitude row j.
         real(wp), intent(in) :: f(:,:,:)
         integer,  intent(in) :: k, j
-        m = sum(f(:,j,k))/real(grd%nlon, wp)
+        m = sum(f(:,j,k))/real(ams%grd%nlon, wp)
         return
     end function zmean_at
 
@@ -1719,11 +1168,11 @@ contains
         integer  :: j, k
         real(wp) :: tzm, uzm, tmax, tmin, upk
         write(*,"(a)") "   baroclinicity  lev   dT_merid[K]   peak|[u]|[m/s]"
-        do k = 1, nlev
+        do k = 1, ams%par%nlev
             tmax = -1.0e30_wp; tmin = 1.0e30_wp; upk = 0.0_wp
-            do j = 1, grd%nlat
-                tzm = sum(now%temp_g(:,j,k))/real(grd%nlon, wp)
-                uzm = sum(now%u(:,j,k))/real(grd%nlon, wp)
+            do j = 1, ams%grd%nlat
+                tzm = sum(ams%now%temp_g(:,j,k))/real(ams%grd%nlon, wp)
+                uzm = sum(ams%now%u(:,j,k))/real(ams%grd%nlon, wp)
                 if (tzm > tmax) tmax = tzm
                 if (tzm < tmin) tmin = tzm
                 if (abs(uzm) > upk) upk = abs(uzm)
@@ -1743,22 +1192,22 @@ contains
         integer  :: i, j, k
         real(wp) :: tzm, uzm, vzm, tp, up, vp
         real(wp) :: t2, ke, vt, w, wsum
-        k = max(1, nlev/2)                 ! ~mid-troposphere
+        k = max(1, ams%par%nlev/2)                 ! ~mid-troposphere
         t2 = 0.0_wp; ke = 0.0_wp; vt = 0.0_wp; wsum = 0.0_wp
-        do j = 1, grd%nlat
-            tzm = sum(now%temp_g(:,j,k))/real(grd%nlon, wp)
-            uzm = sum(now%u(:,j,k))/real(grd%nlon, wp)
-            vzm = sum(now%v(:,j,k))/real(grd%nlon, wp)
-            w   = grd%area(1,j)
-            do i = 1, grd%nlon
-                tp = now%temp_g(i,j,k) - tzm
-                up = now%u(i,j,k) - uzm
-                vp = now%v(i,j,k) - vzm
+        do j = 1, ams%grd%nlat
+            tzm = sum(ams%now%temp_g(:,j,k))/real(ams%grd%nlon, wp)
+            uzm = sum(ams%now%u(:,j,k))/real(ams%grd%nlon, wp)
+            vzm = sum(ams%now%v(:,j,k))/real(ams%grd%nlon, wp)
+            w   = ams%grd%area(1,j)
+            do i = 1, ams%grd%nlon
+                tp = ams%now%temp_g(i,j,k) - tzm
+                up = ams%now%u(i,j,k) - uzm
+                vp = ams%now%v(i,j,k) - vzm
                 t2 = t2 + w*tp*tp
                 ke = ke + w*0.5_wp*(up*up + vp*vp)
                 vt = vt + w*vp*tp
             end do
-            wsum = wsum + w*real(grd%nlon, wp)
+            wsum = wsum + w*real(ams%grd%nlon, wp)
         end do
         write(*,"(a,i0,a,es9.2,a,es9.2,a,es9.2)") "   eddy(lev ", k, "): RMS T'' ", &
             sqrt(t2/wsum), " K  eddyKE ", ke/wsum, " m2/s2  [v''T''] ", vt/wsum
@@ -1773,20 +1222,20 @@ contains
         ! the Hadley cell -- the cell-edge diagnostic this branch is after.
         integer  :: i, j, k
         real(wp) :: uzm, vzm, up, vp, cov, rn
-        rn = real(grd%nlon, wp)
-        do k = 1, nlev
-            do j = 1, grd%nlat
-                uzm = sum(now%u(:,j,k))/rn
-                vzm = sum(now%v(:,j,k))/rn
+        rn = real(ams%grd%nlon, wp)
+        do k = 1, ams%par%nlev
+            do j = 1, ams%grd%nlat
+                uzm = sum(ams%now%u(:,j,k))/rn
+                vzm = sum(ams%now%v(:,j,k))/rn
                 cov = 0.0_wp
-                do i = 1, grd%nlon
-                    up = now%u(i,j,k) - uzm
-                    vp = now%v(i,j,k) - vzm
+                do i = 1, ams%grd%nlon
+                    up = ams%now%u(i,j,k) - uzm
+                    vp = ams%now%v(i,j,k) - vzm
                     cov = cov + up*vp
                 end do
-                dacc%ubar_tavg(j,k) = dacc%ubar_tavg(j,k) + uzm
-                dacc%vbar_tavg(j,k) = dacc%vbar_tavg(j,k) + vzm
-                dacc%uv_tavg(j,k)   = dacc%uv_tavg(j,k)   + cov/rn
+                ams%diag_acc%ubar_tavg(j,k) = ams%diag_acc%ubar_tavg(j,k) + uzm
+                ams%diag_acc%vbar_tavg(j,k) = ams%diag_acc%vbar_tavg(j,k) + vzm
+                ams%diag_acc%uv_tavg(j,k)   = ams%diag_acc%uv_tavg(j,k)   + cov/rn
             end do
         end do
         return
@@ -1799,28 +1248,28 @@ contains
         ! total eddy KE, sum_m dacc%mf_spec(m) the total momentum flux.
         integer  :: i, j, k, m
         real(wp) :: uzm, vzm, up, vp, w, dsig, rn, ur, ui, vr, vi, c, s, kem
-        rn = real(grd%nlon, wp)
-        do k = 1, nlev
-            dsig = vg%sigma_half(k) - vg%sigma_half(k-1)
-            do j = 1, grd%nlat
-                w   = grd%area(1,j)*dsig
-                uzm = sum(now%u(:,j,k))/rn
-                vzm = sum(now%v(:,j,k))/rn
-                do m = 1, dacc%mmax_spec
+        rn = real(ams%grd%nlon, wp)
+        do k = 1, ams%par%nlev
+            dsig = ams%vgrid%sigma_half(k) - ams%vgrid%sigma_half(k-1)
+            do j = 1, ams%grd%nlat
+                w   = ams%grd%area(1,j)*dsig
+                uzm = sum(ams%now%u(:,j,k))/rn
+                vzm = sum(ams%now%v(:,j,k))/rn
+                do m = 1, ams%diag_acc%mmax_spec
                     ur = 0.0_wp; ui = 0.0_wp; vr = 0.0_wp; vi = 0.0_wp
-                    do i = 1, grd%nlon
-                        up = now%u(i,j,k) - uzm
-                        vp = now%v(i,j,k) - vzm
-                        c  = dacc%ctab(m,i); s = dacc%stab(m,i)
+                    do i = 1, ams%grd%nlon
+                        up = ams%now%u(i,j,k) - uzm
+                        vp = ams%now%v(i,j,k) - vzm
+                        c  = ams%diag_acc%ctab(m,i); s = ams%diag_acc%stab(m,i)
                         ur = ur + up*c; ui = ui + up*s
                         vr = vr + vp*c; vi = vi + vp*s
                     end do
                     ur = ur/rn; ui = ui/rn; vr = vr/rn; vi = vi/rn
                     kem = ur*ur + ui*ui + vr*vr + vi*vi
-                    dacc%ke_spec(m)   = dacc%ke_spec(m)   + w*kem
-                    dacc%ke_latm(j,m) = dacc%ke_latm(j,m) + dsig*kem
-                    dacc%ke_levm(k,m) = dacc%ke_levm(k,m) + grd%area(1,j)*kem
-                    dacc%mf_spec(m) = dacc%mf_spec(m) + w*2.0_wp*(ur*vr + ui*vi)
+                    ams%diag_acc%ke_spec(m)   = ams%diag_acc%ke_spec(m)   + w*kem
+                    ams%diag_acc%ke_latm(j,m) = ams%diag_acc%ke_latm(j,m) + dsig*kem
+                    ams%diag_acc%ke_levm(k,m) = ams%diag_acc%ke_levm(k,m) + ams%grd%area(1,j)*kem
+                    ams%diag_acc%mf_spec(m) = ams%diag_acc%mf_spec(m) + w*2.0_wp*(ur*vr + ui*vi)
                 end do
             end do
         end do
@@ -1835,10 +1284,10 @@ contains
         real(wp) :: a
         integer  :: i, j, k
         umax = -1.0_wp; ium = 1; jum = 1; kum = 1
-        do k = 1, nlev
-            do j = 1, grd%nlat
-                do i = 1, grd%nlon
-                    a = abs(now%u(i,j,k))
+        do k = 1, ams%par%nlev
+            do j = 1, ams%grd%nlat
+                do i = 1, ams%grd%nlon
+                    a = abs(ams%now%u(i,j,k))
                     if (a > umax) then; umax = a; ium = i; jum = j; kum = k; end if
                 end do
             end do
@@ -1850,24 +1299,24 @@ contains
         ! Per-step global means of the energy-budget terms, for energy_balance.
         real(wp) :: swin, wsum
         integer  :: j
-        if (.not. (l_rad .or. l_surf)) return
-        if (l_rad) then
-            dacc%tb_olr   = dacc%tb_olr   + gmean2(ts%rad%olr)
-            dacc%tb_swup  = dacc%tb_swup  + gmean2(ts%rad%sw_up_toa)
-            dacc%tb_olrc  = dacc%tb_olrc  + gmean2(ts%rad%olr_cs)
-            dacc%tb_swupc = dacc%tb_swupc + gmean2(ts%rad%sw_up_toa_cs)
-            dacc%tb_cov   = dacc%tb_cov   + gmean2(ts%rad%cover)
+        if (.not. (ams%phys%l_rad .or. ams%phys%l_surf)) return
+        if (ams%phys%l_rad) then
+            ams%diag_acc%tb_olr   = ams%diag_acc%tb_olr   + gmean2(ams%ts%rad%olr)
+            ams%diag_acc%tb_swup  = ams%diag_acc%tb_swup  + gmean2(ams%ts%rad%sw_up_toa)
+            ams%diag_acc%tb_olrc  = ams%diag_acc%tb_olrc  + gmean2(ams%ts%rad%olr_cs)
+            ams%diag_acc%tb_swupc = ams%diag_acc%tb_swupc + gmean2(ams%ts%rad%sw_up_toa_cs)
+            ams%diag_acc%tb_cov   = ams%diag_acc%tb_cov   + gmean2(ams%ts%rad%cover)
             swin = 0.0_wp; wsum = 0.0_wp
-            do j = 1, grd%nlat
-                swin = swin + ts%rad%sw_toa(j)*sum(grd%area(:,j))
-                wsum = wsum + sum(grd%area(:,j))
+            do j = 1, ams%grd%nlat
+                swin = swin + ams%ts%rad%sw_toa(j)*sum(ams%grd%area(:,j))
+                wsum = wsum + sum(ams%grd%area(:,j))
             end do
-            dacc%tb_swin = dacc%tb_swin + swin/wsum
+            ams%diag_acc%tb_swin = ams%diag_acc%tb_swin + swin/wsum
         end if
-        if (l_surf) then
-            dacc%tb_shf = dacc%tb_shf + gmean2(ts%surf%shf); dacc%tb_lhf = dacc%tb_lhf + gmean2(ts%surf%lhf)
+        if (ams%phys%l_surf) then
+            ams%diag_acc%tb_shf = ams%diag_acc%tb_shf + gmean2(ams%ts%surf%shf); ams%diag_acc%tb_lhf = ams%diag_acc%tb_lhf + gmean2(ams%ts%surf%lhf)
         end if
-        dacc%tb_n = dacc%tb_n + 1
+        ams%diag_acc%tb_n = ams%diag_acc%tb_n + 1
         return
     end subroutine energy_accumulate
 
@@ -1877,20 +1326,20 @@ contains
         ! (absorbed SW - OLR /= 0); this separates an energy-balance problem from
         ! a mixing/numerics one.
         real(wp) :: olr, swup, swin, shf, lhf, olrc, swupc, cov, rn
-        if (.not. (l_rad .or. l_surf)) return
-        if (dacc%tb_n == 0) return
-        rn   = 1.0_wp/real(dacc%tb_n, wp)
-        olr  = dacc%tb_olr*rn;  swup  = dacc%tb_swup*rn;  swin = dacc%tb_swin*rn
-        olrc = dacc%tb_olrc*rn; swupc = dacc%tb_swupc*rn; cov  = dacc%tb_cov*rn
-        shf  = dacc%tb_shf*rn;  lhf   = dacc%tb_lhf*rn
-        dacc%tb_olr = 0.0_wp; dacc%tb_swup = 0.0_wp; dacc%tb_swin = 0.0_wp; dacc%tb_olrc = 0.0_wp
-        dacc%tb_swupc = 0.0_wp; dacc%tb_cov = 0.0_wp; dacc%tb_shf = 0.0_wp; dacc%tb_lhf = 0.0_wp; dacc%tb_n = 0
+        if (.not. (ams%phys%l_rad .or. ams%phys%l_surf)) return
+        if (ams%diag_acc%tb_n == 0) return
+        rn   = 1.0_wp/real(ams%diag_acc%tb_n, wp)
+        olr  = ams%diag_acc%tb_olr*rn;  swup  = ams%diag_acc%tb_swup*rn;  swin = ams%diag_acc%tb_swin*rn
+        olrc = ams%diag_acc%tb_olrc*rn; swupc = ams%diag_acc%tb_swupc*rn; cov  = ams%diag_acc%tb_cov*rn
+        shf  = ams%diag_acc%tb_shf*rn;  lhf   = ams%diag_acc%tb_lhf*rn
+        ams%diag_acc%tb_olr = 0.0_wp; ams%diag_acc%tb_swup = 0.0_wp; ams%diag_acc%tb_swin = 0.0_wp; ams%diag_acc%tb_olrc = 0.0_wp
+        ams%diag_acc%tb_swupc = 0.0_wp; ams%diag_acc%tb_cov = 0.0_wp; ams%diag_acc%tb_shf = 0.0_wp; ams%diag_acc%tb_lhf = 0.0_wp; ams%diag_acc%tb_n = 0
         write(*,"(a,f7.1,a,f7.1,a,f7.2,a,f7.1,a,f7.1,a)") &
             "   TOA: SWin ", swin, "  OLR ", olr, "  net ", swin-swup-olr, &
             " W/m2 | sfc SH ", shf, "  LH ", lhf, " W/m2  (mean since last report)"
         ! Cloud radiative effect = all-sky minus clear-sky (ERA5 1991-2020: absorbed SW
         ! 243, OLR 242, clear 289 / 264, CRE SW -46 LW +22, total cover 0.63).
-        if (l_rad .and. l_rad_clouds) write(*,"(a,f7.1,a,f7.1,a,f6.1,a,f6.1,a,f5.2)") &
+        if (ams%phys%l_rad .and. ams%ts%rad%clouds) write(*,"(a,f7.1,a,f7.1,a,f6.1,a,f6.1,a,f5.2)") &
             "   TOA clear: SWabs ", swin-swupc, "  OLR ", olrc, " | CRE SW ", swupc-swup, &
             "  LW ", olrc-olr, " W/m2 | cloud cover ", cov
         call water_balance()
@@ -1901,23 +1350,23 @@ contains
         ! Global water budget since the last report: precipitable water W and
         ! its change rate against the mean E - P; the residual is water the
         ! model created or destroyed (should be ~0).
-        real(wp) :: wcol(grd%nlon, grd%nlat), phw(0:nlev), pfw(nlev), dpw(nlev)
+        real(wp) :: wcol(ams%grd%nlon, ams%grd%nlat), phw(0:ams%par%nlev), pfw(ams%par%nlev), dpw(ams%par%nlev)
         real(wp) :: w, pm, em, dwdt
         integer  :: i, j, k
-        if (dacc%wb_n_acc == 0) return
-        do j = 1, grd%nlat
-            do i = 1, grd%nlon
-                call aeros_vgrid_pressure(vg, now%ps(i,j), phw, pfw, dpw)
+        if (ams%diag_acc%wb_n_acc == 0) return
+        do j = 1, ams%grd%nlat
+            do i = 1, ams%grd%nlon
+                call aeros_vgrid_pressure(ams%vgrid, ams%now%ps(i,j), phw, pfw, dpw)
                 wcol(i,j) = 0.0_wp
-                do k = 1, nlev
-                    wcol(i,j) = wcol(i,j) + now%qv_g(i,j,k)*dpw(k)/real(grav,wp)
+                do k = 1, ams%par%nlev
+                    wcol(i,j) = wcol(i,j) + ams%now%qv_g(i,j,k)*dpw(k)/real(grav,wp)
                 end do
             end do
         end do
         w  = gmean2(wcol)
-        pm = dacc%wb_p_acc/real(dacc%wb_n_acc,wp); em = dacc%wb_e_acc/real(dacc%wb_n_acc,wp)
-        if (dacc%wb_w_last >= 0.0_wp) then
-            dwdt = (w - dacc%wb_w_last)/(real(dacc%wb_n_acc,wp)*dt)*86400.0_wp     ! kg/m2/day = mm/day
+        pm = ams%diag_acc%wb_p_acc/real(ams%diag_acc%wb_n_acc,wp); em = ams%diag_acc%wb_e_acc/real(ams%diag_acc%wb_n_acc,wp)
+        if (ams%diag_acc%wb_w_last >= 0.0_wp) then
+            dwdt = (w - ams%diag_acc%wb_w_last)/(real(ams%diag_acc%wb_n_acc,wp)*ams%par%dt)*86400.0_wp     ! kg/m2/day = mm/day
             write(*,"(a,f7.2,a,f6.2,a,f6.2,a,f7.3,a,f7.3,a)") &
                 "   WATER: W ", w, " mm | P ", pm, "  E ", em, "  dW/dt ", dwdt, &
                 "  resid (dW/dt - E + P) ", dwdt - em + pm, " mm/day"
@@ -1926,10 +1375,10 @@ contains
         end if
         if (l_diag) then
             write(*,"(a,6f8.3,a)") "   WATER by operator (surf cnv cnd cld vdiff transp): ", &
-                ts%wb*86400.0_dp/(real(dacc%wb_n_acc,dp)*real(dt,dp)), " mm/day"
-            ts%wb = 0.0_dp
+                ams%ts%wb*86400.0_dp/(real(ams%diag_acc%wb_n_acc,dp)*real(ams%par%dt,dp)), " mm/day"
+            ams%ts%wb = 0.0_dp
         end if
-        dacc%wb_w_last = w; dacc%wb_p_acc = 0.0_wp; dacc%wb_e_acc = 0.0_wp; dacc%wb_n_acc = 0
+        ams%diag_acc%wb_w_last = w; ams%diag_acc%wb_p_acc = 0.0_wp; ams%diag_acc%wb_e_acc = 0.0_wp; ams%diag_acc%wb_n_acc = 0
         return
     end subroutine water_balance
 
@@ -1938,9 +1387,9 @@ contains
         real(wp) :: s, wsum
         integer  :: i, j
         s = 0.0_wp; wsum = 0.0_wp
-        do j = 1, grd%nlat
-            do i = 1, grd%nlon
-                s = s + f(i,j)*grd%area(i,j); wsum = wsum + grd%area(i,j)
+        do j = 1, ams%grd%nlat
+            do i = 1, ams%grd%nlon
+                s = s + f(i,j)*ams%grd%area(i,j); wsum = wsum + ams%grd%area(i,j)
             end do
         end do
         m = s/wsum
@@ -1952,19 +1401,19 @@ contains
         ! spike at level k: report the warmest zonal mean and, separately, the
         ! largest departure of any point from ITS OWN latitude's zonal mean.
         integer, intent(in) :: k
-        real(wp) :: zm(grd%nlat), zmax, devmax, d
+        real(wp) :: zm(ams%grd%nlat), zmax, devmax, d
         integer  :: i, j, jzmax, idev, jdev
-        do j = 1, grd%nlat
-            zm(j) = sum(now%temp_g(:,j,k))/real(grd%nlon, wp)
+        do j = 1, ams%grd%nlat
+            zm(j) = sum(ams%now%temp_g(:,j,k))/real(ams%grd%nlon, wp)
         end do
         zmax = -1.0e30_wp; jzmax = 1
-        do j = 1, grd%nlat
+        do j = 1, ams%grd%nlat
             if (zm(j) > zmax) then; zmax = zm(j); jzmax = j; end if
         end do
         devmax = 0.0_wp; idev = 1; jdev = 1
-        do j = 1, grd%nlat
-            do i = 1, grd%nlon
-                d = abs(now%temp_g(i,j,k) - zm(j))
+        do j = 1, ams%grd%nlat
+            do i = 1, ams%grd%nlon
+                d = abs(ams%now%temp_g(i,j,k) - zm(j))
                 if (d > devmax) then; devmax = d; idev = i; jdev = j; end if
             end do
         end do
@@ -1982,16 +1431,16 @@ contains
         integer  :: i, j
         tmx = -1.0e30_wp; tmn = 1.0e30_wp; imx=1; jmx=1; imn=1; jmn=1
         s = 0.0_wp; wsum = 0.0_wp
-        do j = 1, grd%nlat
-            w = grd%area(1,j)
-            do i = 1, grd%nlon
-                if (now%temp_g(i,j,k) > tmx) then
-                    tmx = now%temp_g(i,j,k); imx = i; jmx = j
+        do j = 1, ams%grd%nlat
+            w = ams%grd%area(1,j)
+            do i = 1, ams%grd%nlon
+                if (ams%now%temp_g(i,j,k) > tmx) then
+                    tmx = ams%now%temp_g(i,j,k); imx = i; jmx = j
                 end if
-                if (now%temp_g(i,j,k) < tmn) then
-                    tmn = now%temp_g(i,j,k); imn = i; jmn = j
+                if (ams%now%temp_g(i,j,k) < tmn) then
+                    tmn = ams%now%temp_g(i,j,k); imn = i; jmn = j
                 end if
-                s = s + now%temp_g(i,j,k)*grd%area(i,j); wsum = wsum + grd%area(i,j)
+                s = s + ams%now%temp_g(i,j,k)*ams%grd%area(i,j); wsum = wsum + ams%grd%area(i,j)
             end do
         end do
         tmean = s/wsum
@@ -2004,9 +1453,9 @@ contains
         real(wp) :: s, wsum
         integer  :: i, j
         s = 0.0_wp; wsum = 0.0_wp
-        do j = 1, grd%nlat
-            do i = 1, grd%nlon
-                s = s + f(i,j,k)*grd%area(i,j); wsum = wsum + grd%area(i,j)
+        do j = 1, ams%grd%nlat
+            do i = 1, ams%grd%nlon
+                s = s + f(i,j,k)*ams%grd%area(i,j); wsum = wsum + ams%grd%area(i,j)
             end do
         end do
         m = s/wsum
@@ -2015,10 +1464,10 @@ contains
 
     subroutine locate_nan()
         integer :: i, j, k
-        do k = 1, nlev
-            do j = 1, grd%nlat
-                do i = 1, grd%nlon
-                    if (ts%wrk%t_g(i,j,k) /= ts%wrk%t_g(i,j,k)) then
+        do k = 1, ams%par%nlev
+            do j = 1, ams%grd%nlat
+                do i = 1, ams%grd%nlon
+                    if (ams%ts%wrk%t_g(i,j,k) /= ams%ts%wrk%t_g(i,j,k)) then
                         write(*,"(a,i0,a,i0,a,i0,a)") "     first T NaN at level ", &
                             k, "  (i,j)=(", i, ",", j, ")"
                         return

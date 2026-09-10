@@ -82,8 +82,9 @@ module aeros
         ! 6.2, 6.3). Wave 4a: aeros_init allocates and zeroes the always-on
         ! buffers (aeros_diag_acc_init), so the container is usable after init;
         ! the monthly climatology bins stay a driver choice
-        ! (aeros_diag_acc_init_monthly). rce_long still drives its own local
-        ! dacc; Wave 4c moves the accumulation itself behind library methods.
+        ! (aeros_diag_acc_init_monthly). rce_long accumulates into this
+        ! container (Wave 4a.2); Wave 4c moves the accumulation itself behind
+        ! library methods.
         type(aeros_diag_acc_t) :: diag_acc
 
         real(wp) :: time                  ! current model time [yr]
@@ -139,11 +140,13 @@ contains
 
         ! One SHTns config per thread; see aeros_sht_pool_class for why aeros
         ! threads the level loop rather than letting SHTns thread a transform.
-        ! sht_mode = "cache" (the default) because the pool builds nthreads
-        ! IDENTICAL configs and SHTns does not remember its auto-tuning between
-        ! them -- without the cache a 10-thread pool pays the tuning ten times.
-        ! "quick" skips the tuning altogether (rce_long's choice; the two are
-        ! not bit-identical, see aeros_param_class%sht_mode).
+        ! sht_mode = "quick" (the schema default since Wave 4a.2) skips the
+        ! auto-tuning altogether and is the reproducible choice; "cache" tunes
+        ! once per working directory and saves/loads the tuning -- the pool
+        ! builds nthreads IDENTICAL configs and SHTns does not remember its
+        ! tuning between them, so without the cache a 10-thread pool would pay
+        ! it ten times. The two are not bit-identical (see
+        ! aeros_param_class%sht_mode).
         select case (trim(ams%par%sht_mode))
         case ("cache")
             call aeros_sht_pool_init(ams%pool, ams%par%trunc, &
@@ -503,7 +506,8 @@ contains
         !                          "resting" so the shapes are ready.
         !   "rce_warm"          -- rce_long's warm, humid cold start
         !                          (aeros_set_rce_warm, seed from &aeros
-        !                          seed_asym). Wave 4a.
+        !                          seed_asym). Wave 4a; rce_long's cold start
+        !                          since 4a.2.
         !   "coupler"           -- reserved for Phase C. Not accepted here.
 
         implicit none

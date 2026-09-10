@@ -78,6 +78,20 @@
     ndiff    = 6
     tau_diff = 6.0
 
+    ! Single-timescale diffusion, centered semi-implicit, no order taper: the
+    ! benchmark's own core, pinned because the shared schema
+    ! (input/aeros_defaults.nml) defaults to the SpeedyWeather-faithful moist
+    ! core since Wave 4a.2 (del^8 on 4 h, divergence on 1 h tapered to del^4,
+    ! si_alpha = 1).
+    tau_diff_div     = 0.0
+    si_alpha         = 0.5
+    diff_taper       = .FALSE.
+    diff_taper_sigma = 0.15
+
+    ! SHTns auto-tuning cache: the benchmark's bit-for-bit history is on the
+    ! cached tuning; the schema default is the reproducible "quick".
+    sht_mode = "cache"
+
     ! The point of this file.
     held_suarez = .TRUE.
 
@@ -163,11 +177,25 @@
 /
 
 &physics
-    ! Master physics switches. The benchmark is dry by construction: no
-    ! condensation, no convection (and nothing else -- the remaining switches
-    ! are off in input/aeros_defaults.nml).
-    l_cnd = .FALSE.
-    l_cnv = .FALSE.
+    ! Master physics switches. The benchmark is dry by construction: every
+    ! subsystem off, stated here because the shared schema
+    ! (input/aeros_defaults.nml) defaults to the full moist column.
+    l_surf       = .FALSE.
+    l_cnv        = .FALSE.
+    l_cnd        = .FALSE.
+    l_rad        = .FALSE.
+    l_vdiff      = .FALSE.
+    l_land       = .FALSE.
+    l_topography = .FALSE.     ! flat lower boundary
+    l_seaice     = .FALSE.
+    l_cloud_prog = .FALSE.
+    l_bd         = .FALSE.
+/
+
+&moisture_transport
+    ! The humidity transport runs on the (identically zero) dry field; keep
+    ! the donor cell the benchmark history was produced with.
+    vert_vanleer = .FALSE.
 /
 
 &aeros_moisture

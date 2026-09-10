@@ -33,7 +33,13 @@
     ! periodically, and settle the production truncation with the full model
     ! rather than with the dynamical core. Nothing in the code may assume a
     ! value; changing this line is the only thing required to switch.
-    trunc    = 31
+    !
+    ! Wave 4a.2 (2026-09-10): this schema now carries the CALIBRATED real-Earth
+    ! state that rce_long ran with (its former input/rce_defaults.nml and
+    ! driver-local defaults, folded in here) -- T21L6, dt 1 h, the
+    ! SpeedyWeather-faithful core, every physics subsystem on. A dry-core
+    ! benchmark pins what it needs (par/held_suarez.nml).
+    trunc    = 21
 
     ! Gaussian grid. -1 selects the smallest quadratically-unaliased grid for
     ! `trunc`, which is what production should use. Set explicitly only to
@@ -49,14 +55,15 @@
     ! namelist choices.
     nlev     = 6
 
-    ! Dynamics timestep [s]. ~30 min at T42 (section 4).
+    ! Dynamics timestep [s]. 1 h at T21L6 (the real-Earth harness; ~1850 SYPD
+    ! with the in-solve physics coupling), ~30 min at T42 (section 4).
     !
     ! The semi-implicit solve is what makes this affordable: the explicit
     ! gravity-wave limit is ~600 s at T31L20 and ~450 s at T42, both printed at
     ! run start by aeros_semiimp_print. Raising dt above ~2x the ADVECTIVE CFL
     ! is not protected by the semi-implicit scheme -- it only handles the
     ! gravity waves.
-    dt       = 1800.0
+    dt       = 3600.0
 
     ! Semi-implicit leapfrog (.TRUE.) or fully explicit leapfrog (.FALSE.).
     ! Explicit is not a production configuration; it exists so the value of the
@@ -81,38 +88,40 @@
     ! levels. alpha = 1.0 recovers the classical filter exactly, which is the
     ! comparison to run if the filter is ever suspected.
     !
-    ! nu = 0.06 is mid-range for a spectral model of this size; alpha = 0.53 is
-    ! Williams' recommended value, and buys third-order amplitude accuracy and
-    ! exact conservation of the mean -- which is what matters over 10^5 yr,
-    ! where the classical filter's mean damping is a slow drift rather than a
-    ! transient.
-    eps_filter = 0.06
+    ! nu = 0.1 is SpeedyWeather's Robert coefficient (the value that unlocked
+    ! sustained eddies on the leapfrog core); alpha = 0.53 is Williams'
+    ! recommended value, and buys third-order amplitude accuracy and exact
+    ! conservation of the mean -- which is what matters over 10^5 yr, where the
+    ! classical filter's mean damping is a slow drift rather than a transient.
+    ! Both act only under time_scheme = "leapfrog".
+    eps_filter = 0.1
     raw_alpha  = 0.53
 
     ! Horizontal hyperdiffusion, applied implicitly to vorticity, divergence
     ! and temperature (never to ln p_s -- that would leak mass).
     !
-    ! ndiff is the order: 6 = del^6, the usual choice for a T31-T85 spectral
-    ! core. Lower orders damp the resolved scales too broadly; higher ones make
-    ! the operator so scale-selective that the last wavenumber is the only one
-    ! affected at all.
-    !
-    ! tau_diff [h] is the e-folding time of the l = lmax wave. 6 h is a
-    ! conventional starting value; it is a TUNING parameter, and the right
-    ! value depends on truncation and on how vigorous the flow is. Retune it
-    ! when the truncation changes, and check it against the enstrophy spectrum
-    ! rather than against the look of a single field.
-    ndiff    = 6
-    tau_diff = 6.0
+    ! The SpeedyWeather-faithful dynamical core (docs/refs/sw_faithful_dynamics.md)
+    ! is the default: del^8 hyperdiffusion on 4 h, divergence on 1 h with the
+    ! order tapered to del^4 above sigma = 0.2 (tau_diff_div / diff_taper
+    ! below), backward-implicit gravity waves (si_alpha = 1), no Rayleigh
+    ! sponge. ndiff is the order (6 = del^6 is the conventional T31-T85 choice;
+    ! lower orders damp the resolved scales too broadly, higher ones act on the
+    ! last wavenumber only). tau_diff [h] is the e-folding time of the l = lmax
+    ! wave -- a TUNING parameter whose right value depends on truncation and on
+    ! how vigorous the flow is; retune it when the truncation changes, against
+    ! the enstrophy spectrum rather than the look of a single field.
+    ndiff    = 8
+    tau_diff = 4.0
 
     ! Semi-implicit decentering weight on X^(n+1): 0.5 centered (neutral on
-    ! gravity waves), 1.0 backward-implicit (SpeedyWeather; damps the fast modes
-    ! in the solve). 0.5 is the pre-Wave-4a library behaviour.
-    si_alpha = 0.5
+    ! gravity waves), 1.0 backward-implicit (SpeedyWeather; damps the fast
+    ! gravity + computational modes in the solve).
+    si_alpha = 1.0
     ! Divergence-only diffusion e-folding time [h] (SpeedyWeather-style: the
-    ! divergent/gravity-wave modes damped on their own, shorter timescale).
-    ! <= 0 = use tau_diff, bit-for-bit the single-timescale scheme.
-    tau_diff_div = 0.0
+    ! divergent/gravity-wave modes damped on their own, shorter timescale, to
+    ! absorb upward-propagating gravity waves at the lid).
+    ! <= 0 = use tau_diff, the single-timescale scheme.
+    tau_diff_div = 1.0
 
     ! Adaptive hyperdiffusion (src/dynamics/aeros_timestep.f90 header). Both
     ! parts OFF = the fixed del^ndiff scheme, bit for bit.
@@ -123,11 +132,13 @@
     diff_zeta_ref   = 1.0e-4
     diff_adapt_gain = 1.0
     diff_adapt_max  = 10.0
-    ! (2) sigma-tapered order on the divergence: order ramps from ndiff to
-    ! diff_ndiff_top (even, <= ndiff) above sigma = diff_taper_sigma.
-    diff_taper       = .FALSE.
+    ! (2) sigma-tapered order on the DIVERGENCE (gravity-wave) modes only:
+    ! order ramps from ndiff to diff_ndiff_top (even, <= ndiff) above sigma =
+    ! diff_taper_sigma -- SpeedyWeather's implicit top sponge; vorticity and
+    ! temperature keep the full untapered order. ON in the SW-faithful core.
+    diff_taper       = .TRUE.
     diff_ndiff_top   = 4
-    diff_taper_sigma = 0.15
+    diff_taper_sigma = 0.2
 
     ! Upper-level sponge (aeros_timestep "Upper-level sponge"): implicit
     ! Rayleigh drag (rate sponge_kr [s-1]) and Newtonian cooling (sponge_kt) on
@@ -145,11 +156,14 @@
     ! (aeros_set_rce_warm); 0 = axisymmetric start.
     seed_asym = 0.0
 
-    ! SHTns setup: "cache" auto-tunes once per working directory and saves/loads
-    ! the tuning (the pre-Wave-4a library behaviour); "quick" skips the tuning
-    ! (~20% slower transforms, bit-reproducible across directories; rce_long).
-    ! The two modes differ at round-off in every transform.
-    sht_mode = "cache"
+    ! SHTns setup: "quick" skips the auto-tuning (~20% slower transforms) and
+    ! is the reproducible choice -- the same numbers in any directory, on any
+    ! run. "cache" auto-tunes once per working directory and saves/loads the
+    ! tuning, and is NOT self-reproducible: a reload can pick a different
+    ! algorithm than the fresh tune, and the two modes differ at round-off in
+    ! every transform. "quick" is the default (rce_long's choice, Wave 4a.2);
+    ! par/held_suarez.nml pins "cache" for its bit-for-bit history.
+    sht_mode = "quick"
 
     ! Held & Suarez (1994) idealized forcing -- the M1 validation benchmark
     ! (docs/design.md section 7). .FALSE. leaves the bare adiabatic core, which
@@ -255,31 +269,34 @@
     ! Master on/off flags for the physics subsystems (docs/coupling_api.md
     ! sec. 5, 8). THE source of each subsystem's enabled state on the library
     ! path (Wave 4a): aeros_init loads them and aeros_timestep_init hands each
-    ! to its subsystem loader -- the per-group `enabled` keys are gone. This
-    ! schema is the bare dynamical core, every switch off, so aeros_run.x and
-    ! held_suarez.x run exactly what they ran before; a case file turns
-    ! physics on. (l_topography has no library consumer yet -- the phis
-    ! provider is Wave 4b; l_moist is unassigned, condensation is l_cnd.)
-    l_surf        = .FALSE.     ! surface fluxes (&surface)
-    l_cnv         = .FALSE.     ! moist convection (&aeros_moisture conv_*)
-    l_cnd         = .FALSE.     ! large-scale condensation (&aeros_moisture)
-    l_rad         = .FALSE.     ! radiation (&radiation)
-    l_land        = .FALSE.     ! land surface (&land)
-    l_topography  = .TRUE.
+    ! to its subsystem loader -- the per-group `enabled` keys are gone. The
+    ! defaults are rce_long's driver defaults (Wave 4a.2): the moist column
+    ! (surface fluxes, convection, condensation, radiation) and the lid
+    ! Brewer-Dobson term on; the boundary-layer scheme, land and topography
+    ! are case choices (mwm/D_realearth turns them on). A dry-core run
+    ! (par/held_suarez.nml) switches everything off explicitly.
+    ! l_topography is read by the rce_long driver (its &rce topo_file /
+    ! topo_ramp_days); the library phis provider is Wave 4b.
+    l_surf        = .TRUE.      ! surface fluxes (&surface)
+    l_cnv         = .TRUE.      ! moist convection (&aeros_moisture conv_*)
+    l_cnd         = .TRUE.      ! large-scale condensation (&aeros_moisture)
+    l_rad         = .TRUE.      ! radiation (&radiation)
+    l_land        = .FALSE.     ! land surface (&land); off = all-ocean aquaplanet
+    l_topography  = .FALSE.     ! real orography (rce_long &rce topo_*); off = flat
     l_seaice      = .FALSE.     ! thermodynamic sea ice (&ocean ice_*; needs mode=1)
     l_cloud_prog  = .FALSE.     ! prognostic cloud fraction (&aeros_cloud); forces &radiation clouds on
-    l_bd          = .FALSE.     ! lid Brewer-Dobson w* (&bd; also needs a file)
+    l_bd          = .TRUE.      ! lid Brewer-Dobson w* (&bd; also needs a file)
     l_vdiff       = .FALSE.     ! boundary-layer vertical diffusion (&vdiff)
-    l_moist       = .TRUE.
 /
 
 &moisture_transport
     ! Positive-definite finite-volume tracer transport on the grid
     ! (src/dynamics/aeros_transport.f90). Reserved namelist group for the
     ! coupling API's per-subsystem loader; only knob today is the vertical
-    ! reconstruction. Default off (donor-cell) is bit-for-bit; .TRUE. selects
-    ! the same van Leer monotone limiter the horizontal sweeps use.
-    vert_vanleer = .FALSE.
+    ! reconstruction: .TRUE. (default) is the same van Leer (2nd-order
+    ! monotone) limiter the horizontal sweeps use; .FALSE. the first-order
+    ! upwind donor cell.
+    vert_vanleer = .TRUE.
 /
 
 &aeros_moisture
@@ -288,12 +305,19 @@
     ! -- the switch is &physics l_cnd (off in this schema, and in the
     ! Held-Suarez benchmark, which is dry by construction).
 
-    ! Critical relative humidity for condensation. 1.0 is true saturation
-    ! adjustment; a lower value stands in for sub-grid humidity variability.
-    rh_crit = 1.0
-    ! Ice-phase threshold blended with rh_crit by the liquid fraction (ice at
-    ! T <= -23 C). < 0 = off (all-warm rh_crit everywhere).
-    rh_crit_ice = -1.0
+    ! Critical relative humidity for condensation: q relaxes to rh_crit*q_sat,
+    ! so the column cannot equilibrate wetter than this where condensation is
+    ! the moisture sink. 1.0 is true saturation adjustment; a lower value is the
+    ! sub-grid-saturation stand-in for the missing subsidence drying that
+    ! otherwise pins the free troposphere at RH ~100 % (m2_results s23). The
+    ! real-Earth cases run 0.93.
+    rh_crit = 0.95
+    ! Condensation threshold for all-ice columns (T <= -23 C), blended with
+    ! rh_crit by the liquid fraction; < 0 = single threshold. 0.80 since
+    ! 2026-09-08: with the single 0.93 every cold column sat at the threshold
+    ! (winter cap RH 82-94 % vs ERA5 60-80, LW down over NH winter land +24
+    ! W/m2); with 0.80 (+ &clouds rhc_ice) the cap is at ERA5's RH.
+    rh_crit_ice = 0.80
     ! reevap: reevaporation efficiency [1/(kg/kg)] of falling precipitation into
     ! sub-saturated layers (SpeedyWeather ImplicitCondensation; 0 = off).
     ! cond_time_scale: 1/cond_time_scale of the saturation adjustment (and of
@@ -307,25 +331,31 @@
 
     ! Moist convective adjustment (src/physics/aeros_convection.f90); the
     ! switch is &physics l_cnv. `conv_scheme` selects the scheme: "sbm"
-    ! (Simplified Betts-Miller, the default) or "manabe" (the parameter-free
-    ! reference). conv_tau is the SBM relaxation time [s] and conv_rhref its
-    ! reference relative humidity.
-    conv_scheme = "sbm"
+    ! (Simplified Betts-Miller with the strictly-buoyant band),
+    ! "sbm_frierson" (the default: the same closure with Frierson's
+    ! surface-to-LZB depth + integrated Pt/Pq trigger, stays active at RCE
+    ! and dries the free troposphere) or "manabe" (the parameter-free
+    ! reference). conv_tau is the SBM relaxation time [s] and conv_rhref the
+    ! reference relative humidity the moist adiabat is dried toward.
+    conv_scheme = "sbm_frierson"
     conv_tau    = 14400.0
-    conv_rhref  = 0.7
+    conv_rhref  = 0.80
     ! Sub-cloud (mixed-layer) reference relative humidity for sbm_frierson.
     conv_rh_ref_bl   = 0.85
-    ! CLIMBER-X RH-profile reference for the SBM cloud layer: conv_rhref up to
-    ! conv_rh_zpbl, exp(-(z - zpbl)/conv_rh_hscale) to conv_rh_ztop, constant
-    ! above. conv_rh_hscale <= 0 = the uniform conv_rhref (bit-for-bit).
-    conv_rh_hscale   = -1.0
-    conv_rh_zpbl     = 1000.0
+    ! CLIMBER-X RH-profile reference for the SBM cloud layer (vesta rh_prof):
+    ! conv_rhref (CLIMBER-X's ram) up to conv_rh_zpbl, exp(-(z - zpbl)/hscale)
+    ! to conv_rh_ztop, constant above. hscale <= 0 = the uniform conv_rhref
+    ! (off). Adopted 2026-09-09 (run P6): anchor 0.80, z_pbl 500, h 3000 gives
+    ! the tropical RH 40/34/44/71/86 % at sigma 0.36-0.96 (ERA5 37/45/56/70/84),
+    ! clear-sky OLR 258 -> 262.5 (264). Needs &clouds rhc_ice 0.40, lwc 0.022e-3.
+    conv_rh_hscale   = 3000.0
+    conv_rh_zpbl     = 500.0
     conv_rh_ztop     = 3000.0
-    ! Shallow-branch depth as p/p_s (sbm_frierson). <= 0 = full layer.
+    ! Depth of the SBM's non-precipitating (shallow) relaxation as p/p_s: the
+    ! cloud layer only, instead of up to the level of zero buoyancy. <= 0 = off.
     conv_shallow_sig = -1.0
-    ! Dry convective adjustment run before the moist scheme (default off:
-    ! opt-in, bit-for-bit when off).
-    conv_dry_adjust  = .FALSE.
+    ! Dry convective adjustment run before the moist scheme.
+    conv_dry_adjust  = .TRUE.
 /
 
 &surface
@@ -337,15 +367,25 @@
     ! gust_speed^2) (SpeedyWeather's SurfaceCondition); the SST is the APE
     ! control profile, sst_eq K above freezing at the equator tapering to
     ! freezing poleward of sst_lat degrees.
-    ! <= 0 = SpeedyWeather's bulk-Richardson log-law coefficient diagnosed per
-    ! point from the lowest-level height and z0 (one for heat/moisture/momentum,
-    ! c_d = 0 = no drag); > 0 pins a fixed coefficient.
+    ! <= 0 = the surface-layer log law diagnosed per point from the bulk
+    ! Richardson number of the lowest layer (virtual static energy jump skin ->
+    ! level 1): stable, Frierson's kappa^2/ln^2(z1/z0)*(1-Ri/Ri_c)^2; unstable,
+    ! Monin-Obukhov with Businger-Dyer psi functions (C_H = C_E, C_D separate).
+    ! > 0 pins a fixed coefficient; c_d = 0 = no drag.
     c_h     = -1.0
     c_e     = -1.0
     z0_ocean = 1.0e-4
     z0_land  = 0.5
-    ri_crit  = 10.0
-    r_s_land = 0.0        ! land surface resistance to evaporation [s/m]; 0 = off
+    ! Surface-layer critical bulk Richardson number (stable branch): Speedy-
+    ! Weather's 10; Frierson (2006) uses 1. 1 since 2026-09-08: with 10 the
+    ! winter NH land took 25 W/m2 of downward sensible heat (ERA5 8) through
+    ! the 360 m log law over z0 = 0.5 m.
+    ri_crit  = 1.0
+    ! Land surface (canopy) resistance to evaporation [s/m], in series with the
+    ! aerodynamic resistance (CLIMBER-X r_s = 1/(1.6 g_can); ebal_veg f_le).
+    ! 0 = off. 100 set 2026-09-09 against the ERA5 April-June 40-70N land
+    ! evaporation.
+    r_s_land = 100.0
     gust_speed    = 5.0
     wind_slowdown = 0.95
     ! Momentum drag coefficient. Bulk stress tau = rho c_d |u| u, imposed
@@ -387,55 +427,84 @@
 
 &land
     ! Land surface (src/physics/aeros_land.f90). Read by aeros_land_load; the
-    ! switch is &physics l_land (off -> all-ocean, bit-for-bit). Defaults match
-    ! the aeros_land_class initializers (src lines 66-113).
-    lsm_file         = ""       ! land-sea mask (var lsm); empty = required when enabled
-    albedo_file      = ""       ! forecast albedo (var fal); empty = use land_albedo
+    ! switch is &physics l_land (off -> all-ocean; the files are then not
+    ! read). Files are ERA5 climatologies; the tuning is the coupled real-Earth
+    ! calibration (formerly rce_defaults.nml).
+    lsm_file         = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_lsm_1991-2020_clim.nc"
+    albedo_file      = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_fal_1991-2020_clim.nc"
     lsm_threshold    = 0.5      ! land where lsm >= threshold
     w_field_capacity = 0.15     ! bucket capacity [m]
     w_crit           = -1.0     ! beta knee [m]; < 0 = 0.75 * w_field_capacity
-    c_soil           = 2.0e6    ! soil heat capacity [J m-2 K-1]
-    land_albedo      = 0.20     ! fallback land albedo [-]
+    ! Effective seasonal soil heat capacity [J m-2 K-1] (~2.5e6 J m-3 K-1 over
+    ! the ~2 m annual penetration depth). Recalibrated 2026-09-06 with the
+    ! seasonal albedo: 2e6 -> 5e6 keeps JJA NH-land T within ~1 K of ERA5.
+    c_soil           = 5.0e6
+    land_albedo      = 0.20     ! fallback land albedo [-] (no albedo file)
     c_h_land         = 1.5e-3   ! land sensible exchange coefficient
     c_e_land         = 1.5e-3   ! land moisture exchange coefficient
     freeze_floor     = .FALSE.  ! clamp t_soil >= T0 (no snow)
-    snow_albedo      = -1.0     ! cold-endpoint albedo [-]; < 0 = off
-    snow_dt          = 5.0      ! snow-albedo ramp width below T0 [K]
-    beta_frozen      = 1.0      ! frozen-ground beta multiplier; 1 = off
-    albedo_seasonal  = .FALSE.  ! .TRUE. = use 12-month fal climatology
+    snow_albedo      = -1.0     ! snow-albedo feedback cold endpoint [-]; < 0 = off
+    snow_dt          = 5.0      ! ramp width [K] below T0
+    ! Frozen-ground evaporation factor on beta below T0 (ramped over snow_dt);
+    ! 1 = off. 0.1 since 2026-09-08: the bucket evaporated 17-24 W/m2 from
+    ! frozen NH winter land (ERA5 4-6), moistening the winter cap.
+    beta_frozen      = 0.1
+    ! Monthly ERA5 fal as the bare land albedo (interpolated daily) instead of
+    ! its annual mean, which is snow-contaminated (0.36 at 65N) and leaves
+    ! summer high-latitude land ~6 K too cold.
+    albedo_seasonal  = .TRUE.
 /
 
 &radiation
-    ! Clear-sky longwave + shortwave (src/physics/aeros_radiation.f90), ported
-    ! SESAM band kernel; the switch is &physics l_rad. scheme=1 is the SESAM kernel; co2_ppm
-    ! the CO2 volume mixing ratio; l_o3 the prescribed analytic ozone; albedo
-    ! the surface broadband albedo; tsi the solar constant [W/m2]; seasonal
-    ! toggles the daily-mean seasonal cycle (else annual-mean); interval the
-    ! recompute cadence [s]; doy0 the start day-of-year in seasonal mode.
-    ! clouds turns on the diagnostic all-sky path (aeros_cloud + the cloudy
-    ! kernels); OFF => clear-sky, bit-unchanged (forced ON by &physics
-    ! l_cloud_prog, whose fraction is only consumed through this path).
-    scheme   = 1
+    ! Longwave + shortwave (src/physics/aeros_radiation.f90); the switch is
+    ! &physics l_rad. scheme = 2 is ecCKD (correlated-k, the production
+    ! default: better clear-sky OLR, CO2 forcing and LW cloud effect), 1 the
+    ! ported SESAM band kernel (fast, bit-reproducible fallback); co2_ppm the
+    ! CO2 volume mixing ratio; l_o3 the prescribed analytic ozone (a diagnostic
+    ! switch, not a tuning lever); albedo the ocean surface broadband albedo
+    ! (&ocean ocn_albedo is the slab/sea-ice module's own open-water albedo --
+    ! keep the two equal); tsi the solar constant [W/m2]; seasonal toggles the
+    ! daily-mean seasonal cycle from the Laskar orbit (else annual-mean);
+    ! interval the recompute cadence [s]; doy0 the start day-of-year in
+    ! seasonal mode. clouds turns on the diagnostic all-sky path (&clouds +
+    ! the cloudy kernels); OFF => clear-sky (forced ON by &physics
+    ! l_cloud_prog, whose fraction is only consumed through this path). The
+    ! real-Earth cases run clouds + seasonal on.
+    scheme   = 2
     co2_ppm  = 280.0
     l_o3     = .TRUE.
     clouds   = .FALSE.
     albedo   = 0.06
-    ! background aerosol optical thickness / imaginary index (aeros_sw_aerosol,
-    ! CLIMBER-X ars_ot/ars_im; calibrated on validate_era5, see rce_defaults)
+    ! Background aerosol in the clear-sky SW (aeros_sw_aerosol: the SESAM
+    ! aerosol branch, CLIMBER-X ars_ot/ars_im): uniform, constant optical
+    ! thickness and imaginary refractive index -- climate-independent, so valid
+    ! for present day, climate change and paleo alike. Calibrated 2026-09-09 on
+    ! validate_era5 to close the clean 40-60S ocean clear-sky surface SW. 0 = off.
     aer_ot   = 0.12
     aer_im   = 0.02
-    ! sulfate load for the direct effect: map from so4_file (CLIMBER-X CMIP6
-    ! so4_*.nc, time = year - 2000) at so4_year, else so4_const [kg/m2]; off here
-    so4_file  = ""
-    so4_year  = 2000
+    ! Sulfate direct effect (CLIMBER-X l_so4_de, Bauer et al. 2008): the CMIP6
+    ! historical ensemble-mean SO4 load (CLIMBER-X input, 5x5, annual 1850-2014,
+    ! time = year - 2000) at so4_year; so4_file = "" and so4_const = 0 for
+    ! paleo. Present-day calibration year 2003 (ERA5 1991-2020 mid-point).
+    ! Read only when l_rad is on.
+    so4_file  = "/Users/alrobi001/models/climber-x/input/so4_historical_CMIP6_ensmean_ann_5x5.nc"
+    so4_year  = 2003
     so4_const = 0.0
-    so4_indirect = .true.  ! sulfate indirect effect on liquid cloud water (no-op at so4 = 0)
-    dust_file  = ""       ! monthly dust optical-thickness maps (scripts/dust_ot_from_deposition.py); "" = none
-    dust_scale = 1.0
+    ! Sulfate indirect effect (CLIMBER-X l_so4_ie): liquid cloud water x
+    ! f_mod^(1/3) from the sulfate number at cloud base (no-op at so4 = 0).
+    so4_indirect = .true.
+    ! Dust optical thickness maps (monthly, 5x5) added to the background
+    ! aerosol: scripts/dust_ot_from_deposition.py on CLIMBER-X's fake_dust_*
+    ! deposition (Lambert et al. 2015 present day here; the _lgm file for the
+    ! LGM). "" = none. dust_scale 0.3 (2026-09-09): the inversion assumes the
+    ! fine, transported mode everywhere, but source-region deposition is coarse
+    ! fall-out, so the unscaled map is ~3x ERA5's Saharan clear-sky effect.
+    dust_file  = "input/dust_ot_lambert2015_present.nc"
+    dust_scale = 0.3
     dust_im    = 0.01     ! dust imaginary refractive index (CLIMBER-X ars_im)
     tsi      = 1361.0
     seasonal = .FALSE.
-    interval = 10800.0
+    interval = 21600.0
     doy0     = 0.0
     ! Backward-compat mirror of `&insolation/time_bp` -- read at
     ! src/physics/aeros_radiation.f90:411 (Wave 1 legacy read). Wave 4 will
@@ -460,15 +529,22 @@
 /
 
 &clouds
-    ! Diagnostic RH-based cloud scheme (src/physics/aeros_cloud.f90). Wave 1
-    ! adds aeros_cloud_load reading this group; drivers that still call
-    ! aeros_cloud_configure directly with values from their own namelist group
-    ! (e.g. rce_long's &rce cld_*) keep working unchanged.
-    rhc_sfc = 0.52    ! critical RH at the surface (sigma = 1)
-    rhc_top = 0.35    ! critical RH at the top (sigma = 0)
-    rhc_ice = -1.0    ! ice-phase critical RH; < 0 = off (single warm threshold)
-    lwc     = 0.017e-3  ! in-cloud liquid water content [kg m-3]
-    iwc     = 0.018e-3  ! in-cloud ice water content    [kg m-3]
+    ! Diagnostic RH-based cloud scheme (src/physics/aeros_cloud.f90; used when
+    ! &radiation clouds is on and &physics l_cloud_prog off): critical-RH
+    ! endpoints at the surface / model top (Sundqvist fraction) and in-cloud
+    ! liquid / ice water contents [kg m-3]. The coupled real-Earth calibration
+    ! (2026-09-06..09) against ERA5's TOA budget: rhc_top above 1 puts the lid
+    ! layer's threshold at ~1 (that layer sits at RH 90 % by construction and
+    ! its "cloud" was a black 231 K deck); rhc_ice 0.40 with the SBM reference
+    ! profile (tropical UT at RH 40 %); lwc 0.022e-3 with the sulfate indirect
+    ! effect: SW CRE -45 (ERA5 -46), TOA -0.1. The module's own compile-time
+    ! defaults (0.52/0.35, 0.017/0.018) are the offline ERA5-column
+    ! calibration (docs/m2_results.md section 19) and stay for validate_era5.
+    rhc_sfc = 0.52      ! critical RH at the surface (sigma = 1)
+    rhc_top = 1.03      ! critical RH at the top (sigma = 0)
+    rhc_ice = 0.40      ! ice-phase critical RH: min(rhc(sigma), rhc_ice) for the ice fraction; < 0 = off
+    lwc     = 0.022e-3  ! in-cloud liquid water content [kg m-3]
+    iwc     = 0.014e-3  ! in-cloud ice water content    [kg m-3]
 /
 
 &aeros_cloud
@@ -488,12 +564,13 @@
     ! Boundary-layer vertical diffusion (src/physics/aeros_vdiff.f90): mixes the
     ! surface source up the column (implicit on the n+1 state); the switch is
     ! &physics l_vdiff.
-    ! richardson = .TRUE. uses the Frierson (2006) bulk-Ri diagnosed depth and
-    ! K-profile (ri_crit, z0, von_karman, surf_frac apply); .FALSE. is the
-    ! legacy fixed-depth scheme (k0 is the eddy diffusivity [m2/s], sigma the
-    ! boundary-layer top).
+    ! richardson = .TRUE. uses the Frierson (2006) / SpeedyWeather bulk-Ri
+    ! diagnosed depth and K-profile (ri_crit, z0, von_karman, surf_frac apply);
+    ! .FALSE. is the legacy fixed-depth scheme (k0 is the eddy diffusivity
+    ! [m2/s], sigma the boundary-layer top). Both diffuse dry static energy.
+    ! k0 = 10 is the module default; the real-Earth cases run 25.
     richardson = .TRUE.
-    k0         = 25.0
+    k0         = 10.0
     sigma      = 0.7
     ri_crit    = 10.0
     z0         = 3.21e-5
@@ -508,8 +585,11 @@
     ! w*(lat,month) and its reference stability; `scale` a global amplitude
     ! factor; `per_k` a fractional change of w* per K of running annual
     ! global-mean lowest-level T anomaly from `t_ref`; `tau_mean_days` the
-    ! running-mean time scale [days].
-    file          = ""
+    ! running-mean time scale [days]. The file w* was backed out of the L6 run
+    ! relaxed toward the ERA5 layer-mean lid (2026-09-08); the lid stays
+    ! radiatively interactive. per_k: stratosphere-resolving models give
+    ! +0.02..0.03 per K of warming (imposed, not emergent).
+    file          = "input/bd_wstar_era5.nc"
     scale         = 1.0
     per_k         = 0.0
     t_ref         = 285.0
@@ -597,7 +677,7 @@
     q_skin_land_floor      = -1.0e30
 
     ! Land forecast albedo (ERA5 fal): 12-month climatology. Path and varname
-    ! match aeros_land's albedo_file default in rce_defaults.nml (land group).
+    ! match aeros_land's albedo_file default (&land above).
     ! Kind stays BC_CONSTANT here: the physics consumer (aeros_land) is not
     ! wired to read from bounds%albedo%buffer yet -- that wire-up is Wave 4
     ! alongside the driver -> aeros_lib_step migration (rce_long still calls
@@ -627,7 +707,7 @@
     z0m_floor      = -1.0e30
 
     ! Surface geopotential (ERA5 z, m2 s-2, single slice). Path/varname match
-    ! rce_long's topo_file default and aeros_topography_load convention.
+    ! rce_long's &rce topo_file default and aeros_topography_load convention.
     ! Kind stays BC_CONSTANT: rce_long's l_topography path still calls
     ! aeros_topography_load(topo_file, ...) directly -- Wave 4 flips both
     ! the driver over to bounds%phis%buffer and this default to kind = 1.
@@ -648,7 +728,7 @@
     phis_ramp_days  = 0.0
 
     ! Land-sea mask (ERA5 lsm, single slice). Path/varname match aeros_land's
-    ! lsm_file default in rce_defaults.nml. Kind stays BC_CONSTANT (see the
+    ! lsm_file default (&land above). Kind stays BC_CONSTANT (see the
     ! albedo note above for the wave-3/wave-4 sequencing).
     lsm_kind       = 0
     lsm_file       = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_lsm_1991-2020_clim.nc"
@@ -662,9 +742,9 @@
     lsm_floor      = -1.0e30
 
     ! Dust optical thickness (Lambert 2015, monthly). File/varname match
-    ! aeros_radiation's dust_file default in rce_defaults.nml; dust_scale =
-    ! 0.3 matches the &rce/&radiation default there (present-day dust
-    ! calibration, 2026-09-09). Kind stays BC_CONSTANT here: the radiation
+    ! aeros_radiation's dust_file default (&radiation above); dust_scale =
+    ! 0.3 matches the &radiation default (present-day dust calibration,
+    ! 2026-09-09). Kind stays BC_CONSTANT here: the radiation
     ! kernel still reads rad%dust_ot, populated by aeros_radiation_dust_load
     ! -- Wave 4 flips it. dust_floor = 0 matches the max(0, ...) clamp in
     ! aeros_radiation_dust_load.
@@ -680,9 +760,9 @@
     dust_floor      = 0.0
 
     ! Sulfate load (CMIP6 CLIMBER-X ensmean, one record per year from 1850).
-    ! File/varname match aeros_radiation's so4_file default in rce_defaults.nml.
+    ! File/varname match aeros_radiation's so4_file default (&radiation above).
     ! so4_itime = so4_year - 1850 + 1 = 2003 - 1850 + 1 = 154, matching
-    ! rce_defaults so4_year = 2003. Kind stays BC_CONSTANT: rad%so4_map is
+    ! &radiation so4_year = 2003. Kind stays BC_CONSTANT: rad%so4_map is
     ! populated directly by aeros_radiation_so4_load today.
     so4_kind       = 0
     so4_file       = "/Users/alrobi001/models/climber-x/input/so4_historical_CMIP6_ensmean_ann_5x5.nc"
@@ -732,4 +812,60 @@
     tsi_value = 1365.0
     tsi_file  = ""
     tsi_year  = 2000
+/
+
+&rce
+    ! The rce_long DRIVER's own keys (drivers/rce_long.f90) -- run control,
+    ! output, checkpoints and the diagnostic probes. Every physics / dynamics
+    ! knob rce_long used to read from this group lives in its subsystem group
+    ! above since Wave 4a.2 (the driver initialises through aeros_lib_init);
+    ! the seasonal-insolation flags it consults are &radiation seasonal / doy0.
+
+    ! Run length [steps] and the trajectory-report cadence [steps].
+    nstep            = 4800
+    print_every      = 96
+
+    ! Per-term heating split at the hot latitude + the second-half zonal-mean
+    ! accumulators (aeros_timestep_enable_diag; adds diagnostic work arrays).
+    l_diag           = .TRUE.
+
+    ! Monthly-mean climatology output path. "" = off. Set to a .nc path to bin
+    ! zonal-mean T/u/RH/v (lat,lev,month), the 2D surface fields and the eddy
+    ! covariances by calendar month for the ERA5 seasonal comparison
+    ! (mwm/D_realearth). mon_spinup_days: spin-up days excluded from the
+    ! climatology (0 = accumulate all).
+    monthly_out      = ""
+    mon_spinup_days  = 0.0
+
+    ! Checkpoint / restart. restart_in: resume from this file ("" = cold start,
+    ! the rce_warm IC). restart_out: write checkpoints here ("" = none);
+    ! restart_interval: every N steps (0 = only at the end).
+    restart_in       = ""
+    restart_out      = ""
+    restart_interval = 0
+
+    ! Real surface topography (orography), gated on &physics l_topography:
+    ! phis read from topo_file (ERA5 surface geopotential, m2 s-2), spectrally
+    ! band-limited to the model truncation, dumped to output/rce_phis.nc and
+    ! ramped in linearly over topo_ramp_days (0 = full at t = 0) to spread the
+    ! spin-up shock. The ramp is a pure function of elapsed time, hence
+    ! restart-safe.
+    topo_file        = "/Users/alrobi001/data/era5/era5_orography.nc"
+    topo_ramp_days   = 20.0
+
+    ! Prescribed seasonal SST climatology, overriding the analytic profile
+    ! daily in prescribed-SST mode (&ocean mode = 0): sst(lon,lat,month) on the
+    ! ERA5 grid (regridded) or the legacy sst(lat,month) model-grid table
+    ! (scripts/make_seasonal_sst.jl). "" = off (the static analytic profile).
+    sst_seasonal_file = ""
+
+    ! Diagnostic probes. l_uniform_insol flattens the insolation to its global
+    ! mean (no meridional gradient; with &aeros l_nonrotating the single-column
+    ! RCE vehicle) and starts from the gradient-free rce_warm IC. l_qforce
+    ! replaces the physics by an analytic Q(lat,sigma) = qforce_amp [K/day] x
+    ! [equatorial, zero-mean] x sin(pi sigma) on the in-solve seam (set all
+    ! physics off).
+    l_uniform_insol  = .FALSE.
+    l_qforce         = .FALSE.
+    qforce_amp       = 2.0
 /

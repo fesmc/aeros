@@ -440,8 +440,13 @@ contains
         rad%time_bp  = time_bp
 
         call aeros_radiation_init(rad, grd, enabled)
-        call aeros_radiation_so4_load(rad, grd)
-        call aeros_radiation_dust_load(rad, grd)
+        ! The sulfate / dust forcing maps are read only for a radiation that
+        ! runs (Wave 4a.2: the schema defaults now name the present-day files,
+        ! and a dry-core run with l_rad off must not depend on them).
+        if (enabled) then
+            call aeros_radiation_so4_load(rad, grd)
+            call aeros_radiation_dust_load(rad, grd)
+        end if
 
         return
     end subroutine aeros_radiation_load

@@ -10,12 +10,13 @@ module aeros_physics
     ! sets the `ts%<sub>%enabled` fields by hand from `&rce`; Wave 4a.2 moves
     ! it onto this group.
     !
-    ! Type defaults here are the real-Earth production configuration; the
-    ! shipped input/aeros_defaults.nml overrides them to the bare dynamical
-    ! core (every switch off) so aeros_run.x / held_suarez.x keep their
-    ! pre-Wave-4a behaviour -- a case file turns things on. `l_topography` has
-    ! no library consumer yet (the phis provider is Wave 4b) and `l_moist` is
-    ! unassigned (condensation is `l_cnd`; the transport is always on).
+    ! The shipped input/aeros_defaults.nml carries rce_long's driver defaults
+    ! (Wave 4a.2: the moist column and the lid Brewer-Dobson term on; land,
+    ! topography and the boundary-layer scheme are case choices); a dry-core
+    ! run (par/held_suarez.nml) switches everything off explicitly.
+    ! `l_topography` is consumed by the rce_long driver (its &rce topo_*
+    ! keys) until the library phis provider lands (Wave 4b). Condensation is
+    ! `l_cnd`; the humidity transport itself is always on.
 
     use nml, only : nml_read
 
@@ -34,7 +35,6 @@ module aeros_physics
         logical :: l_cloud_prog  = .false.
         logical :: l_bd          = .false.
         logical :: l_vdiff       = .true.
-        logical :: l_moist       = .true.
     end type aeros_physics_class
 
     public :: aeros_physics_load
@@ -62,7 +62,6 @@ contains
         call nml_read(filename, "physics", "l_cloud_prog", phys%l_cloud_prog, defaults_file=defaults_file)
         call nml_read(filename, "physics", "l_bd",         phys%l_bd,         defaults_file=defaults_file)
         call nml_read(filename, "physics", "l_vdiff",      phys%l_vdiff,      defaults_file=defaults_file)
-        call nml_read(filename, "physics", "l_moist",      phys%l_moist,      defaults_file=defaults_file)
 
         return
 
