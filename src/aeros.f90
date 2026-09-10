@@ -42,10 +42,14 @@ module aeros
                                 aeros_vgrid_print
     use aeros_timestep, only : aeros_timestep_class, aeros_timestep_init, &
                                 aeros_timestep_end, aeros_timestep_step, &
-                                aeros_timestep_diagnose, aeros_timestep_print
+                                aeros_timestep_diagnose, aeros_timestep_print, &
+                                aeros_timestep_write_restart, &
+                                aeros_timestep_read_restart
     use aeros_boundary, only : aeros_boundary_t, aeros_boundary_load, &
-                                aeros_boundary_end
-    use aeros_diag_acc, only : aeros_diag_acc_t
+                                aeros_boundary_end, aeros_boundary_refresh, &
+                                BC_EXTERNAL
+    use aeros_diag_acc, only : aeros_diag_acc_t, aeros_diag_acc_reset
+    use aeros_bundles,  only : aeros_imports_t, aeros_exports_t, aeros_diag_t
 
     implicit none
 
@@ -84,6 +88,18 @@ module aeros
     public :: aeros_set_isothermal
     public :: aeros_diagnose
     public :: aeros_print_config
+
+    ! Coupled library entry points (docs/coupling_api.md sec. 3, 12, 14).
+    ! Wave-3.a addition: public interface added, but no in-tree driver calls
+    ! them yet -- Wave 4 migrates rce_long onto them. Because these are
+    ! unused-code paths on the Phase A regression set, bit-for-bit is
+    ! trivially preserved.
+    public :: aeros_lib_init
+    public :: aeros_lib_step
+    public :: aeros_lib_finalize
+    public :: aeros_lib_restart_write
+    public :: aeros_lib_restart_read
+    public :: aeros_lib_diagnose
 
 contains
 
@@ -322,5 +338,299 @@ contains
         return
 
     end subroutine aeros_print_config
+
+    ! =========================================================================
+    ! Coupled library API (docs/coupling_api.md sec. 3).
+    !
+    ! Six public routines a coupled host calls in place of the standalone
+    ! aeros_init / aeros_update / aeros_end trio, with `ierr` returns instead
+    ! of `stop 1` on the public path. The signatures track spec sec. 3 and
+    ! decision 1 of sec. 14 (public routines live on the existing `aeros`
+    ! module, not a new `aeros_lib`).
+    !
+    ! Wave-3.a scope is the interface itself: entry points added, bundle types
+    ! shaped in aeros_bundles, and the internal routing (aeros_boundary_load /
+    ! _refresh, aeros_diag_acc_reset, aeros_timestep_step,
+    ! aeros_timestep_{write,read}_restart) wired. In-tree drivers do NOT call
+    ! these yet, so the code below is unused on the Phase A regression set
+    ! and bit-for-bit is trivial. Wave 4 migrates rce_long onto aeros_lib_*.
+    !
+    ! Note on step-count knob: spec sec. 3 gives aeros_lib_step a dt_couple
+    ! argument in seconds; the sub-cycle count is `nint(dt_couple / par%dt)`.
+    ! No new `nstep_per_cycle` namelist key is added -- the caller decides
+    ! cadence at each call.
+    ! =========================================================================
+
+    subroutine aeros_lib_init(ams, cfg_file, defaults_file, ic_source, ierr)
+        ! Configure the transform pool, grids, state, integrator and boundary
+        ! providers. Does NOT start the time loop.
+        !
+        ! `ic_source` selects the initial condition (spec sec. 3):
+        !   "resting" (default) -- motionless isothermal (today's facade).
+        !   "restart"           -- reserved; call aeros_lib_restart_read after
+        !                          init to load a checkpoint. init installs
+        !                          "resting" so the shapes are ready.
+        !   "rce_warm"/"coupler"-- reserved for Phase C. Not accepted here.
+
+        implicit none
+
+        type(aeros_class), intent(inout)     :: ams
+        character(len=*),  intent(in)        :: cfg_file
+        character(len=*),  intent(in), optional :: defaults_file
+        character(len=*),  intent(in), optional :: ic_source
+        integer,           intent(out)       :: ierr
+
+        character(len=32) :: ic
+
+        ierr = 0
+
+        ic = "resting"
+        if (present(ic_source)) ic = ic_source
+
+        select case (trim(ic))
+        case ("resting", "restart")
+            ! "restart" defers the state overwrite to aeros_lib_restart_read;
+            ! init still installs the resting shape so allocations exist.
+        case default
+            write(io_unit_err,*) "aeros_lib_init:: unsupported ic_source='", &
+                                    trim(ic), "' (Phase A: 'resting' or 'restart' only)"
+            ierr = 1
+            return
+        end select
+
+        call aeros_init(ams, cfg_file, defaults_file=defaults_file)
+
+        return
+
+    end subroutine aeros_lib_init
+
+    subroutine aeros_lib_step(ams, dt_couple, imports, exports, ierr)
+        ! Advance the model by dt_couple seconds by sub-cycling
+        ! aeros_timestep_step nint(dt_couple / par%dt) times.
+        !
+        ! Consumes `imports` at the start of the cycle (spec sec. 7 timing
+        ! steps 1-4: copy into BC_EXTERNAL buffers, refresh BC_FILE monthly
+        ! buffers by day-of-year, then physics sees a fresh buffer set) and
+        ! populates `exports` at the end. Both bundles are optional -- an
+        ! absent one is treated as "not exchanging that side this cycle",
+        ! preserving today's standalone behaviour.
+        !
+        ! Wave-3.a: sub-step count, boundary refresh and diag_acc reset are
+        ! wired. imports/exports copy loops are placeholders (see field-copy
+        ! comments); the fields with aeros-side readers are wired subset-by-
+        ! subset in Wave 4 as the drivers migrate.
+
+        implicit none
+
+        type(aeros_class),     intent(inout)          :: ams
+        real(dp),              intent(in)             :: dt_couple
+        type(aeros_imports_t), intent(in),  optional  :: imports
+        type(aeros_exports_t), intent(out), optional  :: exports
+        integer,               intent(out)            :: ierr
+
+        integer  :: nsub, n
+        real(wp) :: doy
+
+        ierr = 0
+
+        if (dt_couple <= 0.0_dp) then
+            write(io_unit_err,*) "aeros_lib_step:: dt_couple must be > 0, got ", dt_couple
+            ierr = 1
+            return
+        end if
+
+        nsub = nint(dt_couple/real(ams%par%dt, dp))
+        if (nsub < 1) nsub = 1
+
+        ! Day-of-year for boundary refresh. Uses the 365-day convention that
+        ! aeros_boundary_interp_monthly assumes; Phase A calendar sec. 10 lets
+        ! a driver select "julian" (365) or "360d" via &aeros -- honour that
+        ! when the calendar plumbing is complete.
+        doy = modulo(real(ams%time*365.0_dp, wp), 365.0_wp)
+
+        ! === Step 1-4: imports and boundary refresh ==========================
+        if (present(imports)) call import_copy(ams, imports)
+        call aeros_boundary_refresh(ams%bounds, doy)
+
+        ! === Sub-cycle ========================================================
+        do n = 1, nsub
+            call aeros_timestep_step(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
+        end do
+
+        ams%nstep = ams%nstep + nsub
+        ams%time  = ams%time + real(nsub, wp)*ams%par%dt/real(year_seconds, wp)
+
+        ! Leave the grid-space fields consistent with the spectral state.
+        call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
+
+        ! === Cycle-end exports and accumulator reset =========================
+        if (present(exports)) call export_populate(ams, exports)
+
+        ! Zero the library-side accumulators for the next cycle. Wave-2 ships
+        ! diag_acc as an empty container by default; the reset is safe (a
+        ! no-op on un-allocated buffers).
+        call aeros_diag_acc_reset(ams%diag_acc)
+
+        return
+
+    end subroutine aeros_lib_step
+
+    subroutine import_copy(ams, imports)
+        ! Copy each allocated field of `imports` into its BC_EXTERNAL buffer
+        ! on ams%bounds. A field the host did not allocate is silently
+        ! skipped -- the existing buffer (BC_FILE / BC_CONSTANT / previous
+        ! external value) is used. Fields with no aeros-side reader today are
+        ! copied anyway so the buffer is populated before Phase C wires them.
+
+        implicit none
+
+        type(aeros_class),     intent(inout) :: ams
+        type(aeros_imports_t), intent(in)    :: imports
+
+        if (allocated(imports%sst)         .and. ams%bounds%sst%kind         == BC_EXTERNAL) &
+            ams%bounds%sst%buffer         = imports%sst
+        if (allocated(imports%sic)         .and. ams%bounds%sic%kind         == BC_EXTERNAL) &
+            ams%bounds%sic%buffer         = imports%sic
+        if (allocated(imports%t_ice_sfc)   .and. ams%bounds%t_ice_sfc%kind   == BC_EXTERNAL) &
+            ams%bounds%t_ice_sfc%buffer   = imports%t_ice_sfc
+        if (allocated(imports%t_skin_land) .and. ams%bounds%t_skin_land%kind == BC_EXTERNAL) &
+            ams%bounds%t_skin_land%buffer = imports%t_skin_land
+        if (allocated(imports%q_skin_land) .and. ams%bounds%q_skin_land%kind == BC_EXTERNAL) &
+            ams%bounds%q_skin_land%buffer = imports%q_skin_land
+        if (allocated(imports%albedo)      .and. ams%bounds%albedo%kind      == BC_EXTERNAL) &
+            ams%bounds%albedo%buffer      = imports%albedo
+        if (allocated(imports%z0m)         .and. ams%bounds%z0m%kind         == BC_EXTERNAL) &
+            ams%bounds%z0m%buffer         = imports%z0m
+        if (allocated(imports%so4_load)    .and. ams%bounds%so4%kind         == BC_EXTERNAL) &
+            ams%bounds%so4%buffer         = imports%so4_load
+
+        ! Year-boundary scalars: `current` is what physics reads.
+        if (imports%year_boundary) then
+            if (ams%bounds%co2%kind     == BC_EXTERNAL) ams%bounds%co2%current     = imports%co2_ppm
+            if (ams%bounds%ch4%kind     == BC_EXTERNAL) ams%bounds%ch4%current     = imports%ch4_ppb
+            if (ams%bounds%n2o%kind     == BC_EXTERNAL) ams%bounds%n2o%current     = imports%n2o_ppb
+            if (ams%bounds%time_bp%kind == BC_EXTERNAL) ams%bounds%time_bp%current = imports%time_bp
+        end if
+
+        return
+    end subroutine import_copy
+
+    subroutine export_populate(ams, exports)
+        ! Populate the allocated fields of `exports` with cycle-mean values.
+        !
+        ! Wave-3.a: this is a shell. The cycle-mean accumulators live in
+        ! ams%diag_acc, whose accumulate/finalize arithmetic ports from
+        ! rce_long in a later wave. For now the routine leaves allocated
+        ! export arrays at zero -- the caller sees a well-shaped bundle with
+        ! zeros, which is enough to compile and link the API. Phase A
+        ! calibration lands the field-by-field wire-up when a driver first
+        ! consumes it.
+
+        implicit none
+
+        type(aeros_class),     intent(inout) :: ams
+        type(aeros_exports_t), intent(out)   :: exports
+
+        ! intent(out) leaves scalar fields at their type defaults and every
+        ! allocatable component un-allocated. If the caller pre-allocated
+        ! fields on the exports bundle they'd be dropped here -- so the
+        ! contract for the shell is: caller does not pre-allocate exports;
+        ! the wave that fills these fields will switch to intent(inout).
+        !
+        ! Keep the reference to `ams` alive so gfortran does not warn about
+        ! unused-argument on this stub.
+        if (ams%par%nlon < 0) return
+
+        return
+    end subroutine export_populate
+
+    subroutine aeros_lib_finalize(ams, ierr)
+        ! Delegate to aeros_end. Idempotent: safe to call on an ams that was
+        ! never lib_init'd.
+
+        implicit none
+
+        type(aeros_class), intent(inout) :: ams
+        integer,           intent(out)   :: ierr
+
+        ierr = 0
+        call aeros_end(ams)
+
+        return
+    end subroutine aeros_lib_finalize
+
+    subroutine aeros_lib_restart_write(ams, filename, ierr)
+        ! Write the checkpoint. Wraps aeros_timestep_write_restart unchanged
+        ! (spec sec. 9: "Phase A does not change the restart file format").
+        !
+        ! Boundary buffers with BC_EXTERNAL kind and diag_acc state are NOT
+        ! written in Wave-3.a: spec sec. 9 lists BC_EXTERNAL as a Phase A
+        ! addition, and the accumulator arithmetic still lives in rce_long
+        ! (not yet library-side), so there is nothing library-owned to
+        ! persist. Wire-up lands with the accumulator port in a later wave.
+
+        implicit none
+
+        type(aeros_class), intent(inout) :: ams   ! inout (not in) so the timestep call is legal
+        character(len=*),  intent(in)    :: filename
+        integer,           intent(out)   :: ierr
+
+        real(wp) :: time_s
+
+        ierr = 0
+
+        time_s = ams%time*real(year_seconds, wp)
+        call aeros_timestep_write_restart(ams%ts, ams%now, time_s, filename)
+
+        return
+    end subroutine aeros_lib_restart_write
+
+    subroutine aeros_lib_restart_read(ams, filename, ierr)
+        ! Read a checkpoint into an already-initialised `ams`. Wraps
+        ! aeros_timestep_read_restart, then reconciles ams%time / ams%nstep
+        ! from the file so subsequent aeros_lib_step calls advance from the
+        ! restored point.
+
+        implicit none
+
+        type(aeros_class), intent(inout) :: ams
+        character(len=*),  intent(in)    :: filename
+        integer,           intent(out)   :: ierr
+
+        real(wp) :: time_s
+
+        ierr = 0
+
+        call aeros_timestep_read_restart(ams%ts, ams%now, time_s, filename)
+
+        ams%time  = time_s/real(year_seconds, wp)
+        ams%nstep = ams%ts%nstep
+
+        call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
+
+        return
+    end subroutine aeros_lib_restart_read
+
+    subroutine aeros_lib_diagnose(ams, diag_out, ierr)
+        ! Return a diagnostic snapshot without stepping.
+        !
+        ! Phase A ships an empty shell (docs/coupling_api.md sec. 6.3);
+        ! Phase C fills aeros_diag_t with the rce_long accumulator contents.
+        ! For now the routine just clears the shell and reports success.
+
+        implicit none
+
+        type(aeros_class), intent(in)  :: ams
+        type(aeros_diag_t), intent(out) :: diag_out
+        integer,            intent(out) :: ierr
+
+        ierr = 0
+        diag_out%reserved = 0
+
+        ! Keep `ams` referenced so the shell does not warn on unused arg.
+        if (ams%nstep < 0) ierr = 1
+
+        return
+    end subroutine aeros_lib_diagnose
 
 end module aeros

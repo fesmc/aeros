@@ -50,6 +50,13 @@ $(objdir)/aeros_bcinput.o: $(srcdir)/aeros_bcinput.f90 \
 							$(objdir)/aeros_defs.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# Coupling-cycle exchange bundle types (aeros_imports_t, aeros_exports_t,
+# aeros_diag_t). Leaf module -- only aeros_defs -- so both aeros and a coupled
+# adapter can use it without pulling in the other.
+$(objdir)/aeros_bundles.o: $(srcdir)/aeros_bundles.f90 \
+							$(objdir)/aeros_defs.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 ## aeros dynamics #############################
 #
 # The spectral primitive-equation core (docs/design.md sections 3.2, 4),
@@ -285,7 +292,8 @@ $(objdir)/aeros.o: $(srcdir)/aeros.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
 							$(objdir)/aeros_grid.o $(objdir)/aeros_state.o \
 							$(objdir)/aeros_vertical.o $(objdir)/aeros_timestep.o \
-							$(objdir)/aeros_boundary.o $(objdir)/aeros_diag_acc.o
+							$(objdir)/aeros_boundary.o $(objdir)/aeros_diag_acc.o \
+							$(objdir)/aeros_bundles.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ###############################################
@@ -298,7 +306,8 @@ aeros_base =     $(objdir)/aeros_defs.o \
                  $(objdir)/aeros_spectral.o \
                  $(objdir)/aeros_grid.o \
                  $(objdir)/aeros_state.o \
-                 $(objdir)/aeros_bcinput.o
+                 $(objdir)/aeros_bcinput.o \
+                 $(objdir)/aeros_bundles.o
 
 aeros_dynamics = $(objdir)/aeros_vertical.o \
                  $(objdir)/aeros_vordiv.o \

@@ -436,12 +436,17 @@
     ! src/physics/aeros_boundary.f90). One provider per lower-boundary /
     ! forcing field: kind = 0 (BC_CONSTANT), 1 (BC_FILE), 2 (BC_EXTERNAL).
     !
-    ! Wave-2 defaults are ALL BC_CONSTANT with value=0: physics readers are
-    ! not yet wired to consume from ams%bounds (that is Wave 3), so a zero
-    ! buffer sits unused and every existing driver is bit-for-bit. Wave 3
-    ! will migrate the per-driver paths (rce_long's sst_seasonal_file,
-    ! aeros_radiation's dust_file / so4_file, aeros_topography's topo_file,
-    ! aeros_land's albedo_file) into per-case overrides of these keys.
+    ! Wave-3.b scaffolds the default file/varname/scale/itime for every
+    ! provider that has a matching field today (albedo, phis, lsm, dust,
+    ! so4) so a per-case namelist that wants the bounds%<field>%buffer path
+    ! populated has only to flip <field>_kind = 1. Every <field>_kind stays
+    ! 0 (BC_CONSTANT, value=0) at default so the pre-wave-3 physics readers
+    ! -- aeros_land_init reading albedo_file, aeros_radiation_{so4,dust}_
+    ! load reading rad%so4_file / rad%dust_file, aeros_topography_load
+    ! reading rce_long's topo_file -- keep running and are the bit-for-bit
+    ! source of truth. Wave 4 (rce_long -> aeros_lib_step migration) flips
+    ! the physics-module consumers to bounds%<field>%buffer and this file's
+    ! defaults to <field>_kind = 1 in the same commit series.
     !
     ! Per-2D-provider keys:
     !   X_kind, X_file, X_varname, X_lon_name ("longitude"), X_lat_name
@@ -506,8 +511,16 @@
     q_skin_land_scale      = 1.0
     q_skin_land_floor      = -1.0e30
 
+    ! Land forecast albedo (ERA5 fal): 12-month climatology. Path and varname
+    ! match aeros_land's albedo_file default in rce_defaults.nml (land group).
+    ! Kind stays BC_CONSTANT here: the physics consumer (aeros_land) is not
+    ! wired to read from bounds%albedo%buffer yet -- that wire-up is Wave 4
+    ! alongside the driver -> aeros_lib_step migration (rce_long still calls
+    ! aeros_land_init(land, grd, l_land), which reads albedo_file directly).
+    ! Per-case files that want the bounds path populated in advance override
+    ! albedo_kind = 1 and albedo_file = "..." locally.
     albedo_kind       = 0
-    albedo_file       = ""
+    albedo_file       = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_fal_1991-2020_clim.nc"
     albedo_varname    = "fal"
     albedo_lon_name   = "longitude"
     albedo_lat_name   = "latitude"
@@ -528,8 +541,13 @@
     z0m_scale      = 1.0
     z0m_floor      = -1.0e30
 
+    ! Surface geopotential (ERA5 z, m2 s-2, single slice). Path/varname match
+    ! rce_long's topo_file default and aeros_topography_load convention.
+    ! Kind stays BC_CONSTANT: rce_long's l_topography path still calls
+    ! aeros_topography_load(topo_file, ...) directly -- Wave 4 flips both
+    ! the driver over to bounds%phis%buffer and this default to kind = 1.
     phis_kind       = 0
-    phis_file       = ""
+    phis_file       = "/Users/alrobi001/data/era5/era5_orography.nc"
     phis_varname    = "z"
     phis_lon_name   = "longitude"
     phis_lat_name   = "latitude"
@@ -539,8 +557,11 @@
     phis_scale      = 1.0
     phis_floor      = -1.0e30
 
+    ! Land-sea mask (ERA5 lsm, single slice). Path/varname match aeros_land's
+    ! lsm_file default in rce_defaults.nml. Kind stays BC_CONSTANT (see the
+    ! albedo note above for the wave-3/wave-4 sequencing).
     lsm_kind       = 0
-    lsm_file       = ""
+    lsm_file       = "/Users/alrobi001/data/era5/monthly-single-levels/era5_monthly-single-levels_lsm_1991-2020_clim.nc"
     lsm_varname    = "lsm"
     lsm_lon_name   = "longitude"
     lsm_lat_name   = "latitude"
@@ -550,24 +571,36 @@
     lsm_scale      = 1.0
     lsm_floor      = -1.0e30
 
+    ! Dust optical thickness (Lambert 2015, monthly). File/varname match
+    ! aeros_radiation's dust_file default in rce_defaults.nml; dust_scale =
+    ! 0.3 matches the &rce/&radiation default there (present-day dust
+    ! calibration, 2026-09-09). Kind stays BC_CONSTANT here: the radiation
+    ! kernel still reads rad%dust_ot, populated by aeros_radiation_dust_load
+    ! -- Wave 4 flips it. dust_floor = 0 matches the max(0, ...) clamp in
+    ! aeros_radiation_dust_load.
     dust_kind       = 0
-    dust_file       = ""
+    dust_file       = "input/dust_ot_lambert2015_present.nc"
     dust_varname    = "dust_ot"
     dust_lon_name   = "lon"
     dust_lat_name   = "lat"
     dust_is_monthly = .TRUE.
     dust_itime      = 1
     dust_value      = 0.0
-    dust_scale      = 1.0
+    dust_scale      = 0.3
     dust_floor      = 0.0
 
+    ! Sulfate load (CMIP6 CLIMBER-X ensmean, one record per year from 1850).
+    ! File/varname match aeros_radiation's so4_file default in rce_defaults.nml.
+    ! so4_itime = so4_year - 1850 + 1 = 2003 - 1850 + 1 = 154, matching
+    ! rce_defaults so4_year = 2003. Kind stays BC_CONSTANT: rad%so4_map is
+    ! populated directly by aeros_radiation_so4_load today.
     so4_kind       = 0
-    so4_file       = ""
+    so4_file       = "/Users/alrobi001/models/climber-x/input/so4_historical_CMIP6_ensmean_ann_5x5.nc"
     so4_varname    = "so4"
     so4_lon_name   = "lon"
     so4_lat_name   = "lat"
     so4_is_monthly = .FALSE.
-    so4_itime      = 1
+    so4_itime      = 154
     so4_value      = 0.0
     so4_scale      = 1.0
     so4_floor      = 0.0
