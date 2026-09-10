@@ -17,14 +17,13 @@ program rce_long
     ! level count, the enabled flags, doy0, ...) comes from `ams%par`,
     ! `ams%phys` and `ams%ts%<sub>` -- there are no shadow copies.
     !
-    ! Wave 4b: every prescribed field -- the seasonal SST table, the
-    ! land-sea mask and bare albedo, the dust and sulfate maps, the
-    ! orography -- is a boundary provider (&boundary, ams%bounds) read by
-    ! the library; this driver only refreshes the providers once a day
-    ! (aeros_boundary_refresh + aeros_boundary_apply, the cadence the old
-    ! set_seasonal_sst had) and ramps the band-limited orography in over
-    ! &boundary phis_ramp_days. The time loop, the restart calls and the
-    ! dumps stay here (Waves 4c-4d move them behind the library).
+    ! Wave 4d: the outer loop is one aeros_lib_step per dynamics step -- the
+    ! same call a coupled host makes. aeros_lib_step owns the daily boundary
+    ! refresh, the topography ramp on the phis buffer, and the per-step
+    ! water / energy / 2nd-half / monthly-climatology accumulators (gated by
+    ! spin-up thresholds set on ams%diag_acc). The driver keeps its
+    ! own-policy jobs: NaN detection, report cadence, restart interval, and
+    ! the end-of-run dumps (rce_rh, rce_phis, monthly climatology).
     !
     ! Each report prints, per level: global-mean T, the global max T with its
     ! (i,j) location, and the global min T -- the max-location wandering and a
@@ -39,18 +38,14 @@ program rce_long
     use aeros_vertical, only : aeros_vgrid_pressure
     use aeros_condensation, only : aeros_qsat, aeros_latent
     use aeros_cloud,    only : aeros_cloud_diagnose
-    use aeros_timestep, only : aeros_timestep_step, aeros_timestep_diagnose, &
-                                aeros_timestep_enable_diag, aeros_timestep_set_phis, &
+    use aeros_timestep, only : aeros_timestep_diagnose, &
+                                aeros_timestep_enable_diag, &
                                 aeros_timestep_set_qforce, aeros_timestep_write_restart
-    use aeros_topography, only : aeros_topography_scale
-    use aeros_boundary, only : aeros_boundary_refresh, aeros_boundary_kind_name, BC_NONE
-    use aeros_diag_acc, only : aeros_diag_acc_init_monthly, AEROS_DIAG_NMON, &
-                                aeros_diag_acc_energy, aeros_diag_acc_water, &
-                                aeros_diag_acc_second_half, aeros_diag_acc_monthly, &
-                                aeros_diag_acc_imon
-    use aeros,          only : aeros_class, aeros_lib_init, aeros_lib_finalize, &
-                                aeros_lib_restart_read, aeros_set_rce_warm, &
-                                aeros_boundary_apply
+    use aeros_boundary, only : aeros_boundary_kind_name, BC_NONE
+    use aeros_diag_acc, only : aeros_diag_acc_init_monthly, AEROS_DIAG_NMON
+    use aeros,          only : aeros_class, aeros_lib_init, aeros_lib_step, &
+                                aeros_lib_finalize, aeros_lib_restart_read, &
+                                aeros_set_rce_warm
     use nml,            only : nml_read
     use ncio,           only : nc_create, nc_write_dim, nc_write
 
@@ -93,14 +88,10 @@ program rce_long
     real(wp) :: qforce_amp
 
     ! --- driver state ---------------------------------------------------------
-    ! The orography ramp (&physics l_topography): the band-limited full field
-    ! is the library's phis provider buffer (ams%bounds%phis%buffer, set by
-    ! aeros_boundary_apply); it is ramped in linearly over &boundary
-    ! phis_ramp_days (a pure function of elapsed time, aeros_topography_scale,
-    ! hence restart-safe) and fed to the dynamics as phis2.
-    real(wp), allocatable :: phis2(:,:)       ! surface geopotential fed to the dynamics
-    real(wp) :: tscale, tscale_prev           ! current / previous ramp factor
-    integer  :: nstep_day                     ! steps per day: the boundary refresh cadence
+    ! Wave 4d: the boundary refresh, topography ramp and diagnostic
+    ! accumulator arithmetic all live inside aeros_lib_step. The driver only
+    ! owns the outer loop: NaN detection, report cadence, checkpoint
+    ! interval, and the end-of-run dumps.
     real(wp) :: restart_time = 0.0_wp
     integer  :: n0 = 0                        ! absolute step offset (nonzero on restart)
     integer, parameter :: NMON = AEROS_DIAG_NMON
@@ -194,8 +185,8 @@ program rce_long
     ! l_topography the phis provider (ERA5 orography by default) has been read
     ! and band-limited to the model truncation by the library
     ! (aeros_boundary_apply; ams%bounds%phis%buffer holds the band-limited
-    ! field) and is ramped in here over phis_ramp_days.
-    allocate(phis2(ams%grd%nlon, ams%grd%nlat)); phis2 = 0.0_wp
+    ! field) and is ramped in over phis_ramp_days INSIDE the library (Wave 4d:
+    ! aeros_boundary_apply owns the ramp so a coupled host inherits it).
     if (ams%phys%l_topography) then
         write(*,"(a,a,a,a)") " rce_long:: topography provider ", &
             trim(aeros_boundary_kind_name(ams%bounds%phis%kind)), " ", trim(ams%bounds%phis%file)
@@ -210,11 +201,6 @@ program rce_long
         call nc_write("output/rce_phis.nc", "phis", ams%bounds%phis%buffer, dim1="lon", dim2="lat", &
                       units="m2 s-2", long_name="surface geopotential (band-limited)")
     end if
-    ! Initial feed at t = 0 (scale = 0 while ramping, so the run starts flat).
-    tscale      = aeros_topography_scale(ams%phys%l_topography, 0.0_wp, ams%bounds%phis_ramp_days)
-    tscale_prev = tscale
-    phis2 = tscale*ams%bounds%phis%buffer
-    call aeros_timestep_set_phis(ams%ts, phis2)
 
     ! Diagnostic prescribed heating: an analytic Q(lat,sigma), equatorial and
     ! area-weighted zero-mean in latitude (no net global heating -> no drift),
@@ -283,30 +269,28 @@ program rce_long
             " rce_long:: WARNING monthly_out set but &radiation seasonal=.FALSE. -- "// &
             "insolation is annual-mean, so all months bin the same forcing."
     end if
-    nstep_day = max(1, nint(86400.0_wp/ams%par%dt))
+
+    ! === Driver spin-up policy for the library-side accumulators ============
+    ! The library method is called every sub-step by aeros_lib_step; the WHEN
+    ! is a per-driver choice, set as thresholds on the accumulator container.
+    !   * 2nd-half tavg: fire strictly past the mid-point (`n > n0 + nstep/2`).
+    !   * monthly bin: past mon_spinup_days elapsed (as before, absolute
+    !     elapsed days -- restart safe).
+    if (l_diag) ams%diag_acc%spinup_second_half_nstep = n0 + nstep/2
+    if (len_trim(monthly_out) > 0) ams%diag_acc%spinup_monthly_days = mon_spinup_days
+
     do n = n0+1, n0+nstep
-        ! Boundary providers: once a day, interpolate the monthly fields (SST,
-        ! bare land albedo, dust) to the running day-of-year and hand every
-        ! buffer to its consumer, before the step reads them in the surface
-        ! fluxes and radiation (the cadence and the doy0 + n dt argument of the
-        ! old set_seasonal_sst / aeros_land_set_albedo).
-        if (mod(n, nstep_day) == 0) then
-            call aeros_boundary_refresh(ams%bounds, ams%ts%rad%doy0 + real(n,wp)*ams%par%dt/86400.0_wp)
-            call aeros_boundary_apply(ams)
+        ! One dynamics step through the library. aeros_lib_step handles the
+        ! daily boundary refresh, the topography ramp on the phis buffer, the
+        ! per-step water/energy/2nd-half/monthly accumulators (gated by the
+        ! spin-up thresholds set above) and leaves the grid-space fields
+        ! consistent. dt_couple = par%dt -> nsub = 1.
+        call aeros_lib_step(ams, dt_couple=real(ams%par%dt, dp), ierr=ierr)
+        if (ierr /= 0) then
+            write(*,"(a,i0,a,i0)") " rce_long:: aeros_lib_step failed at step ", n, &
+                                    ", ierr = ", ierr
+            error stop 1
         end if
-        ! Advance the topography ramp: a pure function of absolute elapsed time
-        ! n*dt, so it is restart-safe -- a run resumed at n0 continues the ramp at
-        ! the right amplitude. Only re-set phis while the factor is still changing
-        ! (during the ramp); once it reaches 1 the surface is constant.
-        if (ams%phys%l_topography .and. ams%bounds%phis_ramp_days > 0.0_wp .and. tscale_prev < 1.0_wp) then
-            tscale = aeros_topography_scale(.true., real(n,wp)*ams%par%dt, ams%bounds%phis_ramp_days)
-            if (tscale /= tscale_prev) then
-                phis2 = tscale*ams%bounds%phis%buffer
-                call aeros_timestep_set_phis(ams%ts, phis2)
-                tscale_prev = tscale
-            end if
-        end if
-        call aeros_timestep_step(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
         if (any(ams%ts%wrk%t_g /= ams%ts%wrk%t_g) .or. any(ams%now%qv_g /= ams%now%qv_g)) then
             write(*,"(a,i0,a,f7.2,a)") " *** NaN at step ", n, "  (day ", &
                 real(n,wp)*ams%par%dt/86400.0_wp, ")"
@@ -314,32 +298,7 @@ program rce_long
             blew_up = .TRUE.
             exit
         end if
-        ! Per-step accumulators (library owns the arithmetic; the driver
-        ! decides WHEN). Water/energy every step; the 2nd-half tavg and
-        ! monthly bin only after the spin-up windows below.
-        call aeros_diag_acc_water(ams%diag_acc, ams%ts, ams%phys, ams%grd)
-        call aeros_diag_acc_energy(ams%diag_acc, ams%ts, ams%phys, ams%grd)
         if (mod(n, print_every) == 0) call report(n)
-        ! Time-mean omega over the run's second half (equilibrium) for a robust
-        ! zonal-mean subsidence diagnostic -- a single snapshot is too noisy.
-        if (l_diag .and. n > n0 + nstep/2) then
-            call aeros_diag_acc_second_half(ams%diag_acc, ams%ts, ams%now, &
-                                            ams%vgrid, ams%grd, ams%par)
-        end if
-        ! Monthly-mean climatology sampling (feat/seasonal): bin the zonal-mean
-        ! state by calendar month on a ~daily cadence, once past the spin-up
-        ! window (mon_spinup_days) so the slab drift does not pollute the mean.
-        ! The sampled grid fields (now%temp_g/u/v/ps) are diagnostics that only
-        ! aeros_timestep_diagnose refreshes -- refresh them here, or the sample
-        ! is the state at the last report (which is what silently happened up to
-        ! 2026-09: months identical between prints).
-        if (len_trim(monthly_out) > 0 .and. mod(n, ams%diag_acc%nacc_mon) == 0 .and. &
-            real(n,wp)*ams%par%dt/86400.0_wp >= mon_spinup_days) then
-            call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
-            call aeros_diag_acc_monthly(ams%diag_acc, ams%ts, ams%now, ams%vgrid, &
-                                        ams%grd, ams%par, ams%phys, &
-                                        aeros_diag_acc_imon(ams%ts%rad%doy0 + real(n,wp)*ams%par%dt/86400.0_wp))
-        end if
         ! Periodic checkpoint (restart_interval > 0). The model time carried into
         ! the file is the absolute elapsed time n*dt.
         if (len_trim(restart_out) > 0 .and. restart_interval > 0) then
@@ -361,7 +320,6 @@ program rce_long
     if (len_trim(rh_out) > 0) call dump_rh(trim(rh_out))
     if (len_trim(monthly_out) > 0 .and. .not. blew_up) call dump_monthly(trim(monthly_out))
 
-    deallocate(phis2)
     call aeros_lib_finalize(ams, ierr)
 
 contains

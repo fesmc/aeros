@@ -103,6 +103,17 @@ module aeros_diag_acc
         ! monthly-sampling cadence [dynamics steps]; ~1 sample/day set in _init
         integer               :: nacc_mon = 1
 
+        ! Spin-up gates (Wave 4d): the driver's WHEN policy, applied inside
+        ! the library method so aeros_lib_step can invoke it unconditionally.
+        !   spinup_second_half_nstep -- skip _second_half until ts%nstep is
+        !     strictly greater than this. rce_long: n0 + nstep/2. Coupled
+        !     host: 0 (accumulate from step 1).
+        !   spinup_monthly_days -- skip _monthly until ts%nstep*par%dt/86400
+        !     >= spinup_monthly_days. rce_long: &rce mon_spinup_days. Coupled
+        !     host: 0 (bin from day 0).
+        integer  :: spinup_second_half_nstep = 0
+        real(wp) :: spinup_monthly_days      = 0.0_wp
+
         ! -- water budget (report-cadence global means) ------------------------
         real(wp) :: wb_w_last = -1.0_wp
         real(wp) :: wb_p_acc  = 0.0_wp
@@ -432,6 +443,9 @@ contains
         acc%tb_lhf   = 0.0_wp
         acc%tb_n     = 0
 
+        acc%spinup_second_half_nstep = 0
+        acc%spinup_monthly_days      = 0.0_wp
+
         return
 
     end subroutine aeros_diag_acc_end
@@ -576,6 +590,11 @@ contains
         ! driver has called aeros_timestep_enable_diag. Without them the
         ! 2nd-half tavg is meaningless -- skip it.
         if (.not. (allocated(ts%wrk%dt_cnv) .and. allocated(ts%wrk%omega))) return
+        ! Wave 4d driver spin-up gate: rce_long's `n > n0 + nstep/2` moved
+        ! here so aeros_lib_step can call the method every sub-step and the
+        ! WHEN stays a driver choice (default 0 = coupled host, accumulate
+        ! from step 1).
+        if (ts%nstep <= acc%spinup_second_half_nstep) return
 
         acc%w_tavg    = acc%w_tavg    + ts%wrk%omega
         acc%cnv_tavg  = acc%cnv_tavg  + ts%wrk%dt_cnv
@@ -674,6 +693,9 @@ contains
         ! the monthly bin is not meaningful without them.
         if (.not. allocated(ts%mst%mass_ratio)) return
         if (.not. allocated(ts%ocn%sst))        return
+        ! Wave 4d driver spin-up gate: rce_long's `elapsed_days >= mon_spinup_days`
+        ! moved here (default 0 = coupled host, no spin-up).
+        if (real(ts%nstep, wp)*par%dt/86400.0_wp < acc%spinup_monthly_days) return
 
         have_pr = allocated(ts%cnv%precip) .and. allocated(ts%cnd%precip)
         rnlon = real(grd%nlon, wp)

@@ -166,7 +166,7 @@ program held_suarez
             end if
         end block
 
-        ! aeros_update leaves the grid fields consistent, so the sample costs
+        ! aeros_lib_step leaves the grid fields consistent, so the sample costs
         ! no extra transforms -- which is why the sampling interval and the
         ! update interval are the same thing here.
         if (day >= day_avg_start) call aeros_diag_accumulate(dgn, ams%grd, ams%now, day)

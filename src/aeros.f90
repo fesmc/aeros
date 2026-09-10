@@ -7,9 +7,9 @@ module aeros
     ! that matters, and it is deliberately the same three calls a CLIMBER-X- or
     ! yelmox-style driver already expects:
     !
-    !     aeros_init(ams, filename)      allocate and configure
-    !     aeros_update(ams, time)        advance to `time`
-    !     aeros_end(ams)                 release
+    !     aeros_lib_init(ams, filename)     allocate and configure
+    !     aeros_lib_step(ams, dt_couple)    advance by dt_couple seconds
+    !     aeros_lib_finalize(ams)           release
     !
     ! The signature survived M1 unchanged, which was the point of choosing it
     ! at M0: a host driver says "catch up to this time" and never learns the
@@ -53,7 +53,7 @@ module aeros
                                 BC_NONE, BC_EXTERNAL
     use aeros_ocean,    only : OCEAN_PRESCRIBED
     use aeros_land,     only : aeros_land_is_land, aeros_land_couple_radiation
-    use aeros_topography, only : aeros_topography_bandlimit
+    use aeros_topography, only : aeros_topography_bandlimit, aeros_topography_scale
     use ncio,           only : nc_write, nc_read, nc_exists_var
     use aeros_diag_acc, only : aeros_diag_acc_t, aeros_diag_acc_init, &
                                 aeros_diag_acc_reset, aeros_diag_acc_end, &
@@ -94,7 +94,12 @@ module aeros
         ! the dynamics (aeros_boundary_apply): the analysis/synthesis
         ! round-trip is done once per change, never repeated on an unchanged
         ! buffer (a second round-trip is not bit-identical).
-        integer :: bc_phis_applied = 0
+        integer  :: bc_phis_applied = 0
+        ! Wave 4d: last topography ramp factor handed to the dynamics. The
+        ! ramp (aeros_topography_scale) is a pure function of elapsed time,
+        ! so the phis field the dynamics sees can change without the buffer
+        ! version bumping. -1 = "never set" (forces the first apply).
+        real(wp) :: bc_phis_applied_tscale = -1.0_wp
 
         ! Library-side diagnostic accumulators (docs/coupling_api.md sec. 5,
         ! 6.2, 6.3). Wave 4a: aeros_init allocates and zeroes the always-on
@@ -112,7 +117,6 @@ module aeros
 
     public :: aeros_class
     public :: aeros_init
-    public :: aeros_update
     public :: aeros_end
     public :: aeros_set_isothermal
     public :: aeros_set_rce_warm
@@ -221,6 +225,9 @@ contains
         ! aeros_land_set_albedo and aeros_radiation_set_dust installed at
         ! the start before Wave 4b) and the band-limited orography.
         call aeros_boundary_refresh(ams%bounds, ams%ts%rad%doy0)
+        ams%bounds%last_refresh_int_doy = int(ams%ts%rad%doy0)
+        ! Init: elapsed = 0, so the topography ramp starts at 0 (a zero surface
+        ! for a ramped run; the buffer's full amplitude for a no-ramp run).
         call aeros_boundary_apply(ams)
 
         ! Library-side diagnostic accumulators (Wave 4a): allocate and zero the
@@ -391,7 +398,7 @@ contains
 
     end subroutine aeros_set_rce_warm
 
-    subroutine aeros_boundary_apply(ams)
+    subroutine aeros_boundary_apply(ams, time_seconds)
         ! Hand every provider buffer to the physics field that reads it.
         !
         ! The kernels keep their working fields (ts%ocn%sst, ts%land%mask and
@@ -430,6 +437,10 @@ contains
         implicit none
 
         type(aeros_class), intent(inout) :: ams
+        real(wp), intent(in), optional   :: time_seconds  ! elapsed time for the phis ramp
+
+        real(wp) :: tscale, t_elapsed
+        logical  :: version_changed, tscale_changed
 
         if (in_use(ams%bounds%sst) .and. ams%ts%ocn%mode == OCEAN_PRESCRIBED) &
             ams%ts%ocn%sst = ams%bounds%sst%buffer
@@ -455,10 +466,27 @@ contains
         end if
 
         if (ams%phys%l_topography .and. in_use(ams%bounds%phis)) then
-            if (ams%bounds%phis%version /= ams%bc_phis_applied) then
+            ! Ramp factor: pure function of elapsed time (aeros_topography_scale)
+            ! -- restart-safe, no state to save. Caller passes elapsed = nstep*dt
+            ! (or (nstep+1)*dt from aeros_lib_step for the step about to run).
+            ! Init calls this with no arg -> elapsed = 0 -> tscale = 0 with a
+            ! nonzero ramp, so the first step starts on a flat surface.
+            t_elapsed = 0.0_wp
+            if (present(time_seconds)) t_elapsed = time_seconds
+            tscale = aeros_topography_scale(ams%phys%l_topography, t_elapsed, &
+                                            ams%bounds%phis_ramp_days)
+            version_changed = (ams%bounds%phis%version /= ams%bc_phis_applied)
+            tscale_changed  = (tscale /= ams%bc_phis_applied_tscale)
+            if (version_changed) then
+                ! Spectral round-trip is not bit-identical -- do it once per
+                ! buffer bump. The ramped scaling is done on the band-limited
+                ! buffer at set_phis below.
                 call aeros_topography_bandlimit(ams%pool%sht(1), ams%bounds%phis%buffer)
-                call aeros_timestep_set_phis(ams%ts, ams%bounds%phis%buffer)
                 ams%bc_phis_applied = ams%bounds%phis%version
+            end if
+            if (version_changed .or. tscale_changed) then
+                call aeros_timestep_set_phis(ams%ts, tscale*ams%bounds%phis%buffer)
+                ams%bc_phis_applied_tscale = tscale
             end if
         end if
 
@@ -476,9 +504,9 @@ contains
     subroutine aeros_diagnose(ams)
         ! Refresh the grid-space fields from the spectral state.
         !
-        ! aeros_update already ends with this, so a driver only needs it after
-        ! reaching into the spectral state directly -- installing an initial
-        ! condition, or seeding a perturbation.
+        ! aeros_lib_step already ends with this, so a driver only needs it
+        ! after reaching into the spectral state directly -- installing an
+        ! initial condition, or seeding a perturbation (held_suarez).
 
         implicit none
 
@@ -489,47 +517,6 @@ contains
         return
 
     end subroutine aeros_diagnose
-
-    subroutine aeros_update(ams, time)
-        ! Advance the model to `time` [yr].
-
-        implicit none
-
-        type(aeros_class), intent(inout) :: ams
-        real(wp), intent(in) :: time
-
-        integer :: n, nstep_target, nstep_do
-
-        if (time < ams%time) then
-            write(io_unit_err,*) "aeros_update:: error: cannot step backwards, from ", &
-                                    ams%time, " to ", time
-            stop 1
-        end if
-
-        ! Step count from the absolute elapsed time, so the rounding error is
-        ! bounded rather than accumulated. See the module header.
-        nstep_target = nint(real(time - ams%time_init, dp)*year_seconds &
-                                /real(ams%par%dt, dp))
-        nstep_do     = nstep_target - ams%nstep
-
-        do n = 1, nstep_do
-            call aeros_timestep_step(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
-        end do
-
-        ams%nstep = max(nstep_target, ams%nstep)
-        ams%time  = time
-
-        ! Leave the grid-space fields consistent with the spectral state the
-        ! caller now holds. The integrator does not do this every step -- see
-        ! aeros_timestep_diagnose -- so a caller that reads ams%now%u without
-        ! going through aeros_update would be reading whatever the last update
-        ! left. Doing it here makes the facade's contract simply "after
-        ! aeros_update, ams%now is a complete, consistent state".
-        call aeros_timestep_diagnose(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)
-
-        return
-
-    end subroutine aeros_update
 
     subroutine aeros_end(ams)
 
@@ -595,7 +582,7 @@ contains
     ! Coupled library API (docs/coupling_api.md sec. 3).
     !
     ! Six public routines a coupled host calls in place of the standalone
-    ! aeros_init / aeros_update / aeros_end trio, with `ierr` returns instead
+    ! aeros_init / aeros_end pair, with `ierr` returns instead
     ! of `stop 1` on the public path. The signatures track spec sec. 3 and
     ! decision 1 of sec. 14 (public routines live on the existing `aeros`
     ! module, not a new `aeros_lib`).
@@ -687,7 +674,7 @@ contains
         type(aeros_exports_t), intent(out), optional  :: exports
         integer,               intent(out)            :: ierr
 
-        integer  :: nsub, n
+        integer  :: nsub, n, int_doy
         real(wp) :: doy
 
         ierr = 0
@@ -711,9 +698,23 @@ contains
         doy = ams%ts%rad%doy0 + real(ams%nstep + 1, wp)*ams%par%dt/86400.0_wp
 
         ! === Step 1-4: imports, boundary refresh, hand-over to the physics ===
+        !
+        ! Refresh cadence: once per integer day. rce_long's driver-side
+        ! `mod(n, nstep_day) == 0` (Wave 4b) is now the library's own gate,
+        ! so a per-step aeros_lib_step (dt_couple = par%dt) does the same
+        ! monthly-clim interpolation once a day rather than every step, and
+        ! a coupled host with dt_couple >> par%dt refreshes at every day
+        ! boundary the cycle crosses (typically once per cycle).
+        !
+        ! apply is called every cycle: it also drives the topography ramp,
+        ! which changes step-by-step even without a buffer refresh.
         if (present(imports)) call import_copy(ams, imports)
-        call aeros_boundary_refresh(ams%bounds, doy)
-        call aeros_boundary_apply(ams)
+        int_doy = int(doy)
+        if (int_doy /= ams%bounds%last_refresh_int_doy) then
+            call aeros_boundary_refresh(ams%bounds, doy)
+            ams%bounds%last_refresh_int_doy = int_doy
+        end if
+        call aeros_boundary_apply(ams, time_seconds=real(ams%nstep + 1, wp)*ams%par%dt)
 
         ! === Sub-cycle with per-step accumulation ===========================
         !
@@ -743,8 +744,10 @@ contains
         ! the bin stays absent on that path.
         if (.not. allocated(ams%diag_acc%mon_cnt) .and. &
             (ams%phys%l_cnd .or. ams%phys%l_cnv .or. ams%phys%l_rad .or. ams%phys%l_surf)) then
-            call aeros_diag_acc_init_monthly(ams%diag_acc, ams%par%nlon, &
-                                             ams%par%nlat, ams%par%nlev)
+            ! Grid dims: ams%par%nlon / nlat carry the namelist's request (-1 by
+            ! default), not the realised grid; the realised grid is on ams%grd.
+            call aeros_diag_acc_init_monthly(ams%diag_acc, ams%grd%nlon, &
+                                             ams%grd%nlat, ams%par%nlev)
         end if
         do n = 1, nsub
             call aeros_timestep_step(ams%ts, ams%pool, ams%vgrid, ams%grd, ams%now)

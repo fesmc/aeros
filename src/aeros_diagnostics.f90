@@ -33,7 +33,7 @@ module aeros_diagnostics
     ! === Sampling ===========================================================
     !
     ! The caller decides when to sample, by calling aeros_diag_accumulate. It
-    ! must be after aeros_timestep_diagnose (or aeros_update, which ends with
+    ! must be after aeros_timestep_diagnose (or aeros_lib_step, which ends with
     ! one), since the grid-space fields are the input. Sampling every dynamics
     ! step would double the model's transform cost for no statistical benefit:
     ! synoptic eddies evolve over days, and a daily sample over 1000 days is

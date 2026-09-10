@@ -115,10 +115,17 @@ module aeros_boundary
         type(aeros_bc_2d_t) :: so4           ! sulfate load [kg m-2]
         type(aeros_bc_2d_t) :: o3            ! ozone column (2D placeholder; 3D is Phase C)
 
-        ! Surface-geopotential spin-up ramp [days]: a driver scales phis
-        ! linearly from 0 to full over this many days (aeros_topography_scale;
-        ! rce_long). 0 = no ramp. The library applies the full field.
+        ! Surface-geopotential spin-up ramp [days]: linearly from 0 to full
+        ! over this many days (aeros_topography_scale). 0 = no ramp. The
+        ! library applies the ramped field in aeros_boundary_apply -- Wave 4d
+        ! (was rce_long's driver-side scale) -- so a coupled host inherits it.
         real(wp) :: phis_ramp_days = 0.0_wp
+
+        ! Wave 4d: refresh cadence de-duplication. aeros_lib_step calls
+        ! refresh once per integer day rather than once per step; this holds
+        ! the day of the last refresh so a repeated refresh on the same day
+        ! is a no-op. -huge = "no refresh yet".
+        integer :: last_refresh_int_doy = -huge(0)
 
         ! === Scalar (year-boundary) fields ================================
         type(aeros_bc_scalar_t) :: co2       ! CO2 [ppmv]
