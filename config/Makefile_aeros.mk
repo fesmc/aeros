@@ -237,6 +237,15 @@ $(objdir)/aeros_land.o: $(physdir)/aeros_land.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_bcinput.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# Boundary-provider abstraction (Wave 2 of the coupling API,
+# docs/coupling_api.md sec. 5, 7). Owns the (BC_CONSTANT / BC_FILE /
+# BC_EXTERNAL) providers for every lower-boundary or forcing field, and the
+# aeros_boundary_t bundle carried on aeros_class. Reads I/O-backed fields
+# through aeros_bcinput; namelist-populated through nml.
+$(objdir)/aeros_boundary.o: $(physdir)/aeros_boundary.f90 \
+							$(objdir)/aeros_defs.o $(objdir)/aeros_bcinput.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 ## aeros core #################################
 #
 # IO and the public facade. These sit above everything else and must be
@@ -256,6 +265,15 @@ $(objdir)/aeros_diagnostics.o: $(srcdir)/aeros_diagnostics.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_vertical.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
+# Library-side diagnostic accumulators (Wave 2 of the coupling API,
+# docs/coupling_api.md sec. 5, 6.2, 6.3). Owns the second-half tavg buffers,
+# the monthly climatology bins and the energy/water-budget scalars that
+# today live at rce_long program scope. A leaf module: needs only aeros_defs
+# for the working precision.
+$(objdir)/aeros_diag_acc.o: $(srcdir)/aeros_diag_acc.f90 \
+							$(objdir)/aeros_defs.o
+	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
+
 # Output, driven by the variable tables under input/. Depends on the
 # diagnostics type it writes.
 $(objdir)/aeros_io.o: $(srcdir)/aeros_io.f90 \
@@ -266,7 +284,8 @@ $(objdir)/aeros_io.o: $(srcdir)/aeros_io.f90 \
 $(objdir)/aeros.o: $(srcdir)/aeros.f90 \
 							$(objdir)/aeros_defs.o $(objdir)/aeros_spectral.o \
 							$(objdir)/aeros_grid.o $(objdir)/aeros_state.o \
-							$(objdir)/aeros_vertical.o $(objdir)/aeros_timestep.o
+							$(objdir)/aeros_vertical.o $(objdir)/aeros_timestep.o \
+							$(objdir)/aeros_boundary.o $(objdir)/aeros_diag_acc.o
 	$(FC) $(DFLAGS) $(FFLAGS) $(INCFLAGS) -c -o $@ $<
 
 ###############################################
@@ -303,12 +322,14 @@ aeros_physics =  $(objdir)/aeros_physics.o \
                  $(objdir)/aeros_vdiff.o \
                  $(objdir)/aeros_ocean.o \
                  $(objdir)/aeros_topography.o \
-                 $(objdir)/aeros_land.o
+                 $(objdir)/aeros_land.o \
+                 $(objdir)/aeros_boundary.o
 
 # aeros_timestep sits above the physics as well as the dynamics -- it is what
 # calls the forcing -- so it is archived after both.
 aeros_core =     $(objdir)/aeros_timestep.o \
                  $(objdir)/aeros_budget.o \
                  $(objdir)/aeros_diagnostics.o \
+                 $(objdir)/aeros_diag_acc.o \
                  $(objdir)/aeros_io.o \
                  $(objdir)/aeros.o

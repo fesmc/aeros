@@ -430,3 +430,183 @@
     t_ref         = 285.0
     tau_mean_days = 365.0
 /
+
+&boundary
+    ! Boundary providers (docs/coupling_api.md sec 7,
+    ! src/physics/aeros_boundary.f90). One provider per lower-boundary /
+    ! forcing field: kind = 0 (BC_CONSTANT), 1 (BC_FILE), 2 (BC_EXTERNAL).
+    !
+    ! Wave-2 defaults are ALL BC_CONSTANT with value=0: physics readers are
+    ! not yet wired to consume from ams%bounds (that is Wave 3), so a zero
+    ! buffer sits unused and every existing driver is bit-for-bit. Wave 3
+    ! will migrate the per-driver paths (rce_long's sst_seasonal_file,
+    ! aeros_radiation's dust_file / so4_file, aeros_topography's topo_file,
+    ! aeros_land's albedo_file) into per-case overrides of these keys.
+    !
+    ! Per-2D-provider keys:
+    !   X_kind, X_file, X_varname, X_lon_name ("longitude"), X_lat_name
+    !   ("latitude"), X_is_monthly, X_itime (single-slice), X_value
+    !   (CONSTANT uniform fill), X_scale (post-read multiplier), X_floor
+    !   (post-read clamp; keep at large negative to disable).
+    ! Per-scalar-provider keys:
+    !   X_kind, X_value, X_file, X_year.
+
+    sst_kind         = 0
+    sst_file         = ""
+    sst_varname      = "sst"
+    sst_lon_name     = "longitude"
+    sst_lat_name     = "latitude"
+    sst_is_monthly   = .TRUE.
+    sst_itime        = 1
+    sst_value        = 0.0
+    sst_scale        = 1.0
+    sst_floor        = -1.0e30
+
+    sic_kind         = 0
+    sic_file         = ""
+    sic_varname      = "sic"
+    sic_lon_name     = "longitude"
+    sic_lat_name     = "latitude"
+    sic_is_monthly   = .TRUE.
+    sic_itime        = 1
+    sic_value        = 0.0
+    sic_scale        = 1.0
+    sic_floor        = -1.0e30
+
+    t_ice_sfc_kind       = 0
+    t_ice_sfc_file       = ""
+    t_ice_sfc_varname    = ""
+    t_ice_sfc_lon_name   = "longitude"
+    t_ice_sfc_lat_name   = "latitude"
+    t_ice_sfc_is_monthly = .FALSE.
+    t_ice_sfc_itime      = 1
+    t_ice_sfc_value      = 0.0
+    t_ice_sfc_scale      = 1.0
+    t_ice_sfc_floor      = -1.0e30
+
+    t_skin_land_kind       = 0
+    t_skin_land_file       = ""
+    t_skin_land_varname    = ""
+    t_skin_land_lon_name   = "longitude"
+    t_skin_land_lat_name   = "latitude"
+    t_skin_land_is_monthly = .FALSE.
+    t_skin_land_itime      = 1
+    t_skin_land_value      = 0.0
+    t_skin_land_scale      = 1.0
+    t_skin_land_floor      = -1.0e30
+
+    q_skin_land_kind       = 0
+    q_skin_land_file       = ""
+    q_skin_land_varname    = ""
+    q_skin_land_lon_name   = "longitude"
+    q_skin_land_lat_name   = "latitude"
+    q_skin_land_is_monthly = .FALSE.
+    q_skin_land_itime      = 1
+    q_skin_land_value      = 0.0
+    q_skin_land_scale      = 1.0
+    q_skin_land_floor      = -1.0e30
+
+    albedo_kind       = 0
+    albedo_file       = ""
+    albedo_varname    = "fal"
+    albedo_lon_name   = "longitude"
+    albedo_lat_name   = "latitude"
+    albedo_is_monthly = .TRUE.
+    albedo_itime      = 1
+    albedo_value      = 0.06
+    albedo_scale      = 1.0
+    albedo_floor      = -1.0e30
+
+    z0m_kind       = 0
+    z0m_file       = ""
+    z0m_varname    = ""
+    z0m_lon_name   = "longitude"
+    z0m_lat_name   = "latitude"
+    z0m_is_monthly = .FALSE.
+    z0m_itime      = 1
+    z0m_value      = 1.0e-4
+    z0m_scale      = 1.0
+    z0m_floor      = -1.0e30
+
+    phis_kind       = 0
+    phis_file       = ""
+    phis_varname    = "z"
+    phis_lon_name   = "longitude"
+    phis_lat_name   = "latitude"
+    phis_is_monthly = .FALSE.
+    phis_itime      = 1
+    phis_value      = 0.0
+    phis_scale      = 1.0
+    phis_floor      = -1.0e30
+
+    lsm_kind       = 0
+    lsm_file       = ""
+    lsm_varname    = "lsm"
+    lsm_lon_name   = "longitude"
+    lsm_lat_name   = "latitude"
+    lsm_is_monthly = .FALSE.
+    lsm_itime      = 1
+    lsm_value      = 0.0
+    lsm_scale      = 1.0
+    lsm_floor      = -1.0e30
+
+    dust_kind       = 0
+    dust_file       = ""
+    dust_varname    = "dust_ot"
+    dust_lon_name   = "lon"
+    dust_lat_name   = "lat"
+    dust_is_monthly = .TRUE.
+    dust_itime      = 1
+    dust_value      = 0.0
+    dust_scale      = 1.0
+    dust_floor      = 0.0
+
+    so4_kind       = 0
+    so4_file       = ""
+    so4_varname    = "so4"
+    so4_lon_name   = "lon"
+    so4_lat_name   = "lat"
+    so4_is_monthly = .FALSE.
+    so4_itime      = 1
+    so4_value      = 0.0
+    so4_scale      = 1.0
+    so4_floor      = 0.0
+
+    o3_kind       = 0
+    o3_file       = ""
+    o3_varname    = ""
+    o3_lon_name   = "longitude"
+    o3_lat_name   = "latitude"
+    o3_is_monthly = .FALSE.
+    o3_itime      = 1
+    o3_value      = 0.0
+    o3_scale      = 1.0
+    o3_floor      = -1.0e30
+
+    ! Scalar (year-boundary) fields. FILE readers for these are Phase C;
+    ! Wave 2 accepts the type only, with kind = 0 (CONSTANT) as the default.
+    co2_kind  = 0
+    co2_value = 280.0
+    co2_file  = ""
+    co2_year  = 2000
+
+    ch4_kind  = 0
+    ch4_value = 700.0
+    ch4_file  = ""
+    ch4_year  = 2000
+
+    n2o_kind  = 0
+    n2o_value = 270.0
+    n2o_file  = ""
+    n2o_year  = 2000
+
+    time_bp_kind  = 0
+    time_bp_value = 0.0
+    time_bp_file  = ""
+    time_bp_year  = 2000
+
+    tsi_kind  = 0
+    tsi_value = 1365.0
+    tsi_file  = ""
+    tsi_year  = 2000
+/

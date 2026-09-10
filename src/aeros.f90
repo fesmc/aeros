@@ -43,6 +43,9 @@ module aeros
     use aeros_timestep, only : aeros_timestep_class, aeros_timestep_init, &
                                 aeros_timestep_end, aeros_timestep_step, &
                                 aeros_timestep_diagnose, aeros_timestep_print
+    use aeros_boundary, only : aeros_boundary_t, aeros_boundary_load, &
+                                aeros_boundary_end
+    use aeros_diag_acc, only : aeros_diag_acc_t
 
     implicit none
 
@@ -55,6 +58,19 @@ module aeros
         type(aeros_vgrid_class)    :: vgrid
         type(aeros_state_class)    :: now
         type(aeros_timestep_class) :: ts
+
+        ! Boundary providers (docs/coupling_api.md sec 7). Populated by
+        ! aeros_boundary_load in aeros_init; every 2D provider's `buffer` is
+        ! allocated on the model grid. Wave-2 addition; physics consumers
+        ! are wired in Wave 3 (rce_long's sst_clim, aeros_land's albedo_clim,
+        ! aeros_radiation's dust_clim / so4_map, aeros_topography's phis_full).
+        type(aeros_boundary_t) :: bounds
+
+        ! Library-side diagnostic accumulators (docs/coupling_api.md sec. 5,
+        ! 6.2, 6.3). Wave-2 addition: an empty container on a fresh init.
+        ! rce_long drives its own local dacc through the same type today; Wave
+        ! 3 will call the aeros_diag_acc lifecycle from library entry points.
+        type(aeros_diag_acc_t) :: diag_acc
 
         real(wp) :: time                  ! current model time [yr]
         real(wp) :: time_init             ! time at aeros_init [yr]
@@ -106,6 +122,14 @@ contains
 
         call aeros_timestep_init(ams%ts, ams%par, ams%pool, ams%grd, ams%vgrid, filename, &
                                     defaults_file=defaults_file)
+
+        ! Boundary providers (Wave-2 addition). Load the &boundary namelist
+        ! group and allocate every 2D provider's buffer on the model grid.
+        ! Consumers are wired in Wave 3; the default kind is BC_CONSTANT with
+        ! value=0, so a driver that doesn't populate the group leaves the
+        ! buffers at zero and the pre-Wave-2 code paths (which don't read
+        ! ams%bounds yet) are unaffected.
+        call aeros_boundary_load(ams%bounds, filename, ams%grd, defaults_file=defaults_file)
 
         ! Initial condition. A resting isothermal atmosphere over a flat
         ! surface -- the only state the dry core can be started from at M1
@@ -246,6 +270,7 @@ contains
 
         type(aeros_class), intent(inout) :: ams
 
+        call aeros_boundary_end(ams%bounds)
         call aeros_timestep_end(ams%ts)
         call aeros_state_end(ams%now)
         call aeros_vgrid_end(ams%vgrid)
