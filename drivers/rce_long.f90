@@ -524,6 +524,7 @@ contains
         real(wp), allocatable :: t_o(:,:,:), u_o(:,:,:), v_o(:,:,:), rh_o(:,:,:)
         real(wp), allocatable :: sst_o(:,:), pr_o(:,:), t2m_o(:,:,:), tlow_o(:,:,:)
         real(wp), allocatable :: pr2d_o(:,:,:), z500_o(:,:,:), vlow_o(:,:,:), evap_o(:,:,:), shf_o(:,:,:)
+        real(wp), allocatable :: prcv_o(:,:), prcd_o(:,:), prcv2d_o(:,:,:), prcd2d_o(:,:,:)
         real(wp), allocatable :: cf_o(:,:,:), skin_o(:,:,:), lwd_o(:,:,:), olr_o(:,:,:), &
                                  olrcs_o(:,:,:), cover_o(:,:,:)
         real(wp), allocatable :: vt_o(:,:,:), vq_o(:,:,:), eke_o(:,:,:), &
@@ -539,6 +540,8 @@ contains
                  t2m_o(ams%grd%nlon,ams%grd%nlat,NMON), tlow_o(ams%grd%nlon,ams%grd%nlat,NMON), pr2d_o(ams%grd%nlon,ams%grd%nlat,NMON), &
                  z500_o(ams%grd%nlon,ams%grd%nlat,NMON), vlow_o(ams%grd%nlon,ams%grd%nlat,NMON), &
                  evap_o(ams%grd%nlon,ams%grd%nlat,NMON), shf_o(ams%grd%nlon,ams%grd%nlat,NMON))
+        allocate(prcv_o(ams%grd%nlat,NMON), prcd_o(ams%grd%nlat,NMON), &
+                 prcv2d_o(ams%grd%nlon,ams%grd%nlat,NMON), prcd2d_o(ams%grd%nlon,ams%grd%nlat,NMON))
         allocate(mr_o(ams%grd%nlat,ams%par%nlev,NMON), mrt_o(ams%grd%nlat,ams%par%nlev,NMON), mrq_o(ams%grd%nlat,ams%par%nlev,NMON))
         allocate(mr2_o(ams%grd%nlon,ams%grd%nlat,NMON))
         allocate(swn_o(ams%grd%nlon,ams%grd%nlat,NMON), swup_o(ams%grd%nlon,ams%grd%nlat,NMON))
@@ -563,6 +566,10 @@ contains
                 t2m_o(:,:,m) = ams%diag_acc%mon_t2m(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
                 tlow_o(:,:,m) = ams%diag_acc%mon_tlow(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
                 pr2d_o(:,:,m) = ams%diag_acc%mon_pr2d(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                prcv_o(:,m)     = ams%diag_acc%mon_prc_cnv(:,m)   /real(ams%diag_acc%mon_cnt(m),wp)
+                prcd_o(:,m)     = ams%diag_acc%mon_prc_cnd(:,m)   /real(ams%diag_acc%mon_cnt(m),wp)
+                prcv2d_o(:,:,m) = ams%diag_acc%mon_prc_cnv2d(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
+                prcd2d_o(:,:,m) = ams%diag_acc%mon_prc_cnd2d(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
                 z500_o(:,:,m) = ams%diag_acc%mon_z500(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
                 vlow_o(:,:,m) = ams%diag_acc%mon_vlow(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
                 evap_o(:,:,m) = ams%diag_acc%mon_evap(:,:,m)/real(ams%diag_acc%mon_cnt(m),wp)
@@ -608,6 +615,8 @@ contains
                 t_o(:,:,m) = MISS; u_o(:,:,m) = MISS; v_o(:,:,m) = MISS
                 rh_o(:,:,m) = MISS; sst_o(:,m) = MISS; pr_o(:,m) = MISS
                 t2m_o(:,:,m) = MISS; tlow_o(:,:,m) = MISS; pr2d_o(:,:,m) = MISS; z500_o(:,:,m) = MISS
+                prcv_o(:,m) = MISS; prcd_o(:,m) = MISS
+                prcv2d_o(:,:,m) = MISS; prcd2d_o(:,:,m) = MISS
             end if
         end do
         call nc_create(fname)
@@ -633,6 +642,14 @@ contains
             units="K", long_name="monthly lowest-level air temperature (~350 m)")
         call nc_write(fname, "precip2d", pr2d_o, dim1="lon", dim2="lat", dim3="month", &
             units="mm/day", long_name="monthly precipitation")
+        call nc_write(fname, "prc_cnv", prcv_o, dim1="lat", dim2="month", &
+            units="mm/day", long_name="monthly zonal-mean convective precipitation (SBM)")
+        call nc_write(fname, "prc_cnd", prcd_o, dim1="lat", dim2="month", &
+            units="mm/day", long_name="monthly zonal-mean large-scale precipitation (condensation)")
+        call nc_write(fname, "prc_cnv2d", prcv2d_o, dim1="lon", dim2="lat", dim3="month", &
+            units="mm/day", long_name="monthly convective precipitation (SBM)")
+        call nc_write(fname, "prc_cnd2d", prcd2d_o, dim1="lon", dim2="lat", dim3="month", &
+            units="mm/day", long_name="monthly large-scale precipitation (condensation)")
         call nc_write(fname, "z500", z500_o, dim1="lon", dim2="lat", dim3="month", &
             units="m", long_name="monthly 500 hPa geopotential height (hydrostatic, log-p interpolated)")
         call nc_write(fname, "vlow", vlow_o, dim1="lon", dim2="lat", dim3="month", &
@@ -686,7 +703,7 @@ contains
         deallocate(latout, lonout, levout, monout, t_o, u_o, v_o, rh_o, sst_o, pr_o, t2m_o, tlow_o, &
                    pr2d_o, z500_o, vlow_o, evap_o, shf_o, cf_o, skin_o, lwd_o, olr_o, &
                    olrcs_o, cover_o, vt_o, vq_o, eke_o, vts_o, vqs_o, ekes_o, mr_o, mrt_o, mrq_o, mr2_o, swn_o, swup_o, &
-                   uv_o, uvs_o)
+                   uv_o, uvs_o, prcv_o, prcd_o, prcv2d_o, prcd2d_o)
     end subroutine dump_monthly
     subroutine read_config()
         ! The driver's own `&rce` keys. Every one is optional in the case file

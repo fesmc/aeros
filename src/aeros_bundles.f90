@@ -88,6 +88,9 @@ module aeros_bundles
         real(wp), allocatable :: rain(:,:)         ! liquid precip [kg m-2 s-1]
         real(wp), allocatable :: snow(:,:)         ! solid  precip [kg m-2 s-1]
         real(wp), allocatable :: prc_total(:,:)    ! rain + snow  [kg m-2 s-1]
+        ! Convective vs large-scale precip breakdown; sum equals prc_total.
+        real(wp), allocatable :: prc_cnv(:,:)      ! SBM convective precip [kg m-2 s-1]
+        real(wp), allocatable :: prc_cnd(:,:)      ! large-scale precip    [kg m-2 s-1]
 
         ! Grid-mean climate diagnostics (SESAM-style).
         real(wp), allocatable :: tam(:,:)          ! column-mean T [K]

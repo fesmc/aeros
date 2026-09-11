@@ -87,6 +87,10 @@ module aeros_diag_acc
         real(wp), allocatable :: mon_mr(:,:,:), mon_mrt(:,:,:), mon_mrq(:,:,:)
         ! (nlat,NMON) zonal-mean surface fields
         real(wp), allocatable :: mon_sst(:,:), mon_pr(:,:)
+        ! Per-scheme precip breakdown: convective (SBM) and large-scale
+        ! (condensation) fractions of the total. Sum equals mon_pr / mon_pr2d.
+        real(wp), allocatable :: mon_prc_cnv(:,:), mon_prc_cnd(:,:)
+        real(wp), allocatable :: mon_prc_cnv2d(:,:,:), mon_prc_cnd2d(:,:,:)
         ! (nlon,nlat,NMON) 2D surface / near-surface fields
         real(wp), allocatable :: mon_t2m(:,:,:), mon_tlow(:,:,:)
         real(wp), allocatable :: mon_pr2d(:,:,:), mon_z500(:,:,:)
@@ -245,6 +249,10 @@ contains
         allocate(acc%mon_t2m (nlon,nlat,NM));   acc%mon_t2m  = 0.0_wp
         allocate(acc%mon_tlow(nlon,nlat,NM));   acc%mon_tlow = 0.0_wp
         allocate(acc%mon_pr2d(nlon,nlat,NM));   acc%mon_pr2d = 0.0_wp
+        allocate(acc%mon_prc_cnv(nlat,NM));     acc%mon_prc_cnv = 0.0_wp
+        allocate(acc%mon_prc_cnd(nlat,NM));     acc%mon_prc_cnd = 0.0_wp
+        allocate(acc%mon_prc_cnv2d(nlon,nlat,NM)); acc%mon_prc_cnv2d = 0.0_wp
+        allocate(acc%mon_prc_cnd2d(nlon,nlat,NM)); acc%mon_prc_cnd2d = 0.0_wp
         allocate(acc%mon_z500(nlon,nlat,NM));   acc%mon_z500 = 0.0_wp
         allocate(acc%mon_vlow(nlon,nlat,NM));   acc%mon_vlow = 0.0_wp
         allocate(acc%mon_evap(nlon,nlat,NM));   acc%mon_evap = 0.0_wp
@@ -319,6 +327,10 @@ contains
         if (allocated(acc%mon_t2m))  acc%mon_t2m  = 0.0_wp
         if (allocated(acc%mon_tlow)) acc%mon_tlow = 0.0_wp
         if (allocated(acc%mon_pr2d)) acc%mon_pr2d = 0.0_wp
+        if (allocated(acc%mon_prc_cnv))   acc%mon_prc_cnv   = 0.0_wp
+        if (allocated(acc%mon_prc_cnd))   acc%mon_prc_cnd   = 0.0_wp
+        if (allocated(acc%mon_prc_cnv2d)) acc%mon_prc_cnv2d = 0.0_wp
+        if (allocated(acc%mon_prc_cnd2d)) acc%mon_prc_cnd2d = 0.0_wp
         if (allocated(acc%mon_z500)) acc%mon_z500 = 0.0_wp
         if (allocated(acc%mon_vlow)) acc%mon_vlow = 0.0_wp
         if (allocated(acc%mon_evap)) acc%mon_evap = 0.0_wp
@@ -399,6 +411,10 @@ contains
         if (allocated(acc%mon_t2m))  deallocate(acc%mon_t2m)
         if (allocated(acc%mon_tlow)) deallocate(acc%mon_tlow)
         if (allocated(acc%mon_pr2d)) deallocate(acc%mon_pr2d)
+        if (allocated(acc%mon_prc_cnv))   deallocate(acc%mon_prc_cnv)
+        if (allocated(acc%mon_prc_cnd))   deallocate(acc%mon_prc_cnd)
+        if (allocated(acc%mon_prc_cnv2d)) deallocate(acc%mon_prc_cnv2d)
+        if (allocated(acc%mon_prc_cnd2d)) deallocate(acc%mon_prc_cnd2d)
         if (allocated(acc%mon_z500)) deallocate(acc%mon_z500)
         if (allocated(acc%mon_vlow)) deallocate(acc%mon_vlow)
         if (allocated(acc%mon_evap)) deallocate(acc%mon_evap)
@@ -681,6 +697,7 @@ contains
         integer  :: ii, jj, kk
         real(wp) :: tzm(grd%nlat,par%nlev), uzm(grd%nlat,par%nlev), vzm(grd%nlat,par%nlev), rzm(grd%nlat,par%nlev)
         real(wp) :: sstz(grd%nlat), prz(grd%nlat)
+        real(wp) :: prcvz(grd%nlat), prcdz(grd%nlat), prcv_ij, prcd_ij
         real(wp) :: phif(par%nlev), phih, alph
         real(wp) :: cfz(grd%nlat,par%nlev), cfc(par%nlev), clwc(par%nlev), ciwc(par%nlev)
         real(wp) :: qzm(grd%nlat,par%nlev), vtzm(grd%nlat,par%nlev), vqzm(grd%nlat,par%nlev), uvzm(grd%nlat,par%nlev)
@@ -701,6 +718,7 @@ contains
         rnlon = real(grd%nlon, wp)
         tzm = 0.0_wp; uzm = 0.0_wp; vzm = 0.0_wp; rzm = 0.0_wp
         sstz = 0.0_wp; prz = 0.0_wp; cfz = 0.0_wp
+        prcvz = 0.0_wp; prcdz = 0.0_wp
         qzm = 0.0_wp; vtzm = 0.0_wp; vqzm = 0.0_wp; u2zm = 0.0_wp; v2zm = 0.0_wp; uvzm = 0.0_wp
         mrzm = 0.0_wp; mrtzm = 0.0_wp; mrqzm = 0.0_wp
         do jj = 1, grd%nlat
@@ -736,6 +754,12 @@ contains
                     pr_ij = (ts%cnv%precip(ii,jj) + ts%cnd%precip(ii,jj))*86400.0_wp
                     prz(jj) = prz(jj) + pr_ij
                     acc%mon_pr2d(ii,jj,imon) = acc%mon_pr2d(ii,jj,imon) + pr_ij
+                    prcv_ij = ts%cnv%precip(ii,jj)*86400.0_wp
+                    prcd_ij = ts%cnd%precip(ii,jj)*86400.0_wp
+                    prcvz(jj) = prcvz(jj) + prcv_ij
+                    prcdz(jj) = prcdz(jj) + prcd_ij
+                    acc%mon_prc_cnv2d(ii,jj,imon) = acc%mon_prc_cnv2d(ii,jj,imon) + prcv_ij
+                    acc%mon_prc_cnd2d(ii,jj,imon) = acc%mon_prc_cnd2d(ii,jj,imon) + prcd_ij
                 end if
                 phih = ts%wrk%phis(ii,jj)
                 do kk = par%nlev, 1, -1
@@ -761,7 +785,9 @@ contains
         acc%mon_v(:,:,imon)  = acc%mon_v(:,:,imon)  + vzm/rnlon
         acc%mon_rh(:,:,imon) = acc%mon_rh(:,:,imon) + rzm/rnlon
         acc%mon_sst(:,imon)  = acc%mon_sst(:,imon)  + sstz/rnlon
-        acc%mon_pr(:,imon)   = acc%mon_pr(:,imon)   + prz/rnlon
+        acc%mon_pr(:,imon)      = acc%mon_pr(:,imon)      + prz/rnlon
+        acc%mon_prc_cnv(:,imon) = acc%mon_prc_cnv(:,imon) + prcvz/rnlon
+        acc%mon_prc_cnd(:,imon) = acc%mon_prc_cnd(:,imon) + prcdz/rnlon
         acc%mon_cf(:,:,imon) = acc%mon_cf(:,:,imon) + cfz/rnlon
         acc%mon_vt(:,:,imon)  = acc%mon_vt(:,:,imon)  + (vtzm - vzm*tzm/rnlon)/rnlon
         acc%mon_uv(:,:,imon)  = acc%mon_uv(:,:,imon)  + (uvzm - uzm*vzm/rnlon)/rnlon

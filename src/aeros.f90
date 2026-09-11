@@ -878,6 +878,8 @@ contains
         if (allocated(ams%ts%cnv%precip) .and. allocated(ams%ts%cnd%precip)) then
             allocate(exports%prc_total(nlon,nlat))
             exports%prc_total = ams%ts%cnv%precip + ams%ts%cnd%precip
+            allocate(exports%prc_cnv(nlon,nlat)); exports%prc_cnv = ams%ts%cnv%precip
+            allocate(exports%prc_cnd(nlon,nlat)); exports%prc_cnd = ams%ts%cnd%precip
         end if
 
         ! Grid-mean cloud cover (TOA, max-overlap) from radiation cache.
