@@ -157,13 +157,17 @@
     seed_asym = 0.0
 
     ! SHTns setup: "quick" skips the auto-tuning (~20% slower transforms) and
-    ! is the reproducible choice -- the same numbers in any directory, on any
-    ! run. "cache" auto-tunes once per working directory and saves/loads the
-    ! tuning, and is NOT self-reproducible: a reload can pick a different
-    ! algorithm than the fresh tune, and the two modes differ at round-off in
-    ! every transform. "quick" is the default (rce_long's choice, Wave 4a.2);
-    ! par/held_suarez.nml pins "cache" for its bit-for-bit history.
-    sht_mode = "quick"
+    ! "cache" auto-tunes SHTns once per (trunc, nlon, nlat) working directory
+    ! and saves/loads the tuning; the tuner picks measurably tighter transforms
+    ! and reproduces the pre-refactor climatology (annual max [u] within
+    ! 0.3 m/s), so it is the default. Nondeterminism: the FIRST build at a
+    ! given resolution auto-tunes and writes the cache; subsequent builds read
+    ! it and get slightly different round-off (~1e-13 at T31 analysis, per
+    ! Wave 4a.1's SHT test). Ship or regenerate the cache file to lock a
+    ! bit-for-bit history. "quick" disables the auto-tune -- the same numbers
+    ! before and after any cache file exists, at the cost of ~2 m/s on the
+    ! T21L6 annual-mean jet.
+    sht_mode = "cache"
 
     ! Held & Suarez (1994) idealized forcing -- the M1 validation benchmark
     ! (docs/design.md section 7). .FALSE. leaves the bare adiabatic core, which
